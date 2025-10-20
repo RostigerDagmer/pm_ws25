@@ -2,3 +2,4 @@
 *.venv
 *.env
 *.obsidian
+*__pycache__

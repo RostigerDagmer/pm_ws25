@@ -138,3 +138,46 @@ This lets you mix label-based and structure-based heuristics without losing guar
 | Hybrid (max of others)            | ✅               | ✅                     | ✅                     | Medium–Strong              |
 | Learned (unconstrained)           | ❌ (usually)     | ✅                     | ✅                     | Potentially strong, unsafe |
 
+
+
+
+# Integration
+
+All heuristic behavior is controlled by functions in:  
+`pm4py/objects/petri_net/utils/align_utils.py`
+
+Look there for:
+
+```python
+__compute_exact_heuristic_new_version(...)
+__derive_heuristic(...)
+__trust_solution(...)
+```
+
+That’s the layer you’d edit or extend if you want to compare “different heuristics.”
+
+For example, you might create:
+
+```python
+__compute_simple_heuristic_remaining_tokens(...)
+```
+
+or
+
+```python
+__compute_pessimistic_heuristic(...)
+```
+
+Then expose a switch in parameters:
+
+```python
+heuristic_variant = exec_utils.get_param_value("heuristic_variant", parameters, "state_equation")
+if heuristic_variant == "tokens":
+    h = compute_token_distance(sync_net, current_marking, fin)
+elif heuristic_variant == "trace_length":
+    h = (remaining_trace_len * min_cost)
+else:
+    h, x = utils.__compute_exact_heuristic_new_version(...)
+```
+
+That’s the clean insertion point.
