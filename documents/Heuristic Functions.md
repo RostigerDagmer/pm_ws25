@@ -181,3 +181,15 @@ else:
 ```
 
 That’s the clean insertion point.
+
+**Alternatively**: Monkey-patch (current)
+
+```python
+import pm4py.objects.petri_net.utils.align_utils as align_utils
+
+def my_derive_heuristic(...) -> ...
+def exact_heuristic(...) -> ...
+
+align_utils.__derive_heuristic = my_derive_heuristic
+align_utils.__compute_exact_heuristic_new_version = exact_heuristic
+```
