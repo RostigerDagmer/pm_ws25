@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>BPMN + Auto-Layout (ES Module)</title>
+
+  <!-- BPMN.js core styles -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/bpmn-js@9.0.3/dist/assets/diagram-js.css"
+  />
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/bpmn-js@9.0.3/dist/assets/bpmn-font/css/bpmn.css"
+  />
+
+  <style>
+    #canvas {
+      width: 100%;
+      height: 600px;
+      border: 1px solid #ccc;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="canvas"></div>
+
+  <!-- everything in one module -->
+  <script type="module">
+    // 1) Import the bpmn-modeler ESM build directly from the CDN
+    import BpmnJS from 'https://cdn.skypack.dev/bpmn-js@9.0.3/dist/bpmn-modeler.development.js';
+
+    // 2) Import the auto-layout function from Skypack
+    //    (Skypack will pull the ESM entry from the published package)
+    import { layoutProcess } from 'https://cdn.skypack.dev/bpmn-auto-layout@1.0.0';
+
+    // 3) Some raw BPMNXML without any DI (diagram) data
+    const rawXml = `REPLACE`;
+
+    // 4) Create the modeler once
+    const modeler = new BpmnJS({
+      container: '#canvas'
+    });
+
+    // 5) Lay it out, then import into the modeler
+    layoutProcess(rawXml)
+      .then(layoutedXml => modeler.importXML(layoutedXml))
+      .then(({ warnings }) => {
+        if (warnings.length) {
+          console.warn('Import completed with warnings:', warnings);
+        } else {
+          console.log('Rendered with auto-layout!');
+        }
+      })
+      .catch(err => {
+        console.error('Oops, something went wrong:', err);
+      });
+  </script>
+
+</body>
+</html>

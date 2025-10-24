@@ -1,4 +1,0 @@
-[submodule "pm4py"]
-	path = pm4py
-	url = https://github.com/RostigerDagmer/pm4py.git
-	branch = dev

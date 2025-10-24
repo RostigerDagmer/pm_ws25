@@ -1,0 +1,15 @@
+numpy
+pandas
+deprecation
+networkx
+graphviz
+wheel
+setuptools
+intervaltree
+lxml
+matplotlib
+pydotplus
+pytz
+scipy
+tqdm
+cvxopt;python_version<'3.14'
