@@ -1,0 +1,2 @@
+torch==2.9.0+cu130 --extra-index-url https://download.pytorch.org/whl/cu130
+torchvision==0.24.0+cu130 --extra-index-url https://download.pytorch.org/whl/cu130

@@ -1,0 +1,50 @@
+sources:
+  - source: https://doi.org/10.4121/uuid:d06aff4b-79f0-45e6-8ec8-e19730c248f1 # Purchase order handling process (BPI Challenge 2019)
+    files:
+      - https://data.4tu.nl/file/35ed7122-966a-484e-a0e1-749b64e3366d/864493d1-3a58-47f6-ad6f-27f95f995828
+  - source: http://dx.doi.org/10.4121/uuid:9b99a146-51b5-48df-aa70-288a76c82ec4 # Purchase order handling process (BPI Challenge 2019)
+    files:
+      - https://data.4tu.nl/file/28ce6bee-7cd3-4cd8-bccd-f9226cc15f41/9dd5d865-5edf-4387-bd27-64f11ef19f9a
+      - https://data.4tu.nl/file/28ce6bee-7cd3-4cd8-bccd-f9226cc15f41/3444a221-4537-45ef-86e9-7fa272282ee9
+  - source: http://dx.doi.org/10.4121/uuid:01345ac4-7d1d-426e-92b8-24933a079412 # Click-data for the customers that are logged in to the website (BPI Challenge 2016)
+    files:
+      - https://data.4tu.nl/file/1c51b037-bf30-4c1a-9c50-25d1617a4899/65710417-8249-40db-a47a-dfa4d25bfad4
+      - https://data.4tu.nl/file/1c51b037-bf30-4c1a-9c50-25d1617a4899/25b4cc15-4e86-42de-aa1b-1897833ffd53
+  - source: http://dx.doi.org/10.4121/uuid:2b02709f-9a84-4538-a76a-eb002eacf8d1 # Questions asked by customers (BPI Challenge 2016)
+    files:
+      - https://data.4tu.nl/file/bfb2b689-28d4-47ce-9265-998d91b81657/63ce07c6-4693-4dac-9ad7-63488e2957ec
+  - source: http://dx.doi.org/10.4121/uuid:c3f3ba2d-e81e-4274-87c7-882fa1dbab0d # Messages sent by customers (BPI Challenge 2016)
+    files:
+      - https://data.4tu.nl/file/debf31e0-493e-4848-82f6-10e6630c9b0f/472e83b5-a065-41b7-8551-863a197a3028
+  - source: http://dx.doi.org/10.4121/uuid:e30ba0c8-0039-4835-a493-6e3aa2301d3f # Complaints filed by customers (BPI Challenge 2016)
+    files:
+      - https://data.4tu.nl/file/0a087f36-da3a-49ec-b3d9-38a32e9617ed/46e85564-f795-4199-b179-22b9097f20fc
+  - source: http://dx.doi.org/10.4121/uuid:679b11cf-47cd-459e-a6de-9ca614e25985 # Change log (BPI Challenge 2014)
+    files:
+      - https://data.4tu.nl/file/34216d8a-f054-46d4-bf03-d9352f90967e/68923819-b085-43be-abe2-e084a0f1381f
+      - https://data.4tu.nl/file/34216d8a-f054-46d4-bf03-d9352f90967e/49592bd2-6eb6-4f4a-a885-88b921ebb0d3
+  - source: http://dx.doi.org/10.4121/uuid:3cfa2260-f5c5-44be-afe1-b70d35288d6d # Incident log (BPI Challenge 2014)
+    files:
+      - https://data.4tu.nl/file/a752c1b5-9732-4bbc-8949-bf24581f9034/740deeae-5014-48bf-8c86-4a4c3e0355a9
+  - source: http://dx.doi.org/10.4121/uuid:3d5ae0ce-198c-4b5c-b0f9-60d3035d07bf # Interaction log (BPI Challenge 2014)
+    files:
+      - https://data.4tu.nl/file/f1f0a188-f31a-45af-a7c8-29727b318adf/e5872002-415b-4a37-9377-c82cccae902d
+  - source: http://dx.doi.org/10.4121/uuid:86977bac-f874-49cf-8337-80f26bf5d2ef # Incident activity log (BPI Challenge 2014)
+    files:
+      - https://data.4tu.nl/file/657fb1d6-b4c2-4adc-ba48-ed25bf313025/bd6cfa31-44f8-4542-9bad-f1f70c894728
+  - source: http://dx.doi.org/10.4121/uuid:500573e6-accc-4b0c-9576-aa5468b10cee # Incident management log (BPI Challenge 2013)
+    files:
+      - https://data.4tu.nl/file/0fc5c579-e544-4fab-9143-fab1f5192432/aa51ffbb-25fd-4b5a-b0b8-9aba659b7e8c
+      - https://data.4tu.nl/file/0fc5c579-e544-4fab-9143-fab1f5192432/4f915e5e-c6b0-4f77-8e26-a95bd56f169f
+  - source: http://dx.doi.org/10.4121/uuid:3537c19d-6c64-4b1d-815d-915ab0e479da # Problem management log, open problems (BPI Challenge 2013)
+    files:
+      - https://data.4tu.nl/file/7aafbf5b-97ae-48ba-bd0a-4d973a68cd35/0647ad1a-fa73-4376-bdb4-1b253576c3a1
+      - https://data.4tu.nl/file/7aafbf5b-97ae-48ba-bd0a-4d973a68cd35/a99fee88-7c2e-4f40-826a-26038779efd4
+  - source: http://dx.doi.org/10.4121/uuid:c2c3b154-ab26-4b31-a0e8-8f2350ddac11 # Problem management log, closed problems (BPI Challenge 2013)
+    files:
+      - https://data.4tu.nl/file/1987a2a6-9f5b-4b14-8d26-ab7056b17929/8b99119d-9525-452e-bc8f-236ac76fa9c9
+      - https://data.4tu.nl/file/1987a2a6-9f5b-4b14-8d26-ab7056b17929/847f91ad-0d2e-4b54-af6f-5b618ebf5446
+  - source: http://dx.doi.org/10.4121/uuid:d9769f3d-0ab0-4fb8-803b-0d1120ffcf54 # Anonymized event log of a Dutch Academic Hospital (BPI Challenge 2011)
+    files:
+      - https://data.4tu.nl/file/5ea5bb88-feaa-4e6f-a743-6460a755e05b/6f9640f9-0f1e-44d2-9495-ef9d1bd82218
+      - https://data.4tu.nl/file/5ea5bb88-feaa-4e6f-a743-6460a755e05b/897d8238-e471-4dec-957c-2c6b1462f082
