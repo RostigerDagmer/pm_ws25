@@ -23,3 +23,18 @@ You return a function that takes a trace and returns a tensor of features.
 An example is also in the file of the base class.
 
 
+## Process Model Dataset
+
+A process model dataset takes in any BaseEventLogDataset and induces/discovers process models from that event log.
+You should provide a dictionary of discovery methods for that purpose.
+dataloaders.net.DISCOVERY_METHODS.ALL is a default for all discovery functions contained in pm4py.
+But you can also pass your own.
+You should provide a dictionary of parameter lists, a "parameter grid" for the discovery algorithm.
+All possible permutations of parameters that are valid for a given function will be run.
+**The dataset thus contains all combinations of product DISCOVERY_METHOD x PARAM_GRID**.
+This means the dataset can get quite big... especially if you use the PARAM_GRID.EXTENSIVE default.
+
+TODOs:
+
+    [] caching.
+

@@ -98,7 +98,7 @@ CONSTRUCTION_PARAMS = {
         "rtype": "csv",
         "case_id_col": "CustomerID",
         "timestamp_col": "EventDateTime",
-        "activity_col": "EventType",
+        "activity_col": "Office_U",
         "sep": ";",
     },
     # HEADER:

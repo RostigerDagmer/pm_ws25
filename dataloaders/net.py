@@ -192,7 +192,6 @@ if __name__ == "__main__":
     path = "data/dx.doi.org_10.4121_uuid_c3f3ba2d-e81e-4274-87c7-882fa1dbab0d/BPI2016_Werkmap_Messages.csv"
     log_dataset = CSVEventLogDataset(
         path,
-        # attribute="EventType",
         case_id_col="CustomerID",
         timestamp_col="EventDateTime",
         activity_col="HandlingChannelID",
