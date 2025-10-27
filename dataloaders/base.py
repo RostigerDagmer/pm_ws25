@@ -135,7 +135,6 @@ def make_feature_fn(vocab):
 
 
 if __name__ == "__main__":
-    # You can build the vocab first using pm4py directly
     from dataloaders.xes import XESEventLogDataset
 
     path = "data/dx.doi.org_10.4121_uuid_c2c3b154-ab26-4b31-a0e8-8f2350ddac11/BPI_Challenge_2013_closed_problems.xes"
