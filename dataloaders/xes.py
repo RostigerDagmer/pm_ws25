@@ -12,7 +12,7 @@ class XESEventLogDataset(BaseEventLogDataset):
 
 # Example usage
 if __name__ == "__main__":
-    path = "data/dx.doi.org_10.4121_uuid_d9769f3d-0ab0-4fb8-803b-0d1120ffcf54/Hospital_log.xes"
+    path = "data/d9769f3d-0ab0-4fb8-803b-0d1120ffcf54/Hospital_log.xes"
     dataset = XESEventLogDataset(
         path, attribute="concept:name", feature_fn=make_feature_fn
     )

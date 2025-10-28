@@ -1,10 +1,93 @@
 sources:
+  # THIS IS DIRECTLY COPIED FROM THE processmining.org website... IT DOES NOT SEEM ORGANIZED (5 duplicates between the xes and csv sets).
+  - source: https://data.4tu.nl/datasets/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd # Hospital Billing - Event Log
+    files:
+      - https://data.4tu.nl/file/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/038fef3f-5854-4e6f-82a1-0d32a2c7f163
+      - https://data.4tu.nl/file/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/d27e8a55-d859-4957-8559-72fd5d706acf
+      - https://data.4tu.nl/file/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/28b83e72-375e-4da4-8459-a8506e898edf
+  - source: https://data.4tu.nl/datasets/33632f3c-5c48-40cf-8d8f-2db57f5a6ce7 # Sepsis Cases - Event Log
+    files:
+      - https://data.4tu.nl/file/33632f3c-5c48-40cf-8d8f-2db57f5a6ce7/c3729698-8f67-4c12-8fda-20983a0c2a65
+      - https://data.4tu.nl/file/33632f3c-5c48-40cf-8d8f-2db57f5a6ce7/a217f40c-d5c3-4205-a8ec-589d874e91bb
+      - https://data.4tu.nl/file/33632f3c-5c48-40cf-8d8f-2db57f5a6ce7/643dccf2-985a-459e-835c-a82bce1c0339
+  - source: https://data.4tu.nl/articles/dataset/Road_Traffic_Fine_Management_Process/12683249 # Road Traffic Fine Management Process
+    files:
+      - https://data.4tu.nl/file/806acd1a-2bf2-4e39-be21-69b8cad10909/fde7675f-d4a5-444a-867e-dfc84fc02923
+      - https://data.4tu.nl/file/806acd1a-2bf2-4e39-be21-69b8cad10909/b234b06c-4d4f-4055-9f14-6218e3906d82
+    # BPIC 2020 (BPI Challenge 2020)
+  - source: https://data.4tu.nl/datasets/6a0a26d2-82d0-4018-b1cd-89afb0e8627f # BPI Challenge 2020: Domestic Declarations
+    files:
+      - https://data.4tu.nl/file/6a0a26d2-82d0-4018-b1cd-89afb0e8627f/e3c9b5c4-7c30-4418-bd49-4d0f69f55ae4
+      - https://data.4tu.nl/file/6a0a26d2-82d0-4018-b1cd-89afb0e8627f/6eeb0328-f991-48c7-95f2-35033504036e
+  - source: https://data.4tu.nl/datasets/91fd1fa8-4df4-4b1a-9a3f-0116c412378f # BPI Challenge 2020: International Declarations
+    files:
+      - https://data.4tu.nl/file/91fd1fa8-4df4-4b1a-9a3f-0116c412378f/32f35ec9-8cd5-4de7-9921-6c2acaf34751
+      - https://data.4tu.nl/file/91fd1fa8-4df4-4b1a-9a3f-0116c412378f/d45ee7dc-952c-4885-b950-4579a91ef426
+  - source: https://data.4tu.nl/datasets/fb84cf2d-166f-4de2-87be-62ee317077e5 # BPI Challenge 2020: Prepaid Travel Costs
+    files:
+      - https://data.4tu.nl/file/fb84cf2d-166f-4de2-87be-62ee317077e5/aa7a0b97-4509-4419-abc5-c47710331b1f
+      - https://data.4tu.nl/file/fb84cf2d-166f-4de2-87be-62ee317077e5/612068f6-14d0-4a82-b118-1b51db52e73a
+  - source: https://data.4tu.nl/datasets/a6f651a7-5ce0-4bc6-8be1-a7747effa1cc # BPI Challenge 2020: Request For Payment
+    files:
+      - https://data.4tu.nl/file/a6f651a7-5ce0-4bc6-8be1-a7747effa1cc/46e8be01-a707-477e-bf73-7dc18cdd67f5
+      - https://data.4tu.nl/file/a6f651a7-5ce0-4bc6-8be1-a7747effa1cc/7b1f2e56-e4a8-43ee-9a09-6e64f45a1a98
+  - source: https://data.4tu.nl/datasets/db35afac-2133-40f3-a565-2dc77a9329a3 # BPI Challenge 2020: Travel Permit Data
+    files:
+      - https://data.4tu.nl/file/db35afac-2133-40f3-a565-2dc77a9329a3/a4c83555-5cc3-4ec0-baa0-ba8b3a4dc221
+      - https://data.4tu.nl/file/db35afac-2133-40f3-a565-2dc77a9329a3/12b48cc1-18a8-4089-ae01-7078fc5e8f90
   - source: https://doi.org/10.4121/uuid:d06aff4b-79f0-45e6-8ec8-e19730c248f1 # Purchase order handling process (BPI Challenge 2019)
     files:
       - https://data.4tu.nl/file/35ed7122-966a-484e-a0e1-749b64e3366d/864493d1-3a58-47f6-ad6f-27f95f995828
-  - source: http://dx.doi.org/10.4121/uuid:9b99a146-51b5-48df-aa70-288a76c82ec4 # Purchase order handling process (BPI Challenge 2019)
+  - source: https://doi.org/10.4121/uuid:3301445f-95e8-4ff0-98a4-901f1f204972 # Payment process of Common Agricultural Policy (BPI Challenge 2018)
     files:
-      - https://data.4tu.nl/file/28ce6bee-7cd3-4cd8-bccd-f9226cc15f41/9dd5d865-5edf-4387-bd27-64f11ef19f9a
+      - https://data.4tu.nl/file/443451fd-d38a-4464-88b4-0fc641552632/6b81389c-b26a-4a05-ac4b-67fa4b77ab51
+      - https://data.4tu.nl/file/443451fd-d38a-4464-88b4-0fc641552632/cd4fd2b8-6c95-47ae-aad9-dc1a085db364
+  - source: https://doi.org/10.4121/uuid:5f3067df-f10b-45da-b98b-86ae4c7a310b # Loan application process of a Dutch financial institute (BPI Challenge 2017)
+    files:
+      - https://data.4tu.nl/file/34c3f44b-3101-4ea9-8281-e38905c68b8d/23d04d82-76d6-4ca4-97ed-508e6fffc119
+      - https://data.4tu.nl/file/34c3f44b-3101-4ea9-8281-e38905c68b8d/f3aec4f7-d52c-4217-82f4-57d719a8298c
+  - source: http://dx.doi.org/10.4121/uuid:a0addfda-2044-4541-a450-fdcc9fe16d17 # Municipality log 1 (BPI Challenge 2015)
+    files:
+      - https://data.4tu.nl/file/6f35269e-4ce7-4bc4-9abb-b3cea04cad00/15585464-400a-4347-954f-88ced62d9100
+      - https://data.4tu.nl/file/6f35269e-4ce7-4bc4-9abb-b3cea04cad00/2c8d5827-3e08-471d-98e2-6ffdec92f958
+  - source: http://dx.doi.org/10.4121/uuid:63a8435a-077d-4ece-97cd-2c76d394d99c # Municipality log 2 (BPI Challenge 2015)
+    files:
+      - https://data.4tu.nl/file/372d0cad-3fb1-4627-8ea9-51a09923d331/5840e3ea-75a6-48c5-b7fb-931f779a2392
+      - https://data.4tu.nl/file/372d0cad-3fb1-4627-8ea9-51a09923d331/d653a8ec-4cd1-4029-8b61-6cfde4f4a666
+  - source: http://dx.doi.org/10.4121/uuid:ed445cdd-27d5-4d77-a1f7-59fe7360cfbe # Municipality log 3 (BPI Challenge 2015)
+    files:
+      - https://data.4tu.nl/file/d6741425-5f62-4a59-92c5-08bae64b4611/69dd5b25-5d67-401d-98de-f1949b6d59f0
+      - https://data.4tu.nl/file/d6741425-5f62-4a59-92c5-08bae64b4611/21b574ab-02ba-4dfb-badc-bb46ce0edc44
+  - source: http://dx.doi.org/10.4121/uuid:679b11cf-47cd-459e-a6de-9ca614e25985 # Municipality log 4 (BPI Challenge 2015)
+    files:
+      - https://data.4tu.nl/file/34216d8a-f054-46d4-bf03-d9352f90967e/49592bd2-6eb6-4f4a-a885-88b921ebb0d3
+      - https://data.4tu.nl/file/34216d8a-f054-46d4-bf03-d9352f90967e/68923819-b085-43be-abe2-e084a0f1381f
+  - source: http://dx.doi.org/10.4121/uuid:b32c6fe5-f212-4286-9774-58dd53511cf8 # Municipality log 5 (BPI Challenge 2015)
+    files:
+      - https://data.4tu.nl/file/32b70553-0765-4808-b155-aa5319802c8a/dc41ef51-11de-4fb8-aa04-74c06d5c236e
+      - https://data.4tu.nl/file/32b70553-0765-4808-b155-aa5319802c8a/d39e1365-e4b8-4cb8-83d3-0b01cbf6f8c2
+  - source: http://dx.doi.org/10.4121/uuid:500573e6-accc-4b0c-9576-aa5468b10cee # Incident management log (BPI Challenge 2013)
+    files:
+      - https://data.4tu.nl/file/0fc5c579-e544-4fab-9143-fab1f5192432/4f915e5e-c6b0-4f77-8e26-a95bd56f169f
+      - https://data.4tu.nl/file/0fc5c579-e544-4fab-9143-fab1f5192432/aa51ffbb-25fd-4b5a-b0b8-9aba659b7e8c
+  - source: http://dx.doi.org/10.4121/uuid:3537c19d-6c64-4b1d-815d-915ab0e479da # Problem management log, open problems (BPI Challenge 2013)
+    files:
+      - https://data.4tu.nl/file/7aafbf5b-97ae-48ba-bd0a-4d973a68cd35/a99fee88-7c2e-4f40-826a-26038779efd4
+      - https://data.4tu.nl/file/7aafbf5b-97ae-48ba-bd0a-4d973a68cd35/0647ad1a-fa73-4376-bdb4-1b253576c3a1
+  - source: http://dx.doi.org/10.4121/uuid:c2c3b154-ab26-4b31-a0e8-8f2350ddac11 # Problem management log, closed problems (BPI Challenge 2013)
+    files:
+      - https://data.4tu.nl/file/1987a2a6-9f5b-4b14-8d26-ab7056b17929/847f91ad-0d2e-4b54-af6f-5b618ebf5446
+      - https://data.4tu.nl/file/1987a2a6-9f5b-4b14-8d26-ab7056b17929/8b99119d-9525-452e-bc8f-236ac76fa9c9
+  - source: http://dx.doi.org/10.4121/uuid:3926db30-f712-4394-aebc-75976070e91f # Event log of a loan application process (BPI Challenge 2012)
+    files:
+      - https://data.4tu.nl/file/533f66a4-8911-4ac7-8612-1235d65d1f37/4dae98ff-557e-41d0-adfe-f176fbfa9ebc
+      - https://data.4tu.nl/file/533f66a4-8911-4ac7-8612-1235d65d1f37/3276db7f-8bee-4f2b-88ee-92dbffb5a893
+  - source: http://dx.doi.org/10.4121/uuid:d9769f3d-0ab0-4fb8-803b-0d1120ffcf54 # Anonymized event log of a Dutch Academic Hospital (BPI Challenge 2011)
+    files:
+      - https://data.4tu.nl/file/5ea5bb88-feaa-4e6f-a743-6460a755e05b/897d8238-e471-4dec-957c-2c6b1462f082
+      - https://data.4tu.nl/file/5ea5bb88-feaa-4e6f-a743-6460a755e05b/6f9640f9-0f1e-44d2-9495-ef9d1bd82218
+  - source: http://dx.doi.org/10.4121/uuid:9b99a146-51b5-48df-aa70-288a76c82ec4 # Click-data for the customers that are not logged in to the website (BPI Challenge 2016)
+    files:
       - https://data.4tu.nl/file/28ce6bee-7cd3-4cd8-bccd-f9226cc15f41/3444a221-4537-45ef-86e9-7fa272282ee9
   - source: http://dx.doi.org/10.4121/uuid:01345ac4-7d1d-426e-92b8-24933a079412 # Click-data for the customers that are logged in to the website (BPI Challenge 2016)
     files:
