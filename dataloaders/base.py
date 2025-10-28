@@ -137,7 +137,7 @@ def make_feature_fn(vocab):
 if __name__ == "__main__":
     from dataloaders.xes import XESEventLogDataset
 
-    path = "data/dx.doi.org_10.4121_uuid_c2c3b154-ab26-4b31-a0e8-8f2350ddac11/BPI_Challenge_2013_closed_problems.xes"
+    path = "data/c2c3b154-ab26-4b31-a0e8-8f2350ddac11/BPI_Challenge_2013_closed_problems.xes"
 
     dataset = XESEventLogDataset(path, feature_fn=make_feature_fn, max_len=50)
 

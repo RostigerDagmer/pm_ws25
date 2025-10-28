@@ -3,7 +3,14 @@
 Download all data by running `python -m dataloaders.pull` from the ROOT of the project.
 You can theoretically configure that script to download the data to anywhere but I recommend just leaving the defaults.
 
-## Dataloaders
+### IMPORTANT
+If you already ran the first version and don't want to download everything again:
+On distros/OS with perl based `rename`:
+```
+rename -n 's/^.*?_uuid_//' data/*_uuid_*
+```
+
+# Dataloaders
 
 Because loading the data using pm4py is trivial and I presume we're going to use torch for the ML part I already created Dataloaders for CSV and XES.
 To be as generic as possible w.r.t. feature definition in the dataloader the constructor takes both a **vocab_fn** and a **feature_fn** Callable argument that you have to provide.
@@ -23,7 +30,7 @@ You return a function that takes a trace and returns a tensor of features.
 An example is also in the file of the base class.
 
 
-## Process Model Dataset
+# Process Model Dataset
 
 A process model dataset takes in any BaseEventLogDataset and induces/discovers process models from that event log.
 You should provide a dictionary of discovery methods for that purpose.
@@ -34,7 +41,7 @@ All possible permutations of parameters that are valid for a given function will
 **The dataset thus contains all combinations of product DISCOVERY_METHOD x PARAM_GRID**.
 This means the dataset can get quite big... especially if you use the PARAM_GRID.EXTENSIVE default.
 
+
 TODOs:
 
     [] caching.
-

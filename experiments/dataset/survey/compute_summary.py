@@ -68,13 +68,13 @@ def get_ds(path: str):
             raise ValueError(f"unknown dataset source type: '{dataset_ftype}'")
 
 
-def make_path(doi: str):
-    for f in files[doi]:
-        yield f"{DATA_DIR}/{doi}/{f}"
+def make_path(uuid: str):
+    for f in files[uuid]:
+        yield f"{DATA_DIR}/{uuid}/{f}"
 
 
-def make_summary(doi: str):
-    pth = list(make_path(doi))[0]
+def make_summary(uuid: str):
+    pth = list(make_path(uuid))[0]
     test_ds = get_ds(pth)
     s = summarize(test_ds)
 
@@ -83,18 +83,36 @@ def make_summary(doi: str):
         f.write(json.dumps(s, indent=4))
 
 
+def summary_exists(uuid: str):
+    pth = list(make_path(uuid))[0]
+    summary_path = '/'.join(pth.split('/')[:-1] + ["summary.json"])
+    return os.path.isfile(summary_path)
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--doi", default=None, help="Doi of the dataset to summarize"
+        "--uuid", default=None, help="UUID of the dataset to summarize"
+    )
+    parser.add_argument(
+        "--skip-existing",
+        required=False,
+        action="store_true",
+        default=False,
+        help="When running a pass over all datasets this just computes just statistics where none exist yet.",
     )
     args = parser.parse_args()
 
-    dois = datasets
+    uuids = datasets
 
-    if args.doi is not None:
-        dois = [args.doi]
+    if args.uuid is not None:
+        uuids = [args.uuid]
 
-    for doi in dois:
-        make_summary(doi)
+    if args.skip_existing:
+        ogs = set(uuids)
+        uuids = list(filter(lambda x: not summary_exists(x), uuids))
+        print(f"Skipping: {'\n'.join(list(ogs.difference(set(uuids))))}")
+
+    for uuid in uuids:
+        make_summary(uuid)

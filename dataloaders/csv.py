@@ -43,15 +43,13 @@ class CSVEventLogDataset(BaseEventLogDataset):
 
 # Example usage
 if __name__ == "__main__":
-    path = "data/dx.doi.org_10.4121_uuid_c3f3ba2d-e81e-4274-87c7-882fa1dbab0d/BPI2016_Werkmap_Messages.csv"
-    path = "data/dx.doi.org_10.4121_uuid_e30ba0c8-0039-4835-a493-6e3aa2301d3f/BPI2016_Complaints.csv"
-    # path = "data/dx.doi.org_10.4121_uuid_9b99a146-51b5-48df-aa70-288a76c82ec4/BPI2016_Clicks_NOT_Logged_In.csv"
+    path = "data/c3f3ba2d-e81e-4274-87c7-882fa1dbab0d/BPI2016_Werkmap_Messages.csv"
+    path = "data/e30ba0c8-0039-4835-a493-6e3aa2301d3f/BPI2016_Complaints.csv"
+    # path = "data/9b99a146-51b5-48df-aa70-288a76c82ec4/BPI2016_Clicks_NOT_Logged_In.csv"
 
     from dataloaders.util import CONSTRUCTION_PARAMS
 
-    params = CONSTRUCTION_PARAMS[
-        "dx.doi.org_10.4121_uuid_e30ba0c8-0039-4835-a493-6e3aa2301d3f"
-    ]
+    params = CONSTRUCTION_PARAMS["e30ba0c8-0039-4835-a493-6e3aa2301d3f"]
 
     dataset = CSVEventLogDataset(
         path,

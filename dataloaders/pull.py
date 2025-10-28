@@ -16,8 +16,11 @@ from aiohttp import ClientTimeout
 def sanitize_name(name: str) -> str:
     """Turn a DOI/UUID or URL into a filesystem-safe folder name."""
     name = name.strip().replace("https://", "").replace("http://", "")
-    name = re.sub(r"[^a-zA-Z0-9._-]+", "_", name)
-    return name[:80]
+    name = re.findall(
+        "(?:datasets/|uuid:|/dataset/[^/]+/)([0-9a-fA-F-]+|\d+)(?=$|[/?#])",  # noqa: W605
+        name,
+    )[0]
+    return name
 
 
 def decompress_gzip(filepath: str, delete_original=False):
@@ -136,6 +139,19 @@ async def download_all(sources_file, output_dir, delete_gz=False):
         print(f"No 'sources' found in {sources_file}.")
         return
 
+    sources = list({s['source']: s for s in sources}.values())  # dedup
+    existing = set(os.listdir(output_dir))
+    sources = list(
+        filter(
+            lambda src: sanitize_name(src.get("source")) not in existing,
+            sources,
+        )
+    )
+    uuids = list(map(sanitize_name, [s.get("source") for s in sources]))
+
+    print(f"{len(existing)} existing.")
+    print(f"{len(uuids)} new.")
+
     timeout = ClientTimeout(total=300)
     connector = aiohttp.TCPConnector(limit_per_host=5, ssl=False)
 
@@ -152,6 +168,10 @@ async def download_all(sources_file, output_dir, delete_gz=False):
 
             src_name = sanitize_name(source_url)
             src_dir = os.path.join(output_dir, src_name)
+
+            if os.path.exists(src_dir):
+                continue
+
             os.makedirs(src_dir, exist_ok=True)
 
             for i, file_url in enumerate(files, 1):
