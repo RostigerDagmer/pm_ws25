@@ -1,5 +1,6 @@
-from pm4py.pm4py.objects.petri_net.obj import PetriNet, Marking
-from pm4py.pm4py.objects.petri_net.utils import petri_utils
+from pm4py.objects.petri_net.obj import PetriNet, Marking
+from pm4py.objects.petri_net.utils import petri_utils
+import torch
 
 
 class StructuredNet:
@@ -94,35 +95,104 @@ class StructuredNet:
         fm = Marking({p_out: 1})
         return StructuredNet(net.name, net, im, fm)
 
-    # loop op ~
-    def __invert__(self):
-        net = PetriNet(f"{self.name}_loop")
-        petri_utils.merge(net, [self.net])
+    # loop op A @ B reads as "loop A with exit B"
+    def __matmul__(self, exit: "StructuredNet"):
+        net = PetriNet(f"{self.name}_loop_{exit.name}")
+        petri_utils.merge(net, [self.net, exit.net])
 
-        # control structure
         p_in = PetriNet.Place("p_loop_in")
         p_out = PetriNet.Place("p_loop_out")
-        t_enter = PetriNet.Transition("t_loop_enter", None)
-        t_decide = PetriNet.Transition("t_loop_decide", None)
-
+        t_split = PetriNet.Transition("t_loop_split", None)
+        t_join = PetriNet.Transition("t_loop_join", None)
+        t_link = PetriNet.Transition(f"t_link_{self.name}_{exit.name}", None)
         net.places.update({p_in, p_out})
-        net.transitions.update({t_enter, t_decide})
+        net.transitions.update({t_split, t_join, t_link})
 
         p_body_start = list(self.im.keys())[0]
         p_body_end = list(self.fm.keys())[0]
+        p_exit_start = list(exit.im.keys())[0]
+        p_exit_end = list(exit.fm.keys())[0]
 
-        # 1. entry to body (via t_enter)
-        petri_utils.add_arc_from_to(p_in, t_enter, net)
-        petri_utils.add_arc_from_to(t_enter, p_body_start, net)
+        # enter body
+        petri_utils.add_arc_from_to(p_in, t_split, net)
+        petri_utils.add_arc_from_to(t_split, p_body_start, net)
 
-        # 2. after body, decision to loop again or exit
-        petri_utils.add_arc_from_to(p_body_end, t_decide, net)
-        petri_utils.add_arc_from_to(t_decide, p_in, net)  # loop back
-        petri_utils.add_arc_from_to(t_decide, p_out, net)  # exit
+        # connect body → exit
+        petri_utils.add_arc_from_to(p_body_end, t_link, net)
+        petri_utils.add_arc_from_to(t_link, p_exit_start, net)
+
+        # after exit, decide repeat or exit
+        petri_utils.add_arc_from_to(p_exit_end, t_join, net)
+        petri_utils.add_arc_from_to(t_join, p_body_start, net)  # repeat
+        petri_utils.add_arc_from_to(t_join, p_out, net)  # exit
 
         im = Marking({p_in: 1})
         fm = Marking({p_out: 1})
         return StructuredNet(net.name, net, im, fm)
 
+    # the silent transition
+    def tau(name: str = "tau") -> "StructuredNet":
+        net = PetriNet(name)
+        p_in = PetriNet.Place("p_in")
+        p_out = PetriNet.Place("p_out")
+        t = PetriNet.Transition("t_tau", None)  # None == silent
+        net.places.update({p_in, p_out})
+        net.transitions.add(t)
+        petri_utils.add_arc_from_to(p_in, t, net)
+        petri_utils.add_arc_from_to(t, p_out, net)
+
+        im = Marking({p_in: 1})
+        fm = Marking({p_out: 1})
+        return StructuredNet(name, net, im, fm)
+
     def __repr__(self):
+        if self.name == "tau":
+            return "τ"
         return f"StructuredNet: {self.net}\nim: {self.im}\nfm: {self.fm}"
+
+    def to_tensor(self, device=None):
+        """Convert StructuredNet into tensor form for vectorized simulation."""
+        places = list(self.net.places)
+        transitions = list(self.net.transitions)
+
+        num_places = len(places)
+        num_trans = len(transitions)
+
+        place_index = {p: i for i, p in enumerate(places)}
+        trans_index = {t: j for j, t in enumerate(transitions)}
+
+        pre = torch.zeros(
+            (num_trans, num_places), dtype=torch.int, device=device
+        )
+        post = torch.zeros(
+            (num_trans, num_places), dtype=torch.int, device=device
+        )
+        labels = []
+
+        for t in transitions:
+            j = trans_index[t]
+            labels.append(t.label or "")  # empty string for τ
+            for arc in t.in_arcs:
+                i = place_index[arc.source]
+                pre[j, i] += 1
+            for arc in t.out_arcs:
+                i = place_index[arc.target]
+                post[j, i] += 1
+
+        # markings
+        M0 = torch.zeros(num_places, dtype=torch.int, device=device)
+        Mf = torch.zeros(num_places, dtype=torch.int, device=device)
+        for p, w in self.im.items():
+            M0[place_index[p]] = w
+        for p, w in self.fm.items():
+            Mf[place_index[p]] = w
+
+        return {
+            "pre": pre,
+            "post": post,
+            "labels": labels,
+            "M0": M0,
+            "Mf": Mf,
+            "place_index": place_index,
+            "trans_index": trans_index,
+        }
