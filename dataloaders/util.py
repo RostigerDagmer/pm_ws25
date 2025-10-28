@@ -51,18 +51,18 @@ CONSTRUCTION_PARAMS = {
     # CI Name (aff);CI Type (aff);CI Subtype (aff);Service Component WBS (aff);Incident ID;Status;Impact;Urgency;Priority;Category;KM number;Alert Status;# Reassignments;Open Time;Reopen Time;Resolved Time;Close Time;Handle Time (Hours);Closure Code;# Related Interactions;Related Interaction;# Related Incidents;# Related Changes;Related Change;CI Name (CBy);CI Type (CBy);CI Subtype (CBy);ServiceComp WBS (CBy)
     "dx.doi.org_10.4121_uuid_3cfa2260-f5c5-44be-afe1-b70d35288d6d": {
         "rtype": "csv",
-        "case_id_col": "Incident ID",
+        "case_id_col": "CI Name (aff)",
         "timestamp_col": "Open Time",
-        "activity_col": "CI Name (aff)",
+        "activity_col": "ServiceComp WBS (CBy)",
         "sep": ";",
     },
     # HEADER:
     # CI Name (aff);CI Type (aff);CI Subtype (aff);Service Comp WBS (aff);Interaction ID;Status;Impact;Urgency;Priority;Category;KM number;Open Time (First Touch);Close Time;Closure Code;First Call Resolution;Handle Time (secs);Related Incident
     "dx.doi.org_10.4121_uuid_3d5ae0ce-198c-4b5c-b0f9-60d3035d07bf": {
         "rtype": "csv",
-        "case_id_col": "Interaction ID",
+        "case_id_col": "CI Name (aff)",
         "timestamp_col": "Open Time (First Touch)",
-        "activity_col": "Category",  # ?
+        "activity_col": "CI Type (aff)",
         "sep": ";",
     },
     # HEADER:
