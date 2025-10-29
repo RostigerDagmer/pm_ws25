@@ -1,1 +1,105 @@
+## Feature Categories
 
+### 1. Petri Net Structural Features
+
+Extract characteristics indicating model complexity:
+
+- **Size metrics**
+  - Number of places
+  - Number of transitions
+  - Number of arcs
+
+- **Complexity metrics**
+  - Average in-degree/out-degree of transitions
+  - Number of choice points (XOR-splits)
+  - Number of parallel constructs (AND-splits)
+
+- **Connectivity metrics**
+  - Density (arcs/nodes ratio)
+  - Longest path length from initial to final marking
+
+- **State space indicators**
+  - Estimated reachability graph size (use simplified approximations)
+
+### 2. Trace Characteristics
+
+Capture event log trace properties:
+
+- **Length**: Number of events in trace
+- **Diversity**: Number of unique activities, activity repetition patterns
+- **Model fit indicators**: Number of activities in trace not present in model, estimated fitness score (quick pre-check)
+
+### 3. Interaction Features
+
+Relationships between trace and model:
+
+- **Trace/model length ratio**: `trace_length / total_transitions`
+- **Activity coverage**: Percentage of model transitions covered by trace activities
+- **Estimated search space size**: Rough approximation of synchronous product net size (`trace_length × reachable_states_estimate`)
+
+---
+
+## Feature Selection Process
+
+### Step 1: Initial Feature Pool
+
+Start with **10-15 features** from all categories above. Compute only features that are **cheap to extract** (avoid expensive graph traversals initially).
+
+### Step 2: Feature Relevance Analysis
+
+- **Correlation analysis**: Identify features strongly correlated with optimal heuristic choice 
+- **Mutual information**: Measure non-linear dependencies with target variable
+- **Redundancy removal**: Eliminate highly correlated features (correlation > 0.9)
+
+### Step 3: Final Feature Set
+
+Select **5-8 features** based on:
+
+1. **Predictive power**: Importance scores from decision trees/random forests
+2. **Computation cost**: Prioritize features extractable in < 1ms
+3. **Interpretability**: Prefer understandable features for model transparency
+
+**Recommended candidate features:**
+
+1. Trace length
+2. Number of transitions in model
+3. Number of choice points (XOR-splits)
+4. Trace/model activity coverage ratio
+5. Estimated search space size
+
+---
+
+## Three Heuristic Algorithms 
+
+（The following table is just an example！！！：））
+
+| Heuristic | Computation Speed | Guidance Quality | Description |
+|-----------|-------------------|------------------|-------------|
+| **1. Heuristic** | Fastest | Worst | No estimation, always returns 0 |   
+| **2. Heuristic** | Medium | Medium | Analyzes only choice/parallel points in net |
+| **3. Heuristic** | Slowest | Best | Full Integer Linear Programming solver |
+
+This creates a clearer **three-way classification problem** with distinct performance trade-offs.
+
+---
+
+## Implementation Workflow
+```
+1. Data Collection
+   └─> Run all 3 heuristics on diverse Petri net/trace pairs
+   └─> Record: computation times, states explored, total time
+
+2. Feature Extraction
+   └─> Compute all candidate features for each pair
+   └─> Ensure extraction time < cheapest heuristic time
+
+3. Labeling
+   └─> Optimal heuristic = argmin(total_time) for each instance
+
+4. Model Training
+   └─> Use decision tree or random forest classifier
+   └─> Learn mapping: features → optimal heuristic
+
+5. Validation
+   └─> Test on unseen process models
+   └─> Measure: prediction accuracy, time savings
