@@ -68,6 +68,7 @@ class BaseEventLogDataset(Dataset):
             padding_value (int): Value for sequence padding.
             **kwargs: Passed to subclass loader.
         """
+        self.source_path = source_path
         self.max_len = max_len
         self.padding_value = padding_value
         self.feature_fn_fac = feature_fn
