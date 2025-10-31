@@ -112,7 +112,8 @@ if __name__ == "__main__":
     if args.skip_existing:
         ogs = set(uuids)
         uuids = list(filter(lambda x: not summary_exists(x), uuids))
-        print(f"Skipping: {'\n'.join(list(ogs.difference(set(uuids))))}")
+        skips = '\n'.join(list(ogs.difference(set(uuids))))
+        print(f"Skipping: {skips}")
 
     for uuid in uuids:
         make_summary(uuid)

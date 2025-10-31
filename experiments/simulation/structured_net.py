@@ -150,6 +150,12 @@ class StructuredNet:
             return "τ"
         return f"StructuredNet: {self.net}\nim: {self.im}\nfm: {self.fm}"
 
+    def into_tuple(self) -> tuple[PetriNet, Marking, Marking]:
+        return (self.net, self.im, self.fm)
+
+    def from_tuple(t: tuple[PetriNet, Marking, Marking]) -> "StructuredNet":
+        return StructuredNet(t[0].name, t[0], t[1], t[2])
+
     def to_tensor(self, device=None):
         """Convert StructuredNet into tensor form for vectorized simulation."""
         places = list(self.net.places)
