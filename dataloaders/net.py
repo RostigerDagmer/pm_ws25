@@ -10,10 +10,18 @@ from pm4py.discovery import (
     discover_petri_net_inductive,
 )
 from itertools import product
+from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import pickle
+import hashlib
+import json
 import inspect
 import random
+import os
+from tqdm import tqdm
 from enum import Enum
 import logging
+
 
 logging.getLogger(None)
 logging.basicConfig(level=logging.DEBUG)
@@ -32,6 +40,9 @@ class ProcessModelDataset(Dataset):
         param_grid: dict[str, list],
         sampler_fn=None,
         max_models=None,
+        cached=False,
+        cache_dir=None,
+        num_workers=None,
         **kwargs,
     ):
         """
@@ -56,6 +67,69 @@ class ProcessModelDataset(Dataset):
         self.max_models = max_models
 
         self.configurations = self._generate_configurations()
+        self.cached = cached
+        self.cache_dir = (
+            Path(cache_dir)
+            if cache_dir
+            else Path('/'.join(log_dataset.source_path.split('/')[:-1]))
+            / Path(".cache_process_models")
+        )
+        self.num_workers = num_workers or os.cpu_count()
+
+        self.configurations = self._generate_configurations()
+
+        if self.cached:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            self._populate_cache_parallel()
+
+    # --- helper: deterministic key per configuration ---
+    def _config_hash(self, method_name, params, subset):
+        # The subset might be large; only hash indices if available
+        base = {
+            "method": method_name,
+            "params": params,
+            "indices": getattr(subset, "indices", None),
+        }
+        return hashlib.sha1(
+            json.dumps(base, sort_keys=True).encode()
+        ).hexdigest()
+
+    def _cache_path(self, key):
+        return self.cache_dir / f"{key}.pkl"
+
+    # --- caching logic ---
+    def _populate_cache_parallel(self):
+        logging.info("Populating process model cache...")
+
+        tasks = []
+        with ProcessPoolExecutor(max_workers=self.num_workers) as pool:
+            futures = {}
+            # Add tqdm for submission step (optional, fast anyway)
+            for cfg in self.configurations:
+                method_name, fn, params, subset = cfg
+                key = self._config_hash(method_name, params, subset)
+                path = self._cache_path(key)
+                if not path.exists():
+                    futures[pool.submit(self._discover_and_save, cfg, key)] = (
+                        key
+                    )
+
+            # Add tqdm for actual completion
+            for f in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Caching discovered models",
+            ):
+                key = futures[f]
+                try:
+                    f.result()
+                    logging.debug(f"Cached model {key}")
+                except Exception as e:
+                    logging.error(f"Failed to cache {key}: {e}")
+
+        logging.info(
+            f"Cache population done ({len(os.listdir(self.cache_dir))} models)."
+        )
 
     def _generate_configurations(self):
         configs = []
@@ -126,14 +200,35 @@ class ProcessModelDataset(Dataset):
         filtered = {k: v for k, v in params.items() if k in valid_keys}
         return fn(log, **filtered)
 
+    def _discover_and_save(self, cfg, key):
+        method_name, fn, params, subset = cfg
+        subset = _normalize_log_input(subset)
+        net, im, fm = self._safe_discover(fn, subset, params)
+        data = {
+            "pm": net,
+            "im": im,
+            "fm": fm,
+            "variant": method_name,
+            "parameters": params,
+        }
+        with open(self._cache_path(key), "wb") as f:
+            pickle.dump(data, f)
+
     def __len__(self):
         return len(self.configurations)
 
     def __getitem__(self, idx):
         method_name, fn, params, subset = self.configurations[idx]
+        key = self._config_hash(method_name, params, subset)
+        path = self._cache_path(key)
+
+        if self.cached and path.exists():
+            with open(path, "rb") as f:
+                return pickle.load(f)
+
         subset = _normalize_log_input(subset)
         net, im, fm = self._safe_discover(fn, subset, params)
-        return {
+        data = {
             "pm": net,
             "im": im,
             "fm": fm,
@@ -141,6 +236,10 @@ class ProcessModelDataset(Dataset):
             "parameters": params,
             "trace_indices": getattr(subset, "indices", None),
         }
+        if self.cached:
+            with open(path, "wb") as f:
+                pickle.dump(data, f)
+        return data
 
 
 class DISCOVERY_METHODS(Enum):
@@ -150,6 +249,17 @@ class DISCOVERY_METHODS(Enum):
         "alpha": discover_petri_net_alpha,
         "alpha_plus": discover_petri_net_alpha_plus,
         "ilp": discover_petri_net_ilp,
+    }
+
+    GURANTEED_SOUND = {
+        "inductive": discover_petri_net_inductive,
+        "ilp": discover_petri_net_ilp,
+    }
+
+    PROBABLY_SOUND = {
+        "inductive": discover_petri_net_inductive,
+        "ilp": discover_petri_net_ilp,
+        "heuristic": discover_petri_net_heuristics,
     }
 
 
