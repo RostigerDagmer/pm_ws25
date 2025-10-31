@@ -147,4 +147,6 @@ if __name__ == "__main__":
     # )
     stnet = sample_net(dist_params)
     view_petri_net(stnet.net, stnet.im, stnet.fm)
+
+
 # %%

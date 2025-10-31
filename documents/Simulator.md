@@ -21,4 +21,11 @@ The entire token game is essentially two lines of vector math.
 
 #### Sampling
 
+We take a parametrizable but fixed number of steps using the rule above.
+This is parallel in a batch dimension and consists of simple matrix vector operations.
+
+Using torch we can get an accelerator-agnostic version of simulate in ~40 lines of code.
+By not materializing transition names as strings until the very end we avoid device/host synch and excessive memory use until we materialize.
+
+By doing so we achieve execution times ~300x faster on sufficiently large nets at sufficiently large event log sizes.
 
