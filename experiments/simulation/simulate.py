@@ -22,6 +22,7 @@ The entire token game is essentially two lines of vector math.
 # %%
 import torch
 from typing import Optional
+from pm4py.pm4py.objects.log.obj import EventLog, Trace
 
 
 def simulate(
@@ -31,10 +32,12 @@ def simulate(
     labels,
     weights: Optional[torch.Tensor] = None,
     steps=100,
+    device="cpu",
 ):
     pre, post = net_tensors
+    n_trans, n_places = pre.shape
     if weights is None:
-        weights = torch.ones_like(M0)
+        weights = torch.ones(n_trans, device=device, dtype=torch.float)
     M = M0.clone()
     log = []
     for _ in range(steps):
@@ -126,76 +129,12 @@ def simulate_batch(
     return logs
 
 
-if __name__ == "__main__":
-    from experiments.simulation.models import sample_net
-    import sys
-    from pm4py.vis import view_petri_net
-    import matplotlib.pyplot as plt
-    from time import perf_counter
+def apply_labels(log: torch.Tensor, labels: list[str]) -> EventLog:
+    def apply_label(tok: torch.Tensor) -> str:
+        tok = tok.item()
+        if tok >= 0:
+            return labels[tok]
+        else:
+            return "τ"
 
-    dist_params = {
-        "op": lambda: torch.distributions.Categorical(
-            torch.tensor([0.3, 0.3, 0.3, 0.1])
-        ).sample(),
-        "seq_len": lambda: torch.distributions.Poisson(4).sample().int(),
-        "p_stop": lambda d: torch.distributions.Bernoulli(
-            0.2 + 0.1 * d
-        ).sample(),  # deeper → likelier to stop
-    }
-    stnet = sample_net(dist_params)
-    print(stnet)
-    N = stnet.to_tensor()
-    print(N)
-
-    view_petri_net(stnet.net, stnet.im, stnet.fm)
-
-    # %%
-    print(N["M0"].shape)
-
-    # %%
-    print(N["pre"].shape)
-    print(N["post"].shape)
-
-    # %%
-
-    plt.imshow(N["pre"].float())
-    plt.show()
-    plt.imshow(N["post"].float())
-    plt.show()
-    # %%
-    simulate((N['pre'], N['post']), N['M0'], N['Mf'], N['labels'])
-    # %%
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    start = perf_counter()
-    print(
-        simulate_batch(
-            (N['pre'].to(device), N['post'].to(device)),
-            N['M0'].to(device),
-            N['Mf'].to(device),
-            N['labels'],
-            steps=400,
-            batch_size=1000,
-        )
-    )
-    stop = perf_counter()
-    # does ~ 1s on a net of [120, 120] instead of 1.5m+ with pm4py (CPU time)
-    # GPU is still a little slow because of the loop over steps (GPU time 0.35s).
-    # But 285x faster on GPU.
-    print("Elapsed time:", stop - start)
-
-    # %%
-
-    plt.imshow(
-        simulate_batch(
-            (N['pre'].to(device), N['post'].to(device)),
-            N['M0'].to(device),
-            N['Mf'].to(device),
-            N['labels'],
-            steps=400,
-            batch_size=1000,
-        ).cpu()
-        + 1
-    )
-
-    # %%
+    return EventLog([Trace(list(map(apply_label, trace))) for trace in log])
