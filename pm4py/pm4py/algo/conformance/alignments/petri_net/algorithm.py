@@ -46,10 +46,11 @@ import pandas as pd
 
 class Variants(Enum):
     VERSION_STATE_EQUATION_A_STAR = variants.state_equation_a_star
+    VERSION_STATE_EQUATION_A_STAR_ILP = variants.state_equation_a_star_ilp
     VERSION_DIJKSTRA_NO_HEURISTICS = variants.dijkstra_no_heuristics
     VERSION_DIJKSTRA_LESS_MEMORY = variants.dijkstra_less_memory
     VERSION_DISCOUNTED_A_STAR = variants.discounted_a_star
-    VERSION_INCREMENTAL_EME_A_STAR = variants.incremental_eme_a_star
+    VERSION_INCREMENTAL_A_STAR = variants.incremental_a_star
 
 class Parameters(Enum):
     PARAM_TRACE_COST_FUNCTION = "trace_cost_function"
@@ -80,12 +81,14 @@ def __variant_mapper(variant):
     if type(variant) is str:
         if variant == "Variants.VERSION_STATE_EQUATION_A_STAR":
             variant = Variants.VERSION_STATE_EQUATION_A_STAR
+        elif variant == "Variants.VERSION_INCREMENTAL_A_STAR_ILP":
+            variant = Variants.VERSION_STATE_EQUATION_A_STAR_ILP
         elif variant == "Variants.VERSION_DIJKSTRA_NO_HEURISTICS":
             variant = Variants.VERSION_DIJKSTRA_NO_HEURISTICS
         elif variant == "Variants.VERSION_DIJKSTRA_LESS_MEMORY":
             variant = Variants.VERSION_DIJKSTRA_LESS_MEMORY
-        elif variant == "Variants.VERSION_INCREMENTAL_EME_A_STAR":
-            variant = Variants.VERSION_INCREMENTAL_EME_A_STAR
+        elif variant == "Variants.VERSION_INCREMENTAL_A_STAR":
+            variant = Variants.VERSION_INCREMENTAL_A_STAR
 
     return variant
 
