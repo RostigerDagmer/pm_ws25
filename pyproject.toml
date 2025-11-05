@@ -3,3 +3,13 @@
 line-length = 79
 target-version = ["py313"]
 skip-string-normalization = true
+
+[project.optional-dependencies]
+default = [
+    "torch==2.9.0",
+    "torchvision==0.24.0"
+]
+cuda = [
+    "torch==2.9.0+cu130 ; sys_platform == 'linux'",
+    "torchvision==0.24.0+cu130 ; sys_platform == 'linux'"
+]
