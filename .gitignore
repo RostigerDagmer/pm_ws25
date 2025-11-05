@@ -4,3 +4,4 @@
 *.obsidian
 *__pycache__
 .vscode
+data
