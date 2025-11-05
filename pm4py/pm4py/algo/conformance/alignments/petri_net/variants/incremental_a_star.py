@@ -65,6 +65,11 @@ from typing import Optional, Dict, Any, Union
 from pm4py.objects.log.obj import Trace
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.util import typing
+# import the Extended Marking Equation builder to implement incremental A*
+from pm4py.algo.analysis.extended_marking_equation.variants.classic import (
+    build as eme_build,
+    Parameters as EME_Params,
+)
 
 
 class Parameters(Enum):
@@ -83,6 +88,13 @@ class Parameters(Enum):
     ACTIVITY_KEY = PARAMETER_CONSTANT_ACTIVITY_KEY
     VARIANTS_IDX = "variants_idx"
     RETURN_SYNC_COST_FUNCTION = "return_sync_cost_function"
+    # additional knobs forwarded to the extended marking equation solver
+    EXT_ME_MAX_K_VALUE = "max_k_value"
+    EXT_ME_SPLIT_IDX = "split_idx"
+    EXT_ME_FULL_BOOTSTRAP_REQUIRED = "full_bootstrap_required"
+    # toggle and solver selection for extended-ME heuristic
+    EXT_HEUR_USE_ILP = "ext_heur_use_ilp"
+    EXT_HEUR_SOLVER_VARIANT = "ext_heur_solver_variant"
 
 
 PARAM_TRACE_COST_FUNCTION = Parameters.PARAM_TRACE_COST_FUNCTION.value
@@ -217,6 +229,8 @@ def apply(
         trace_im,
         trace_fm,
         parameters,
+        # pass original trace along for the extended marking equation heuristic
+        original_trace=trace,
     )
 
     return alignment
@@ -419,6 +433,7 @@ def apply_trace_net(
     trace_im,
     trace_fm,
     parameters=None,
+    original_trace: Optional[Trace] = None,
 ):
     """
     Performs the basic alignment search, given a trace net and a net.
@@ -516,6 +531,28 @@ def apply_trace_net(
         utils.SKIP,
         ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
         max_align_time_trace=max_align_time_trace,
+        # provide original trace to the A* search for the extended ME solver
+        original_trace=original_trace,
+        ext_me_parameters={
+            # forward optional controls (if given)
+            EME_Params.COSTS: cost_function,
+            EME_Params.MAX_K_VALUE: exec_utils.get_param_value(
+                Parameters.EXT_ME_MAX_K_VALUE, parameters, 5
+            ),
+            EME_Params.SPLIT_IDX: exec_utils.get_param_value(
+                Parameters.EXT_ME_SPLIT_IDX, parameters, None
+            ),
+            EME_Params.FULL_BOOTSTRAP_REQUIRED: exec_utils.get_param_value(
+                Parameters.EXT_ME_FULL_BOOTSTRAP_REQUIRED, parameters, True
+            ),
+        },
+        # extended heuristic solver preferences
+        use_ilp=exec_utils.get_param_value(
+            Parameters.EXT_HEUR_USE_ILP, parameters, False
+        ),
+        solver_variant=exec_utils.get_param_value(
+            Parameters.EXT_HEUR_SOLVER_VARIANT, parameters, None
+        ),
     )
 
     return_sync_cost = exec_utils.get_param_value(
@@ -537,6 +574,10 @@ def apply_sync_prod(
     skip,
     ret_tuple_as_trans_desc=False,
     max_align_time_trace=sys.maxsize,
+    original_trace: Optional[Trace] = None,
+    ext_me_parameters: Optional[Dict[Any, Any]] = None,
+    use_ilp: bool = False,
+    solver_variant: Optional[str] = None,
 ):
     """
     Performs the basic alignment search on top of the synchronous product net, given a cost function and skip-symbol
@@ -562,6 +603,10 @@ def apply_sync_prod(
         skip,
         ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
         max_align_time_trace=max_align_time_trace,
+        original_trace=original_trace,
+        ext_me_parameters=ext_me_parameters,
+        use_ilp=use_ilp,
+        solver_variant=solver_variant,
     )
 
 
@@ -573,6 +618,10 @@ def __search(
     skip,
     ret_tuple_as_trans_desc=False,
     max_align_time_trace=sys.maxsize,
+    original_trace: Optional[Trace] = None,
+    ext_me_parameters: Optional[Dict[Any, Any]] = None,
+    use_ilp: bool = False,
+    solver_variant: Optional[str] = None,
 ):
     start_time = time.time()
 
@@ -586,41 +635,85 @@ def __search(
 
     closed = set()
 
-    a_matrix = np.asmatrix(incidence_matrix.a_matrix).astype(np.float64)
-    g_matrix = -np.eye(len(sync_net.transitions))
-    h_cvx = np.matrix(np.zeros(len(sync_net.transitions))).transpose()
     cost_vec = [x * 1.0 for x in cost_vec]
 
-    use_cvxopt = False
-    if (
-        lp_solver.DEFAULT_LP_SOLVER_VARIANT
-        == lp_solver.CVXOPT_SOLVER_CUSTOM_ALIGN
-        or lp_solver.DEFAULT_LP_SOLVER_VARIANT
-        == lp_solver.CVXOPT_SOLVER_CUSTOM_ALIGN_ILP
-    ):
-        use_cvxopt = True
+    # Build the Extended Marking Equation solver once; reuse it incrementally
+    if ext_me_parameters is None:
+        ext_me_parameters = {}
+    # ensure costs are provided
+    if EME_Params.COSTS not in ext_me_parameters:
+        ext_me_parameters[EME_Params.COSTS] = cost_function
+    # ensure we have a trace object
+    if original_trace is None:
+        original_trace = log_implementation.Trace()
 
-    if use_cvxopt:
-        # not available in the latest version of PM4Py
-        from cvxopt import matrix
-
-        a_matrix = matrix(a_matrix)
-        g_matrix = matrix(g_matrix)
-        h_cvx = matrix(h_cvx)
-        cost_vec = matrix(cost_vec)
-
-    h, x = utils.__compute_exact_heuristic_new_version(
+    eme_solver = eme_build(
+        original_trace,
         sync_net,
-        a_matrix,
-        h_cvx,
-        g_matrix,
-        cost_vec,
-        incidence_matrix,
         ini,
-        fin_vec,
-        lp_solver.DEFAULT_LP_SOLVER_VARIANT,
-        use_cvxopt=use_cvxopt,
+        fin,
+        parameters=ext_me_parameters,
     )
+
+    # pick variant: either user-provided or default; if ILP requested and variant is SciPy, prefer PuLP
+    chosen_variant = solver_variant or lp_solver.DEFAULT_LP_SOLVER_VARIANT
+    try:
+        # access names from lp solver where available
+        scipy_name = lp_solver.SCIPY
+        pulp_name = lp_solver.PULP
+    except Exception:
+        scipy_name = "scipy"
+        pulp_name = "pulp"
+    if use_ilp and chosen_variant == scipy_name:
+        chosen_variant = pulp_name
+
+    def _eme_solve(ini_marking: Marking):
+        # update initial marking and solve the extended problem with chosen LP/ILP
+        eme_solver.change_ini_vec(ini_marking)
+        c, Aub, bub, Aeq, beq = eme_solver.get_components()
+        params = {}
+        if use_ilp:
+            params["integrality"] = [1] * len(c)
+        # convert to cvxopt types if a cvxopt variant was explicitly requested
+        v = chosen_variant or ""
+        if isinstance(v, str) and v.startswith("cvxopt"):
+            try:
+                from cvxopt import matrix
+                # ensure numeric types
+                def to_mat(m):
+                    try:
+                        import numpy as _np
+                        return matrix(_np.asarray(m, dtype=_np.float64))
+                    except Exception:
+                        return matrix(m)
+                c2 = matrix([1.0 * x for x in c])
+                Aub2 = to_mat(Aub)
+                bub2 = to_mat(bub)
+                Aeq2 = to_mat(Aeq)
+                beq2 = to_mat(beq)
+                sol = lp_solver.apply(
+                    c2, Aub2, bub2, Aeq2, beq2, parameters=params, variant=v
+                )
+            except Exception as e:
+                raise e
+        else:
+            sol = lp_solver.apply(
+                c, Aub, bub, Aeq, beq, parameters=params, variant=chosen_variant
+            )
+        prim_obj = lp_solver.get_prim_obj_from_sol(sol, variant=chosen_variant)
+        points = lp_solver.get_points_from_sol(sol, variant=chosen_variant)
+        if prim_obj is None or points is None:
+            return None, None
+        # aggregate x and compute h using the EME solver helpers
+        x_vec = eme_solver.get_x_vector(points)
+        h_val = eme_solver.get_h(points)
+        return h_val, x_vec
+
+    # initial exact heuristic from extended marking equation (no fallback)
+    h, x = _eme_solve(ini)
+    if h is None or x is None:
+        return None
+
     ini_state = utils.SearchTuple(0 + h, 0, h, ini, None, None, x, True)
     open_set = [ini_state]
     heapq.heapify(open_set)
@@ -651,42 +744,24 @@ def __search(
                 current_marking = curr.m
                 continue
 
-            h, x = utils.__compute_exact_heuristic_new_version(
-                sync_net,
-                a_matrix,
-                h_cvx,
-                g_matrix,
-                cost_vec,
-                incidence_matrix,
-                curr.m,
-                fin_vec,
-                lp_solver.DEFAULT_LP_SOLVER_VARIANT,
-                use_cvxopt=use_cvxopt,
-            )
+            h, x = _eme_solve(curr.m)
+            if h is None or x is None:
+                return None
             lp_solved += 1
 
-            # 11/10/19: shall not a state for which we compute the exact heuristics be
-            # by nature a trusted solution?
             tp = utils.SearchTuple(
                 curr.g + h, curr.g, h, curr.m, curr.p, curr.t, x, True
             )
-            # 11/10/2019 (optimization ZA) heappushpop is slightly more efficient than pushing
-            # and popping separately
             curr = heapq.heappushpop(open_set, tp)
             current_marking = curr.m
 
-        # max allowed heuristics value (27/10/2019, due to the numerical
-        # instability of some of our solvers)
         if curr.h > lp_solver.MAX_ALLOWED_HEURISTICS:
             continue
 
-        # 12/10/2019: do it again, since the marking could be changed
         already_closed = current_marking in closed
         if already_closed:
             continue
 
-        # 12/10/2019: the current marking can be equal to the final marking only if the heuristics
-        # (underestimation of the remaining cost) is 0. Low-hanging fruits
         if curr.h < 0.01:
             if current_marking == fin:
                 return utils.__reconstruct_alignment(
@@ -726,6 +801,7 @@ def __search(
             g = curr.g + cost
 
             queued += 1
+            # derive heuristic cheaply from current x (aggregate x from extended ME)
             h, x = utils.__derive_heuristic(
                 incidence_matrix, cost_vec, curr.x, t, curr.h
             )
