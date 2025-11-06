@@ -1,4 +1,5 @@
-from typing import Optional, Any
+from dataclasses import dataclass
+from typing import Callable, Optional, Any, Union
 import torch
 from torch.utils.data import Dataset
 from dataloaders.base import BaseEventLogDataset
@@ -19,12 +20,16 @@ import json
 import inspect
 import random
 import os
+import pandas as pd
 from tqdm import tqdm
 from enum import Enum
 import logging
 from abc import ABC, abstractmethod
-from pm4py.pm4py.objects.log.obj import EventLog
 from collections.abc import Sequence
+from collections import defaultdict, Counter
+
+from pm4py.pm4py.objects.petri_net.obj import Marking, PetriNet
+
 
 logging.getLogger(None)
 logging.basicConfig(level=logging.INFO)
@@ -52,20 +57,33 @@ class Sampler(ABC):
         self.n_subsets = n_subsets
         self.name = name or self.__class__.__name__
         self.seed = seed
+        torch.manual_seed(self.seed or 42)
+        self._cache = {}  # (id(log)) -> dict of computed features
 
     @abstractmethod
     def sample_once(self, log, subset_idx: int):
-        """Return a TraceSubset."""
         raise NotImplementedError
 
     def __call__(self, log):
         subsets = []
-        # deterministic per (seed, subset_idx)
         for i in range(self.n_subsets):
             if self.seed is not None:
-                random.seed((hash((self.seed, i)) & 0xFFFFFFFF))
+                # derive deterministic 32-bit seed from (sampler_name, seed, subset_idx)
+                key = f"{self.name}:{self.seed}:{i}".encode()
+                seed_int = int(hashlib.sha1(key).hexdigest(), 16) % (2**32)
+                random.seed(seed_int)
             subsets.append(self.sample_once(log, i))
         return subsets
+
+    def get_cached(self, log, key, compute_fn):
+        """Cache helper: compute once per-log per-key."""
+        lid = id(log)
+        if lid not in self._cache:
+            self._cache[lid] = {}
+        cache = self._cache[lid]
+        if key not in cache:
+            cache[key] = compute_fn(log)
+        return cache[key]
 
 
 class FullSampler(Sampler):
@@ -88,18 +106,207 @@ class RandomSubsetSampler(Sampler):
         return TraceSubset((log[i] for i in idx), indices=idx)
 
 
+class LengthStratifiedSampler(Sampler):
+    def __init__(self, n_bins=3, **kwargs):
+        super().__init__(n_subsets=n_bins, **kwargs)
+
+    def sample_once(self, log, subset_idx):
+        import torch
+
+        lengths = self.get_cached(
+            log,
+            "lengths",
+            lambda l: torch.tensor([len(t) for t in l], dtype=torch.float32),
+        )
+        quantiles = self.get_cached(
+            log,
+            f"length_bins_{self.n_subsets}",
+            lambda l: torch.quantile(
+                lengths, torch.linspace(0, 1, self.n_subsets + 1)
+            ),
+        )
+
+        lo, hi = quantiles[subset_idx], quantiles[subset_idx + 1]
+        mask = (lengths >= lo) & (lengths <= hi)
+        idx = torch.nonzero(mask).view(-1).tolist()
+        subset = [log[i] for i in idx]
+        return TraceSubset(subset, indices=idx)
+
+
+class TemporalDriftSampler(Sampler):
+    def __init__(self, n_bins=3, **kwargs):
+        super().__init__(n_subsets=n_bins, **kwargs)
+
+    def sample_once(self, log, subset_idx):
+
+        def compute_medians(l):
+            medians = []
+            for trace in l:
+                ts = [
+                    e.get("time:timestamp")
+                    for e in trace
+                    if "time:timestamp" in e
+                ]
+                if not ts:
+                    medians.append(float("nan"))
+                    continue
+                tvals = pd.to_datetime(ts).view("int64")
+                medians.append(
+                    float(
+                        torch.median(torch.tensor(tvals, dtype=torch.float64))
+                    )
+                )
+            return torch.tensor(medians, dtype=torch.float64)
+
+        medians = self.get_cached(log, "timestamp_medians", compute_medians)
+        valid_mask = ~torch.isnan(medians)
+        valid = torch.nonzero(valid_mask).view(-1)
+
+        if len(valid) == 0:
+            raise ValueError("No valid timestamps in log.")
+
+        quantiles = self.get_cached(
+            log,
+            f"time_bins_{self.n_subsets}",
+            lambda l: torch.quantile(
+                medians[valid],
+                torch.linspace(0, 1, self.n_subsets + 1, dtype=torch.float64),
+            ),
+        )
+
+        lo, hi = quantiles[subset_idx], quantiles[subset_idx + 1]
+        idx = (
+            (valid_mask & (medians >= lo) & (medians <= hi))
+            .nonzero()
+            .view(-1)
+            .tolist()
+        )
+        subset = [log[i] for i in idx]
+        return TraceSubset(subset, indices=idx)
+
+
+class VariantFrequencySampler(Sampler):
+    def __init__(self, n_bins=3, **kwargs):
+        super().__init__(n_subsets=n_bins, **kwargs)
+
+    def sample_once(self, log, subset_idx):
+
+        def compute_variant_freqs(l):
+            variants = [";".join(e["concept:name"] for e in t) for t in l]
+            freq = Counter(variants)
+            freqs = torch.tensor(
+                [freq[v] for v in variants], dtype=torch.float32
+            )
+            order = torch.argsort(freqs, descending=True)
+            return {"freqs": freqs, "order": order}
+
+        cached = self.get_cached(log, "variant_freqs", compute_variant_freqs)
+        order = cached["order"]
+        n = len(order)
+        bin_size = max(1, n // self.n_subsets)
+        start, end = subset_idx * bin_size, min((subset_idx + 1) * bin_size, n)
+        idx = order[start:end].tolist()
+        subset = [log[i] for i in idx]
+        return TraceSubset(subset, indices=idx)
+
+
+class ActivitySetSampler(Sampler):
+    """
+    Groups traces by their (unordered) set of activities.
+    Each subset corresponds to one of the largest activity-set clusters.
+    """
+
+    def __init__(self, max_groups=5, **kwargs):
+        super().__init__(n_subsets=max_groups, **kwargs)
+        self.max_groups = max_groups
+
+    def sample_once(self, log, subset_idx):
+        def compute_activity_groups(l):
+            # Build mapping activity_set -> list of (index, trace)
+            groups = defaultdict(list)
+            for i, trace in enumerate(l):
+                acts = frozenset(
+                    e["concept:name"] for e in trace if "concept:name" in e
+                )
+                groups[acts].append((i, trace))
+            # Sort groups largest → smallest
+            sorted_groups = sorted(groups.values(), key=len, reverse=True)
+            return sorted_groups
+
+        # Cache the grouping per-log
+        sorted_groups = self.get_cached(
+            log, "activity_groups", compute_activity_groups
+        )
+        if not sorted_groups:
+            raise ValueError(
+                "No activity groups could be formed (empty log?)."
+            )
+
+        # Wrap around if fewer groups than requested subsets
+        g = sorted_groups[subset_idx % len(sorted_groups)]
+        idx, traces = zip(*g)
+        return TraceSubset(traces, indices=list(idx))
+
+
+class AttributeClusterSampler(Sampler):
+    def __init__(self, attribute, n_subsets=None, **kwargs):
+        super().__init__(n_subsets=n_subsets or 3, **kwargs)
+        self.attribute = attribute
+
+    def sample_once(self, log, subset_idx):
+        from collections import defaultdict
+
+        groups = defaultdict(list)
+        for i, trace in enumerate(log):
+            val = trace.attributes.get(self.attribute, None)
+            groups[val].append((i, trace))
+
+        group_keys = list(groups.keys())
+        if not group_keys:
+            raise ValueError(
+                f"Attribute '{self.attribute}' not found in any trace."
+            )
+
+        # cycle if more requested than existing
+        key = group_keys[subset_idx % len(group_keys)]
+        idx, traces = zip(*groups[key])
+        return TraceSubset(traces, indices=idx)
+
+
 class ProcessModelDataset(Dataset):
     """
     Dataset that yields Petri nets discovered from event logs via different
     process discovery algorithms and parameter configurations.
     """
 
+    @dataclass
+    class ItemType:
+        pm: PetriNet
+        im: Marking
+        fm: Marking
+        variant: str
+        parameters: list[float | int | bool]
+        sampler: str
+        subset_idx: int
+        trace_indices: list[int] | None
+
+        def hash(self) -> str:
+            d = {str(k): str(v) for k, v in self.__dict__.items()}
+            return hashlib.sha1(
+                json.dumps(d, sort_keys=True).encode()
+            ).hexdigest()
+
     def __init__(
         self,
         log_dataset: BaseEventLogDataset,
-        discovery_methods: dict,
-        param_grid: dict[str, list],
-        sampler_specs=None,
+        discovery_methods: Union[
+            dict[str, Callable[[Any], tuple[PetriNet, Marking, Marking]]],
+            "DISCOVERY_METHODS",
+        ],
+        param_grid: Union[dict[str, list[float | int | bool]], "PARAM_GRID"],
+        sampler_specs: Union[
+            dict[str, Callable[[Any], list[TraceSubset]]], "SAMPLER_SPECS"
+        ],
         max_models=None,
         cached=False,
         cache_dir=None,
@@ -125,8 +332,10 @@ class ProcessModelDataset(Dataset):
         if hasattr(sampler_specs, "value"):
             sampler_specs = sampler_specs.value
 
-        self.discovery_methods = discovery_methods
-        self.param_grid = param_grid
+        self.discovery_methods: dict[
+            str, Callable[[Any], tuple[PetriNet, Marking, Marking]]
+        ] = discovery_methods
+        self.param_grid: dict[str, list[float | int | bool]] = param_grid
         self.sampler_specs = sampler_specs or {
             "full": FullSampler(n_subsets=1)
         }
@@ -147,6 +356,16 @@ class ProcessModelDataset(Dataset):
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             self._populate_cache_parallel()
 
+    def hash(self) -> str:
+        base = {
+            "methods": list(self.discovery_methods.keys()),
+            "param_grid": self.param_grid,
+            "sampler_specs": list(self.sampler_specs.keys()),
+        }
+        return hashlib.sha1(
+            json.dumps(base, sort_keys=True).encode()
+        ).hexdigest()
+
     # --- helper: deterministic key per configuration ---
     def _config_hash(
         self,
@@ -154,8 +373,8 @@ class ProcessModelDataset(Dataset):
         params: dict[str, Any],
         sampler_name: str,
         subset_idx: int,
-        subset,
-    ):
+        subset: TraceSubset,
+    ) -> str:
         base = {
             "method": method_name,
             "params": params,
@@ -321,7 +540,7 @@ class ProcessModelDataset(Dataset):
     def __len__(self):
         return len(self.configurations)
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> "ProcessModelDataset.ItemType":
         method_name, fn, params, sampler_name, subset_idx, subset = (
             self.configurations[idx]
         )
@@ -332,7 +551,7 @@ class ProcessModelDataset(Dataset):
 
         if self.cached and path.exists():
             with open(path, "rb") as f:
-                return pickle.load(f)
+                return ProcessModelDataset.ItemType(**pickle.load(f))
 
         subset = _normalize_log_input(subset)
         net, im, fm = self._safe_discover(fn, subset, params)
@@ -349,7 +568,7 @@ class ProcessModelDataset(Dataset):
         if self.cached:
             with open(path, "wb") as f:
                 pickle.dump(data, f)
-        return data
+        return ProcessModelDataset.ItemType(**data)
 
 
 class DISCOVERY_METHODS(Enum):
@@ -406,6 +625,16 @@ class SAMPLER_SPECS(Enum):
         "full": FullSampler(n_subsets=1),
         "random20": RandomSubsetSampler(frac=0.2, n_subsets=10, seed=42),
         "random50": RandomSubsetSampler(frac=0.5, n_subsets=5, seed=1337),
+        "activity_set5": ActivitySetSampler(max_groups=5),
+        "activity_set15": ActivitySetSampler(max_groups=15),
+        "activity_set25": ActivitySetSampler(max_groups=25),
+        "temporal_drift3": TemporalDriftSampler(n_bins=3),
+        "temporal_drift7": TemporalDriftSampler(n_bins=7),
+        "temporal_drift15": TemporalDriftSampler(n_bins=15),
+        "length_strat3": LengthStratifiedSampler(n_bins=3),
+        "length_strat5": LengthStratifiedSampler(n_bins=3),
+        "variant3": VariantFrequencySampler(n_bins=3),
+        "variant7": VariantFrequencySampler(n_bins=7),
     }
 
 
@@ -419,8 +648,6 @@ if __name__ == "__main__":
     from dataloaders.base import make_feature_fn
     from dataloaders.csv import CSVEventLogDataset
     from pm4py.vis import view_petri_net
-
-    print(DISCOVERY_METHODS.ALL.value)
 
     path = "data/c3f3ba2d-e81e-4274-87c7-882fa1dbab0d/BPI2016_Werkmap_Messages.csv"
     log_dataset = CSVEventLogDataset(
