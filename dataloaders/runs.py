@@ -1,5 +1,8 @@
 from collections.abc import Sequence
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from enum import Enum
+import logging
+import multiprocessing
 from pathlib import Path
 import pickle
 import time
@@ -9,6 +12,7 @@ import os
 import hashlib
 import json
 from abc import ABC, abstractmethod
+from itertools import product
 
 from tqdm import tqdm
 from dataloaders.base import make_feature_fn
@@ -103,6 +107,7 @@ class RunDataset(Dataset):
         process_model_dataset: ProcessModelDataset,
         aligners: Sequence[Aligner],
         trace_sampler: TraceSampler.__class__,
+        multiprocessing: bool = True,
     ):
         self.base_path = base_path
         self.pm_dataset = process_model_dataset
@@ -110,7 +115,10 @@ class RunDataset(Dataset):
         self.aligners = aligners
         self.items: dict[str, "RunDataset.item_type"] = {}
         self.index: list[str] = []
-        self._init_cache()
+        if multiprocessing:
+            self._init_cache_mp()
+        else:
+            self._init_cache()
 
     def _tryload(self):
         path = self.save_path()
@@ -119,14 +127,19 @@ class RunDataset(Dataset):
                 self.items = pickle.load(f)
                 self.index = list(self.items.keys())
 
-    def _begin_perf_count(self):
-        return PerfCounter()
-
-    def _end_perf_count(self):
-        return PerfCounter()
-
     def save_path(self):
         return self.base_path / Path(f"{self._hash_config()}.pkl")
+
+    def _process_item(
+        self,
+        model: ProcessModelDataset.ItemType,
+        trace: Trace,
+        aligner: Aligner,
+    ) -> "RunDataset.item_type":
+        start = PerfCounter()
+        item = aligner(model.pm, model.im, model.fm, trace)
+        end = PerfCounter()
+        return (model, trace, item, (end - start).dict())
 
     def _init_cache(self):
         self._tryload()
@@ -138,14 +151,57 @@ class RunDataset(Dataset):
                     )  # should be deterministic in the result since aligner should be deterministic in the result
                     if h in self.items:
                         continue
-
-                    start = self._begin_perf_count()
-                    item = aligner(model.pm, model.im, model.fm, trace)
-                    end = self._end_perf_count()
-                    self.items[h] = (model, trace, item, (end - start).dict())
+                    self.items[h] = self._process_item(model, trace, aligner)
 
         os.makedirs(self.save_path(), exist_ok=False)
         with open(self.save_path(), "wb") as f:
+            pickle.dump(self.items, f)
+
+    def _init_cache_mp(self):
+        self._tryload()
+
+        total = (
+            len(self.trace_sampler) * len(self.pm_dataset) * len(self.aligners)
+        )
+        num_workers = min(multiprocessing.cpu_count(), 64)
+        logging.info(
+            f"Populating run dataset cache using {num_workers} workers..."
+        )
+
+        new_items = {}
+
+        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+            futures = {}
+            for trace, model, aligner in tqdm(
+                product(self.trace_sampler, self.pm_dataset, self.aligners),
+                total=total,
+                desc="Submitting",
+            ):
+                h = self._hash_item(model, trace, aligner)
+                if h in self.items:
+                    continue
+                fut = pool.submit(self._process_item, model, trace, aligner)
+                futures[fut] = (model, trace, aligner)
+
+            for fut in tqdm(
+                as_completed(futures), total=total, desc="Aligned"
+            ):
+                model, trace, aligner = futures[fut]
+                try:
+                    model, trace, aligner, perf, item = fut.result()
+                    h = self._hash_item(model, trace, aligner)
+                    new_items[h] = (model, trace, item, perf)
+                except Exception as e:
+                    logging.error(
+                        "Alignment failed for %s: %s", aligner.__class__, e
+                    )
+
+        self.items.update(new_items)
+        self.index = list(self.items.keys())
+
+        path = self.save_path()
+        os.makedirs(path.parent, exist_ok=True)
+        with open(path, "wb") as f:
             pickle.dump(self.items, f)
 
     def _hash_config(self):
