@@ -18,6 +18,7 @@ from tqdm import tqdm
 from dataloaders.base import make_feature_fn
 from dataloaders.csv import CSVEventLogDataset
 from experiments.simulation.noise import inject_noise_trace
+from features.extractors import CompositeFeatureExtractor
 from pm4py.pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.pm4py.objects.log.obj import EventLog, Trace
 
@@ -31,6 +32,7 @@ from pm4py.pm4py.algo.conformance.alignments.petri_net.algorithm import (
     Variants,
     apply,
 )
+from pm4py.pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
 from pm4py.pm4py.util import typing
 
 
@@ -297,6 +299,14 @@ if __name__ == "__main__":
         multiprocessing=False,
     )
 
+    fe = CompositeFeatureExtractor()
+
     for run in run_dataset:
         print(run)
+        model, trace, item, perf = run
+        trace_net, trace_im, trace_fm = construct_trace_net(trace)
+        fv = fe.extract(
+            model.pm, model.im, model.fm, trace_net, trace_im, trace_fm
+        )
+        print(fv)
         break
