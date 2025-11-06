@@ -264,6 +264,9 @@ def build_atlas(
     use_umap: bool = True,
 ):
 
+    if isinstance(out_dir, str):
+        out_dir = Path(out_dir)
+
     safe_mkdir(out_dir)
     safe_mkdir(out_dir / "svgs")
 
@@ -444,7 +447,7 @@ canvas.addEventListener('wheel', e => {{
   e.preventDefault();
   const prev = scale;
   const delta = Math.sign(e.deltaY) * -0.1;
-  scale = Math.max(0.1, Math.min(2.5, scale + delta));
+  scale = Math.max(0.1, Math.min(10.0, scale + delta));
   // zoom towards pointer
   const rect = canvas.getBoundingClientRect();
   const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
