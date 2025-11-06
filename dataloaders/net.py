@@ -1,8 +1,9 @@
+from typing import Optional, Any
 import torch
 from torch.utils.data import Dataset
 from dataloaders.base import BaseEventLogDataset
 from dataloaders.util import _normalize_log_input
-from pm4py.discovery import (
+from pm4py.pm4py.discovery import (
     discover_petri_net_alpha,
     discover_petri_net_alpha_plus,
     discover_petri_net_heuristics,
@@ -21,10 +22,70 @@ import os
 from tqdm import tqdm
 from enum import Enum
 import logging
-
+from abc import ABC, abstractmethod
+from pm4py.pm4py.objects.log.obj import EventLog
+from collections.abc import Sequence
 
 logging.getLogger(None)
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
+
+
+class TraceSubset(Sequence):
+    """Lightweight, list-like wrapper that carries index metadata."""
+
+    def __init__(self, data, indices=None):
+        self._data = list(data)
+        self.indices = indices  # may be None
+
+    def __len__(self):
+        return len(self._data)
+
+    def __getitem__(self, i):
+        return self._data[i]
+
+    def __iter__(self):
+        return iter(self._data)
+
+
+class Sampler(ABC):
+    def __init__(self, n_subsets=1, name=None, seed=None):
+        self.n_subsets = n_subsets
+        self.name = name or self.__class__.__name__
+        self.seed = seed
+
+    @abstractmethod
+    def sample_once(self, log, subset_idx: int):
+        """Return a TraceSubset."""
+        raise NotImplementedError
+
+    def __call__(self, log):
+        subsets = []
+        # deterministic per (seed, subset_idx)
+        for i in range(self.n_subsets):
+            if self.seed is not None:
+                random.seed((hash((self.seed, i)) & 0xFFFFFFFF))
+            subsets.append(self.sample_once(log, i))
+        return subsets
+
+
+class FullSampler(Sampler):
+    def sample_once(self, log, subset_idx):
+        # keep indices=None for full log
+        return TraceSubset(log, indices=None)
+
+
+class RandomSubsetSampler(Sampler):
+    def __init__(self, frac=0.5, **kwargs):
+        super().__init__(**kwargs)
+        if not (0.0 < frac <= 1.0):
+            raise ValueError("frac must be in (0, 1]")
+        self.frac = frac
+
+    def sample_once(self, log, subset_idx):
+        n = len(log)
+        k = max(1, int(round(self.frac * n)))
+        idx = random.sample(range(n), k=k)
+        return TraceSubset((log[i] for i in idx), indices=idx)
 
 
 class ProcessModelDataset(Dataset):
@@ -38,7 +99,7 @@ class ProcessModelDataset(Dataset):
         log_dataset: BaseEventLogDataset,
         discovery_methods: dict,
         param_grid: dict[str, list],
-        sampler_fn=None,
+        sampler_specs=None,
         max_models=None,
         cached=False,
         cache_dir=None,
@@ -57,24 +118,28 @@ class ProcessModelDataset(Dataset):
         """
         self.log = getattr(log_dataset, "log", log_dataset)
 
-        # Resolve Enum -> dict
         if hasattr(discovery_methods, "value"):
             discovery_methods = discovery_methods.value
+        if hasattr(param_grid, "value"):
+            param_grid = param_grid.value
+        if hasattr(sampler_specs, "value"):
+            sampler_specs = sampler_specs.value
 
         self.discovery_methods = discovery_methods
         self.param_grid = param_grid
-        self.sampler_fn = sampler_fn or self._default_sampler
+        self.sampler_specs = sampler_specs or {
+            "full": FullSampler(n_subsets=1)
+        }
         self.max_models = max_models
-
-        self.configurations = self._generate_configurations()
         self.cached = cached
+        self.num_workers = num_workers or os.cpu_count()
+
         self.cache_dir = (
             Path(cache_dir)
             if cache_dir
             else Path('/'.join(log_dataset.source_path.split('/')[:-1]))
             / Path(".cache_process_models")
         )
-        self.num_workers = num_workers or os.cpu_count()
 
         self.configurations = self._generate_configurations()
 
@@ -83,11 +148,19 @@ class ProcessModelDataset(Dataset):
             self._populate_cache_parallel()
 
     # --- helper: deterministic key per configuration ---
-    def _config_hash(self, method_name, params, subset):
-        # The subset might be large; only hash indices if available
+    def _config_hash(
+        self,
+        method_name: str,
+        params: dict[str, Any],
+        sampler_name: str,
+        subset_idx: int,
+        subset,
+    ):
         base = {
             "method": method_name,
             "params": params,
+            "sampler": sampler_name,
+            "subset_idx": subset_idx,
             "indices": getattr(subset, "indices", None),
         }
         return hashlib.sha1(
@@ -100,21 +173,19 @@ class ProcessModelDataset(Dataset):
     # --- caching logic ---
     def _populate_cache_parallel(self):
         logging.info("Populating process model cache...")
-
-        tasks = []
         with ProcessPoolExecutor(max_workers=self.num_workers) as pool:
             futures = {}
-            # Add tqdm for submission step (optional, fast anyway)
             for cfg in self.configurations:
-                method_name, fn, params, subset = cfg
-                key = self._config_hash(method_name, params, subset)
+                method_name, fn, params, sampler_name, subset_idx, subset = cfg
+                key = self._config_hash(
+                    method_name, params, sampler_name, subset_idx, subset
+                )
                 path = self._cache_path(key)
                 if not path.exists():
                     futures[pool.submit(self._discover_and_save, cfg, key)] = (
                         key
                     )
 
-            # Add tqdm for actual completion
             for f in tqdm(
                 as_completed(futures),
                 total=len(futures),
@@ -123,67 +194,97 @@ class ProcessModelDataset(Dataset):
                 key = futures[f]
                 try:
                     f.result()
-                    logging.debug(f"Cached model {key}")
+                    logging.debug("Cached model %s", key)
                 except Exception as e:
-                    logging.error(f"Failed to cache {key}: {e}")
+                    logging.error("Failed to cache %s: %s", key, e)
 
         logging.info(
-            f"Cache population done ({len(os.listdir(self.cache_dir))} models)."
+            "Cache population done (%d models).",
+            len(os.listdir(self.cache_dir)),
         )
 
     def _generate_configurations(self):
         configs = []
+        seen = set()
 
-        # Resolve Enum -> dict
-        if hasattr(self.param_grid, "value"):
-            param_grid = self.param_grid.value
-        else:
-            param_grid = self.param_grid
-
-        if not isinstance(param_grid, dict):
-            raise TypeError(
-                f"param_grid must be dict or Enum[dict], got {type(param_grid)}"
-            )
+        # precompute sampler outputs once (they only depend on the log)
+        precomputed_subsets = {
+            s_name: sampler(self.log)
+            for s_name, sampler in self.sampler_specs.items()
+        }
 
         for method_name, fn in self.discovery_methods.items():
-            logging.debug(
-                f"Generating configurations for method: {method_name}"
+            # pick method-specific grid when present, else global grid
+            method_grid = (
+                self.param_grid.get(method_name)
+                if isinstance(self.param_grid.get(method_name), dict)
+                else self.param_grid
             )
 
-            # Case 1: Per-method grid defined explicitly
-            if method_name in param_grid and isinstance(
-                param_grid[method_name], dict
-            ):
-                method_grid = param_grid[method_name]
-            # Case 2: Global grid (same for all)
-            else:
-                method_grid = param_grid
+            sig = inspect.signature(fn)
+            sig_params = set(sig.parameters.keys())
+            accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            )
 
-            if not method_grid:
-                method_param_combos = [{}]
+            if method_grid:
+                relevant_grid = (
+                    method_grid
+                    if accepts_kwargs
+                    else {
+                        k: v for k, v in method_grid.items() if k in sig_params
+                    }
+                )
             else:
-                keys, values = zip(*method_grid.items())
-                method_param_combos = [
-                    dict(zip(keys, combo)) for combo in product(*values)
+                relevant_grid = {}
+
+            # build param combos
+            if not relevant_grid:
+                combos = [dict()]
+            else:
+                keys = list(relevant_grid.keys())
+                lists = [
+                    (
+                        list(v)
+                        if hasattr(v, "__iter__")
+                        and not isinstance(v, (str, bytes))
+                        else [v]
+                    )
+                    for v in (relevant_grid[k] for k in keys)
                 ]
+                combos = [dict(zip(keys, vals)) for vals in product(*lists)]
 
-            # Filter parameters by discovery function signature
-            sig_params = set(inspect.signature(fn).parameters.keys())
-
-            for params in method_param_combos:
-                # Drop unknown keys for this method
-                filtered_params = {
-                    k: v for k, v in params.items() if k in sig_params
-                }
-
-                subset = self.sampler_fn(self.log)
-                configs.append((method_name, fn, filtered_params, subset))
+            for params in combos:
+                params_key = tuple(sorted(params.items()))
+                for sampler_name, subsets in precomputed_subsets.items():
+                    for subset_idx, subset in enumerate(subsets):
+                        key = (
+                            method_name,
+                            sampler_name,
+                            subset_idx,
+                            params_key,
+                        )
+                        logging.debug(key)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        configs.append(
+                            (
+                                method_name,
+                                fn,
+                                params,
+                                sampler_name,
+                                subset_idx,
+                                subset,
+                            )
+                        )
 
         if self.max_models:
             configs = configs[: self.max_models]
 
         logging.info(
-            f"Total discovery configurations generated: {len(configs)}"
+            "Total discovery configurations generated: %d", len(configs)
         )
         return configs
 
@@ -201,7 +302,7 @@ class ProcessModelDataset(Dataset):
         return fn(log, **filtered)
 
     def _discover_and_save(self, cfg, key):
-        method_name, fn, params, subset = cfg
+        method_name, fn, params, sampler_name, subset_idx, subset = cfg
         subset = _normalize_log_input(subset)
         net, im, fm = self._safe_discover(fn, subset, params)
         data = {
@@ -210,6 +311,9 @@ class ProcessModelDataset(Dataset):
             "fm": fm,
             "variant": method_name,
             "parameters": params,
+            "sampler": sampler_name,
+            "subset_idx": subset_idx,
+            "trace_indices": getattr(subset, "indices", None),
         }
         with open(self._cache_path(key), "wb") as f:
             pickle.dump(data, f)
@@ -217,9 +321,13 @@ class ProcessModelDataset(Dataset):
     def __len__(self):
         return len(self.configurations)
 
-    def __getitem__(self, idx):
-        method_name, fn, params, subset = self.configurations[idx]
-        key = self._config_hash(method_name, params, subset)
+    def __getitem__(self, idx: int):
+        method_name, fn, params, sampler_name, subset_idx, subset = (
+            self.configurations[idx]
+        )
+        key = self._config_hash(
+            method_name, params, sampler_name, subset_idx, subset
+        )
         path = self._cache_path(key)
 
         if self.cached and path.exists():
@@ -234,6 +342,8 @@ class ProcessModelDataset(Dataset):
             "fm": fm,
             "variant": method_name,
             "parameters": params,
+            "sampler": sampler_name,
+            "subset_idx": subset_idx,
             "trace_indices": getattr(subset, "indices", None),
         }
         if self.cached:
@@ -286,6 +396,19 @@ class PARAM_GRID(Enum):
     }
 
 
+class SAMPLER_SPECS(Enum):
+    STANDARD = {
+        "full": FullSampler(n_subsets=1),
+        "random20": RandomSubsetSampler(frac=0.2, n_subsets=3, seed=42),
+    }
+
+    EXTENSIVE = {
+        "full": FullSampler(n_subsets=1),
+        "random20": RandomSubsetSampler(frac=0.2, n_subsets=10, seed=42),
+        "random50": RandomSubsetSampler(frac=0.5, n_subsets=5, seed=1337),
+    }
+
+
 def random_subset_sampler(log):
     n = len(log)
     indices = random.sample(range(n), k=n // 2)
@@ -311,9 +434,10 @@ if __name__ == "__main__":
 
     pm_dataset = ProcessModelDataset(
         log_dataset=log_dataset,
-        discovery_methods=DISCOVERY_METHODS.ALL,
+        discovery_methods=DISCOVERY_METHODS.GURANTEED_SOUND,
         param_grid=PARAM_GRID.STANDARD,
-        sampler_fn=random_subset_sampler,
+        sampler_specs=SAMPLER_SPECS.EXTENSIVE,
+        cached=True,
     )
 
     for item in pm_dataset:
