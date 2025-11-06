@@ -1,6 +1,8 @@
+from typing import Callable
 import torch
 from torch.utils.data import Dataset
 from pm4py.objects.conversion.log import converter as log_converter
+from pm4py.pm4py.objects.log.obj import EventLog, Trace
 
 
 def _build_vocabs(log, attributes=None):
@@ -75,7 +77,7 @@ class BaseEventLogDataset(Dataset):
 
         # Let subclass load the pm4py log
         self.log = self._load_log(source_path, **kwargs)
-        self.log = log_converter.apply(
+        self.log: EventLog = log_converter.apply(
             self.log, variant=log_converter.Variants.TO_EVENT_LOG
         )
 
@@ -118,10 +120,12 @@ class BaseEventLogDataset(Dataset):
 
 
 # Example feature function
-def make_feature_fn(vocab):
-    def feature_fn(trace):
+def make_feature_fn(
+    vocab: dict[str, str] | dict[str, dict[str, str]],
+) -> Callable[[Trace], list[torch.Tensor]]:
+    def feature_fn(trace: Trace) -> list[torch.Tensor]:
         start_time = trace[0]["time:timestamp"]
-        vectors = []
+        vectors: list[torch.Tensor] = []
         for e in trace:
             activity_id = vocab["concept:name"][e["concept:name"]]
             delta_h = (
