@@ -153,7 +153,7 @@ class RunDataset(Dataset):
                         continue
                     self.items[h] = self._process_item(model, trace, aligner)
 
-        os.makedirs(self.save_path(), exist_ok=False)
+        os.makedirs(self.base_path, exist_ok=True)
         with open(self.save_path(), "wb") as f:
             pickle.dump(self.items, f)
 
@@ -220,7 +220,7 @@ class RunDataset(Dataset):
         trace: Trace,
         aligner: Aligner,
     ) -> str:
-        item: dict[str, str] = {
+        item: dict[str, str | int] = {
             "model_hash": model.hash(),
             "trace_hash": trace.__hash__(),  # <- this hashes statically
             "aligner_hash": aligner.hash(),
@@ -294,6 +294,7 @@ if __name__ == "__main__":
         pm_dataset,
         AlignerSpec.ALL.value,
         SimplePerturbedTraceSampler,
+        multiprocessing=False,
     )
 
     for run in run_dataset:
