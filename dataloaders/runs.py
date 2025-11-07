@@ -19,8 +19,8 @@ from dataloaders.base import make_feature_fn
 from dataloaders.csv import CSVEventLogDataset
 from experiments.simulation.noise import inject_noise_trace
 from features.extractors import CompositeFeatureExtractor
-from pm4py.pm4py.objects.petri_net.obj import Marking, PetriNet
-from pm4py.pm4py.objects.log.obj import EventLog, Trace
+from pm4py.objects.petri_net.obj import Marking, PetriNet
+from pm4py.objects.log.obj import EventLog, Trace
 
 from dataloaders.net import (
     DISCOVERY_METHODS,
@@ -28,12 +28,12 @@ from dataloaders.net import (
     SAMPLER_SPECS,
     ProcessModelDataset,
 )
-from pm4py.pm4py.algo.conformance.alignments.petri_net.algorithm import (
+from pm4py.algo.conformance.alignments.petri_net.algorithm import (
     Variants,
     apply,
 )
-from pm4py.pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
-from pm4py.pm4py.util import typing
+from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
+from pm4py.util import typing
 
 
 class Aligner(ABC):
@@ -133,9 +133,9 @@ class RunDataset(Dataset):
     def save_path(self):
         return self.base_path / Path(f"{self._hash_config()}.pkl")
 
+    @staticmethod
     def _process_item(
-        self,
-        model: ProcessModelDataset.ItemType,
+        model: "ProcessModelDataset.ItemType",
         trace: Trace,
         aligner: Aligner,
     ) -> "RunDataset.item_type":
@@ -160,7 +160,9 @@ class RunDataset(Dataset):
                     )  # should be deterministic in the result since aligner should be deterministic in the result
                     if h in self.items:
                         continue
-                    self.items[h] = self._process_item(model, trace, aligner)
+                    self.items[h] = RunDataset._process_item(
+                        model, trace, aligner
+                    )
 
         os.makedirs(self.base_path, exist_ok=True)
         with open(self.save_path(), "wb") as f:
@@ -177,33 +179,27 @@ class RunDataset(Dataset):
             f"Populating run dataset cache using {num_workers} workers..."
         )
 
+        existing_items = self.items
         new_items = {}
 
         with ProcessPoolExecutor(max_workers=num_workers) as pool:
-            futures = {}
-            for trace, model, aligner in tqdm(
-                product(self.trace_sampler, self.pm_dataset, self.aligners),
-                total=total,
-                desc="Submitting",
+
+            results = pool.map(
+                lambda args: RunDataset._process_item(*args),
+                [
+                    (t, m, a)
+                    for t, m, a in product(
+                        self.trace_sampler, self.pm_dataset, self.aligners
+                    )
+                    if RunDataset._hash_item(t, m, a) not in existing_items
+                ],
+            )
+
+            for model, trace, aligner, perf, item, algo in tqdm(
+                results, total=total, desc="Aligned"
             ):
                 h = self._hash_item(model, trace, aligner)
-                if h in self.items:
-                    continue
-                fut = pool.submit(self._process_item, model, trace, aligner)
-                futures[fut] = (model, trace, aligner)
-
-            for fut in tqdm(
-                as_completed(futures), total=total, desc="Aligned"
-            ):
-                model, trace, aligner = futures[fut]
-                try:
-                    model, trace, aligner, perf, item = fut.result()
-                    h = self._hash_item(model, trace, aligner)
-                    new_items[h] = (model, trace, item, perf)
-                except Exception as e:
-                    logging.error(
-                        "Alignment failed for %s: %s", aligner.__class__, e
-                    )
+                new_items[h] = (model, trace, item, perf, algo)
 
         self.items.update(new_items)
         self.index = list(self.items.keys())
@@ -223,8 +219,8 @@ class RunDataset(Dataset):
             json.dumps(base, sort_keys=True).encode()
         ).hexdigest()
 
+    @staticmethod
     def _hash_item(
-        self,
         model: ProcessModelDataset.ItemType,
         trace: Trace,
         aligner: Aligner,
