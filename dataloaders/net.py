@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import Dataset
 from dataloaders.base import BaseEventLogDataset
 from dataloaders.util import _normalize_log_input
-from pm4py.pm4py.discovery import (
+from pm4py.discovery import (
     discover_petri_net_alpha,
     discover_petri_net_alpha_plus,
     discover_petri_net_heuristics,
@@ -28,7 +28,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from collections import defaultdict, Counter
 
-from pm4py.pm4py.objects.petri_net.obj import Marking, PetriNet
+from pm4py.objects.log.obj import EventLog
+from pm4py.objects.petri_net.obj import Marking, PetriNet
 
 
 logging.getLogger(None)
@@ -50,6 +51,9 @@ class TraceSubset(Sequence):
 
     def __iter__(self):
         return iter(self._data)
+
+    def __repr__(self):
+        return str(self.indices)
 
 
 class Sampler(ABC):
@@ -402,7 +406,8 @@ class ProcessModelDataset(Dataset):
                 path = self._cache_path(key)
                 if not path.exists():
                     futures[pool.submit(self._discover_and_save, cfg, key)] = (
-                        key
+                        key,
+                        cfg,
                     )
 
             for f in tqdm(
@@ -410,12 +415,12 @@ class ProcessModelDataset(Dataset):
                 total=len(futures),
                 desc="Caching discovered models",
             ):
-                key = futures[f]
+                key, cfg = futures[f]
                 try:
                     f.result()
                     logging.debug("Cached model %s", key)
                 except Exception as e:
-                    logging.error("Failed to cache %s: %s", key, e)
+                    logging.error("Failed to cache %s: %s", key, e, cfg)
 
         logging.info(
             "Cache population done (%d models).",
@@ -522,6 +527,7 @@ class ProcessModelDataset(Dataset):
 
     def _discover_and_save(self, cfg, key):
         method_name, fn, params, sampler_name, subset_idx, subset = cfg
+        print("subset:", subset)
         subset = _normalize_log_input(subset)
         net, im, fm = self._safe_discover(fn, subset, params)
         data = {
@@ -621,10 +627,25 @@ class SAMPLER_SPECS(Enum):
         "random20": RandomSubsetSampler(frac=0.2, n_subsets=3, seed=42),
     }
 
-    EXTENSIVE = {
-        "full": FullSampler(n_subsets=1),
-        "random20": RandomSubsetSampler(frac=0.2, n_subsets=10, seed=42),
-        "random50": RandomSubsetSampler(frac=0.5, n_subsets=5, seed=1337),
+    EXTENSIVE = (
+        {
+            "full": FullSampler(n_subsets=1),
+            "random20": RandomSubsetSampler(frac=0.2, n_subsets=10, seed=42),
+            "random50": RandomSubsetSampler(frac=0.5, n_subsets=5, seed=1337),
+            "activity_set5": ActivitySetSampler(max_groups=5),
+            "activity_set15": ActivitySetSampler(max_groups=15),
+            "activity_set25": ActivitySetSampler(max_groups=25),
+            "temporal_drift3": TemporalDriftSampler(n_bins=3),
+            "temporal_drift7": TemporalDriftSampler(n_bins=7),
+            "temporal_drift15": TemporalDriftSampler(n_bins=15),
+            "length_strat3": LengthStratifiedSampler(n_bins=3),
+            "length_strat5": LengthStratifiedSampler(n_bins=3),
+            "variant3": VariantFrequencySampler(n_bins=3),
+            "variant7": VariantFrequencySampler(n_bins=7),
+        },
+    )
+
+    SUBSETS_ONLY = {
         "activity_set5": ActivitySetSampler(max_groups=5),
         "activity_set15": ActivitySetSampler(max_groups=15),
         "activity_set25": ActivitySetSampler(max_groups=25),
@@ -647,9 +668,16 @@ def random_subset_sampler(log):
 if __name__ == "__main__":
     from dataloaders.base import make_feature_fn
     from dataloaders.csv import CSVEventLogDataset
+    from dataloaders.xes import XESEventLogDataset
     from pm4py.vis import view_petri_net
 
-    path = "data/c3f3ba2d-e81e-4274-87c7-882fa1dbab0d/BPI2016_Werkmap_Messages.csv"
+    # path = "data/c3f3ba2d-e81e-4274-87c7-882fa1dbab0d/BPI2016_Werkmap_Messages.csv"
+    path = "data/63a8435a-077d-4ece-97cd-2c76d394d99c/BPIC15_2.xes"
+
+    log_dataset = XESEventLogDataset(
+        path, attribute="concept:name", feature_fn=make_feature_fn
+    )
+
     log_dataset = CSVEventLogDataset(
         path,
         case_id_col="CustomerID",
@@ -663,15 +691,27 @@ if __name__ == "__main__":
         log_dataset=log_dataset,
         discovery_methods=DISCOVERY_METHODS.GURANTEED_SOUND,
         param_grid=PARAM_GRID.STANDARD,
-        sampler_specs=SAMPLER_SPECS.EXTENSIVE,
+        sampler_specs=SAMPLER_SPECS.SUBSETS_ONLY,
         cached=True,
     )
 
     for item in pm_dataset:
         print(item)
         view_petri_net(
-            item["pm"],
-            item["im"],
-            item["fm"],
+            item.pm,
+            item.im,
+            item.fm,
         )
         break
+
+    # subset = [190, 191, 317, 325, 327, 334, 346, 352, 355, 358, 361, 362, 365, 366, 369, 370, 371, 372, 373, 376, 377, 378, 379, 380, 381, 382, 383, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428, 429, 430, 431, 432, 433, 434, 435, 436, 437, 438, 439, 440, 441, 442, 443, 444, 445, 446, 447, 448, 449, 450, 451, 452, 453, 454, 455, 456, 457, 458, 459, 460, 461, 462, 463, 464, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 476]
+    # print(len(subset))
+    # trace_subset = EventLog([log_dataset.log[i] for i in subset])
+    # print(type(trace_subset))
+    # print(type(trace_subset[0]))
+    # print(type(trace_subset[0][0]))
+    # print(trace_subset)
+    # pm = discover_petri_net_inductive(trace_subset)
+    # print(pm)
+    # pickle.dump({"pm": pm[0], "im": pm[1], "fm": pm[2]}, open("test.pkl", "wb"))
+    # view_petri_net(*pm)
