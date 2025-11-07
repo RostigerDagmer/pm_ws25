@@ -101,6 +101,7 @@ class RunDataset(Dataset):
         Trace,
         Union[typing.AlignmentResult, typing.ListAlignments],
         dict[str, Any],
+        str,
     ]
 
     def __init__(
@@ -141,7 +142,13 @@ class RunDataset(Dataset):
         start = PerfCounter()
         item = aligner(model.pm, model.im, model.fm, trace)
         end = PerfCounter()
-        return (model, trace, item, (end - start).dict())
+        return (
+            model,
+            trace,
+            item,
+            (end - start).dict(),
+            aligner.name,
+        )
 
     def _init_cache(self):
         self._tryload()
@@ -303,7 +310,7 @@ if __name__ == "__main__":
 
     for run in run_dataset:
         print(run)
-        model, trace, item, perf = run
+        model, trace, item, perf, algo = run
         trace_net, trace_im, trace_fm = construct_trace_net(trace)
         fv = fe.extract(
             model.pm, model.im, model.fm, trace_net, trace_im, trace_fm
