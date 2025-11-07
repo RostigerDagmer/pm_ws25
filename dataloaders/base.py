@@ -2,7 +2,7 @@ from typing import Callable
 import torch
 from torch.utils.data import Dataset
 from pm4py.objects.conversion.log import converter as log_converter
-from pm4py.pm4py.objects.log.obj import EventLog, Trace
+from pm4py.objects.log.obj import EventLog, Trace
 
 
 def _build_vocabs(log, attributes=None):
