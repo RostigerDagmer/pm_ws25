@@ -2,7 +2,7 @@
 TODOs for next 2 week:
 
   - general: 
-      - get access to the gpu/cpu cluster (Kequn) (done)
+      - get access to the gpu/cpu cluster (Kequn)
       - setup and prepare paper writing (not urgent)
 
   - create an initial process models and traces data set that we can use for testing
