@@ -22,7 +22,7 @@ The entire token game is essentially two lines of vector math.
 # %%
 import torch
 from typing import Optional
-from pm4py.pm4py.objects.log.obj import EventLog, Trace
+from pm4py.objects.log.obj import EventLog, Trace
 
 
 def simulate(
