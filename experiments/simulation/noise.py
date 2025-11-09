@@ -1,7 +1,7 @@
 import random
 from copy import deepcopy
 from typing import Optional
-from pm4py.pm4py.objects.log.obj import EventLog, Trace
+from pm4py.objects.log.obj import EventLog, Trace
 
 
 def inject_noise(
