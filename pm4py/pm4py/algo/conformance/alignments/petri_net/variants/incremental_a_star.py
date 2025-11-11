@@ -39,6 +39,7 @@ import sys
 import time
 from copy import copy
 from enum import Enum
+import os
 
 import numpy as np
 
@@ -70,6 +71,7 @@ from pm4py.algo.analysis.extended_marking_equation.variants.classic import (
     build as eme_build,
     Parameters as EME_Params,
 )
+from cvxopt import matrix
 
 
 class Parameters(Enum):
@@ -95,6 +97,8 @@ class Parameters(Enum):
     # toggle and solver selection for extended-ME heuristic
     EXT_HEUR_USE_ILP = "ext_heur_use_ilp"
     EXT_HEUR_SOLVER_VARIANT = "ext_heur_solver_variant"
+    # behavior when the EME LP/ILP solver fails for a marking: 'abort' or 'zero'
+    EXT_ME_ON_SOLVER_FAIL = "ext_me_on_solver_fail"
 
 
 PARAM_TRACE_COST_FUNCTION = Parameters.PARAM_TRACE_COST_FUNCTION.value
@@ -537,7 +541,7 @@ def apply_trace_net(
             # forward optional controls (if given)
             EME_Params.COSTS: cost_function,
             EME_Params.MAX_K_VALUE: exec_utils.get_param_value(
-                Parameters.EXT_ME_MAX_K_VALUE, parameters, 5
+                Parameters.EXT_ME_MAX_K_VALUE, parameters, min(10, max(3, len(original_trace) // 5))
             ),
             EME_Params.SPLIT_IDX: exec_utils.get_param_value(
                 Parameters.EXT_ME_SPLIT_IDX, parameters, None
@@ -610,6 +614,14 @@ def apply_sync_prod(
     )
 
 
+# ensure numeric types
+def to_mat_cvtopt(m):
+    try:
+        return matrix(np.asarray(m, dtype=np.float64))
+    except Exception:
+        return matrix(m)
+
+
 def __search(
     sync_net,
     ini,
@@ -647,6 +659,12 @@ def __search(
     if original_trace is None:
         original_trace = log_implementation.Trace()
 
+    # behavior on EME solver failure: 'abort' (default original) or 'zero' to use h=0 fallback
+    ext_me_on_solver_fail = exec_utils.get_param_value(
+        Parameters.EXT_ME_ON_SOLVER_FAIL, ext_me_parameters, "zero"
+    )
+
+    # Build EME solver once (incrementally reused)
     eme_solver = eme_build(
         original_trace,
         sync_net,
@@ -667,46 +685,50 @@ def __search(
     if use_ilp and chosen_variant == scipy_name:
         chosen_variant = pulp_name
 
+    eme_cache = {}
     def _eme_solve(ini_marking: Marking):
+        # use a hashable tuple encoding for caching
+        enc = tuple(incidence_matrix.encode_marking(ini_marking))
+
+        # Reuse cached result if available
+        if enc in eme_cache:
+            return eme_cache[enc]["h"], eme_cache[enc]["x"]
+
         # update initial marking and solve the extended problem with chosen LP/ILP
         eme_solver.change_ini_vec(ini_marking)
         c, Aub, bub, Aeq, beq = eme_solver.get_components()
+
         params = {}
         if use_ilp:
             params["integrality"] = [1] * len(c)
+
         # convert to cvxopt types if a cvxopt variant was explicitly requested
         v = chosen_variant or ""
+
         if isinstance(v, str) and v.startswith("cvxopt"):
-            try:
-                from cvxopt import matrix
-                # ensure numeric types
-                def to_mat(m):
-                    try:
-                        import numpy as _np
-                        return matrix(_np.asarray(m, dtype=_np.float64))
-                    except Exception:
-                        return matrix(m)
-                c2 = matrix([1.0 * x for x in c])
-                Aub2 = to_mat(Aub)
-                bub2 = to_mat(bub)
-                Aeq2 = to_mat(Aeq)
-                beq2 = to_mat(beq)
-                sol = lp_solver.apply(
-                    c2, Aub2, bub2, Aeq2, beq2, parameters=params, variant=v
-                )
-            except Exception as e:
+            c = matrix([1.0 * x for x in c])
+            Aub = to_mat_cvtopt(Aub)
+            bub = to_mat_cvtopt(bub)
+            Aeq = to_mat_cvtopt(Aeq)
+            beq = to_mat_cvtopt(beq)
+        try:
+            sol = lp_solver.apply(c, Aub, bub, Aeq, beq, parameters=params, variant=chosen_variant)
+            prim_obj = lp_solver.get_prim_obj_from_sol(sol, variant=chosen_variant)
+            points = lp_solver.get_points_from_sol(sol, variant=chosen_variant)
+            if prim_obj is None or points is None:
+                raise ValueError("Solver returned no points")
+            x_vec = eme_solver.get_x_vector(points)
+            h_val = eme_solver.get_h(points)
+
+        except Exception as e:
+            # fallback heuristic when infeasible
+            if ext_me_on_solver_fail == "zero":
+                h_val, x_vec = 0.0, np.zeros(len(c))
+            else:
                 raise e
-        else:
-            sol = lp_solver.apply(
-                c, Aub, bub, Aeq, beq, parameters=params, variant=chosen_variant
-            )
-        prim_obj = lp_solver.get_prim_obj_from_sol(sol, variant=chosen_variant)
-        points = lp_solver.get_points_from_sol(sol, variant=chosen_variant)
-        if prim_obj is None or points is None:
-            return None, None
-        # aggregate x and compute h using the EME solver helpers
-        x_vec = eme_solver.get_x_vector(points)
-        h_val = eme_solver.get_h(points)
+
+        # cache result for reuse
+        eme_cache[enc] = {"h": h_val, "x": x_vec}
         return h_val, x_vec
 
     # initial exact heuristic from extended marking equation (no fallback)
@@ -746,9 +768,24 @@ def __search(
 
             h, x = _eme_solve(curr.m)
             if h is None or x is None:
-                return None
-            lp_solved += 1
+                # Attempt partial rebuild of the EME solver
+                try:
+                    eme_solver = eme_build(
+                        original_trace,
+                        sync_net,
+                        ini,
+                        fin,
+                        parameters=ext_me_parameters,
+                    )
+                    h, x = _eme_solve(curr.m)
+                except Exception as e:
+                    if ext_me_on_solver_fail == "zero":
+                        h, x = 0.0, np.zeros(len(cost_vec))
+                    else:
+                        return None
 
+
+            lp_solved += 1
             tp = utils.SearchTuple(
                 curr.g + h, curr.g, h, curr.m, curr.p, curr.t, x, True
             )
@@ -757,21 +794,19 @@ def __search(
 
         if curr.h > lp_solver.MAX_ALLOWED_HEURISTICS:
             continue
-
         already_closed = current_marking in closed
         if already_closed:
             continue
 
-        if curr.h < 0.01:
-            if current_marking == fin:
-                return utils.__reconstruct_alignment(
-                    curr,
-                    visited,
-                    queued,
-                    traversed,
-                    ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
-                    lp_solved=lp_solved,
-                )
+        if curr.h < 0.01 and current_marking == fin:
+            return utils.__reconstruct_alignment(
+                curr,
+                visited,
+                queued,
+                traversed,
+                ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
+                lp_solved=lp_solved,
+            )
 
         closed.add(current_marking)
         visited += 1
