@@ -5,8 +5,8 @@ import argparse
 import numpy as np
 from collections import Counter
 from dataloaders.base import make_feature_fn, BaseEventLogDataset
-from dataloaders.csv import CSVEventLogDataset
-from dataloaders.xes import XESEventLogDataset
+from dataloaders.csv_log import CSVEventLogDataset
+from dataloaders.xes_log import XESEventLogDataset
 from dataloaders.util import (
     CONSTRUCTION_PARAMS,
     DEFAULT_PARAMS_CSV,

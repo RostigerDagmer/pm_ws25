@@ -16,7 +16,7 @@ from itertools import product
 
 from tqdm import tqdm
 from dataloaders.base import make_feature_fn
-from dataloaders.csv import CSVEventLogDataset
+from dataloaders.csv_log import CSVEventLogDataset
 from experiments.simulation.noise import inject_noise_trace
 from features.extractors import CompositeFeatureExtractor
 from pm4py.objects.petri_net.obj import Marking, PetriNet
