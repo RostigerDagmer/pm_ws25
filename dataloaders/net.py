@@ -667,8 +667,8 @@ def random_subset_sampler(log):
 
 if __name__ == "__main__":
     from dataloaders.base import make_feature_fn
-    from dataloaders.csv import CSVEventLogDataset
-    from dataloaders.xes import XESEventLogDataset
+    from dataloaders.csv_log import CSVEventLogDataset
+    from dataloaders.xes_log import XESEventLogDataset
     from pm4py.vis import view_petri_net
 
     # path = "data/c3f3ba2d-e81e-4274-87c7-882fa1dbab0d/BPI2016_Werkmap_Messages.csv"
