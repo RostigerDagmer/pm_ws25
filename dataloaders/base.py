@@ -140,7 +140,7 @@ def make_feature_fn(
 
 
 if __name__ == "__main__":
-    from dataloaders.xes import XESEventLogDataset
+    from dataloaders.xes_log import XESEventLogDataset
 
     path = "data/c2c3b154-ab26-4b31-a0e8-8f2350ddac11/BPI_Challenge_2013_closed_problems.xes"
 
