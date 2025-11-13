@@ -232,6 +232,7 @@ class VariantRandomDistributionSampler(Sampler):
         self,
         n_subsets: int = 1000,  # defines how often the log is sampled... basically
         max_len_subset: int = 100,  # limits the possible length of each sample
+        min_len_subset: int = 10,
         len_distribution: torch.distributions.Distribution = torch.distributions.Exponential(
             torch.tensor([1.0 / 100.0])
         ),  # defines the distribution of lengths across samples
@@ -242,6 +243,7 @@ class VariantRandomDistributionSampler(Sampler):
     ):
         super().__init__(n_subsets=n_subsets, **kwargs)
         self.max_len_subset = max_len_subset
+        self.min_len_subset = min_len_subset
         self.len_distribution = len_distribution
         self.freq_distribution = freq_distributions
 
@@ -259,7 +261,9 @@ class VariantRandomDistributionSampler(Sampler):
         rand_freq = self.freq_distribution.sample((len(variants),))
         new_order = torch.argsort(rand_freq, descending=True)
 
-        idx = new_order[: min(len_set, self.max_len_subset)].tolist()
+        idx = new_order[
+            : max(min(len_set, self.max_len_subset), self.min_len_subset)
+        ].tolist()
         subset = [variants[i] for i in idx]
         return TraceSubset(subset, indices=idx)
 
