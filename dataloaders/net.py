@@ -785,7 +785,10 @@ if __name__ == "__main__":
     pm_dataset = ProcessModelDataset(
         log_dataset=log_dataset,
         discovery_methods={"inductive": discover_petri_net_inductive},
-        param_grid={"noise_threshold": [0.0, 0.1, 0.2, 0.3]},
+        param_grid={
+            "noise_threshold": [0.0, 0.1, 0.2, 0.3],
+            "disable_fallthroughs": [True],
+        },
         sampler_specs={
             "variant3": VariantRandomDistributionSampler(
                 1000,  # number of subsets: defines how often the log is sampled... basically
