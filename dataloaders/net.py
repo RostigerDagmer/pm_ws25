@@ -612,8 +612,10 @@ class ProcessModelDataset(Dataset):
                 data = pickle.load(f)
                 if isinstance(data["pm"], PetriNet):
                     return ProcessModelDataset.ItemType(**data)
-                pm, im, fm = pnml_importer.deserialize(data)
-                data = {"pm": pm, "im": im, "fm": fm, **data}
+                pm, im, fm = pnml_importer.deserialize(
+                    data["pm"].decode('utf-8')
+                )
+                data = {**data, "pm": pm, "im": im, "fm": fm}
                 return ProcessModelDataset.ItemType(**data)
 
         subset = _normalize_log_input(subset)
