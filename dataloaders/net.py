@@ -108,124 +108,6 @@ class FullSampler(Sampler):
         return TraceSubset(log, indices=None)
 
 
-class RandomSubsetSampler(Sampler):
-    def __init__(self, frac: float = 0.5, **kwargs):
-        super().__init__(**kwargs)
-        if not (0.0 < frac <= 1.0):
-            raise ValueError("frac must be in (0, 1]")
-        self.frac = frac
-
-    def sample_once(self, log: EventLog, subset_idx: int):
-        n = len(log)
-        k = max(1, int(round(self.frac * n)))
-        idx = random.sample(range(n), k=k)
-        return TraceSubset((log[i] for i in idx), indices=idx)
-
-
-class LengthStratifiedSampler(Sampler):
-    def __init__(self, n_bins: int = 3, **kwargs):
-        super().__init__(n_subsets=n_bins, **kwargs)
-
-    def sample_once(self, log: EventLog, subset_idx: int):
-        import torch
-
-        lengths: torch.Tensor = self.get_cached(
-            log,
-            "lengths",
-            lambda l: torch.tensor([len(t) for t in l], dtype=torch.float32),
-        )
-        quantiles: torch.Tensor = self.get_cached(
-            log,
-            f"length_bins_{self.n_subsets}",
-            lambda l: torch.quantile(
-                lengths, torch.linspace(0, 1, self.n_subsets + 1)
-            ),
-        )
-
-        lo, hi = quantiles[subset_idx], quantiles[subset_idx + 1]
-        mask = (lengths >= lo) & (lengths <= hi)
-        idx = torch.nonzero(mask).view(-1).tolist()
-        subset = [log[i] for i in idx]
-        return TraceSubset(subset, indices=idx)
-
-
-class TemporalDriftSampler(Sampler):
-    def __init__(self, n_bins: int = 3, **kwargs):
-        super().__init__(n_subsets=n_bins, **kwargs)
-
-    def sample_once(self, log: EventLog, subset_idx: int):
-
-        def compute_medians(l: EventLog):
-            medians = []
-            for trace in l:
-                ts = [
-                    e.get("time:timestamp")
-                    for e in trace
-                    if "time:timestamp" in e
-                ]
-                if not ts:
-                    medians.append(float("nan"))
-                    continue
-                tvals = pd.to_datetime(ts).view("int64")
-                medians.append(
-                    float(
-                        torch.median(torch.tensor(tvals, dtype=torch.float64))
-                    )
-                )
-            return torch.tensor(medians, dtype=torch.float64)
-
-        medians = self.get_cached(log, "timestamp_medians", compute_medians)
-        valid_mask = ~torch.isnan(medians)
-        valid = torch.nonzero(valid_mask).view(-1)
-
-        if len(valid) == 0:
-            raise ValueError("No valid timestamps in log.")
-
-        quantiles = self.get_cached(
-            log,
-            f"time_bins_{self.n_subsets}",
-            lambda l: torch.quantile(
-                medians[valid],
-                torch.linspace(0, 1, self.n_subsets + 1, dtype=torch.float64),
-            ),
-        )
-
-        lo, hi = quantiles[subset_idx], quantiles[subset_idx + 1]
-        idx = (
-            (valid_mask & (medians >= lo) & (medians <= hi))
-            .nonzero()
-            .view(-1)
-            .tolist()
-        )
-        subset = [log[i] for i in idx]
-        return TraceSubset(subset, indices=idx)
-
-
-class VariantFrequencySampler(Sampler):
-    def __init__(self, n_bins: int = 3, **kwargs):
-        super().__init__(n_subsets=n_bins, **kwargs)
-
-    def sample_once(self, log: EventLog, subset_idx: int):
-
-        def compute_variant_freqs(l):
-            variants = [";".join(e["concept:name"] for e in t) for t in l]
-            freq = Counter(variants)
-            freqs = torch.tensor(
-                [freq[v] for v in list(variants)], dtype=torch.float32
-            )
-            order = torch.argsort(freqs, descending=True)
-            return {"freqs": freqs, "order": order}
-
-        cached = self.get_cached(log, "variant_freqs", compute_variant_freqs)
-        order = cached["order"]
-        n = len(order)
-        bin_size = max(1, n // self.n_subsets)
-        start, end = subset_idx * bin_size, min((subset_idx + 1) * bin_size, n)
-        idx = order[start:end].tolist()
-        subset = [log[i] for i in idx]
-        return TraceSubset(subset, indices=idx)
-
-
 class VariantRandomDistributionSampler(Sampler):
     def __init__(
         self,
@@ -283,71 +165,6 @@ class VariantRandomDistributionSampler(Sampler):
             ]
             subset = [trace for traces in subset for trace in traces]
         return TraceSubset(subset, indices=idx)
-
-
-class ActivitySetSampler(Sampler):
-    """
-    Groups traces by their (unordered) set of activities.
-    Each subset corresponds to one of the largest activity-set clusters.
-    """
-
-    def __init__(self, max_groups: int = 5, **kwargs):
-        super().__init__(n_subsets=max_groups, **kwargs)
-        self.max_groups = max_groups
-
-    def sample_once(self, log: EventLog, subset_idx: int):
-        def compute_activity_groups(l: EventLog):
-            # Build mapping activity_set -> list of (index, trace)
-            groups = defaultdict(list)
-            for i, trace in enumerate(l):
-                acts = frozenset(
-                    e["concept:name"] for e in trace if "concept:name" in e
-                )
-                groups[acts].append((i, trace))
-            # Sort groups largest → smallest
-            sorted_groups = sorted(groups.values(), key=len, reverse=True)
-            return sorted_groups
-
-        # Cache the grouping per-log
-        sorted_groups = self.get_cached(
-            log, "activity_groups", compute_activity_groups
-        )
-        if not sorted_groups:
-            raise ValueError(
-                "No activity groups could be formed (empty log?)."
-            )
-
-        # Wrap around if fewer groups than requested subsets
-        g = sorted_groups[subset_idx % len(sorted_groups)]
-        idx, traces = zip(*g)
-        return TraceSubset(traces, indices=list(idx))
-
-
-class AttributeClusterSampler(Sampler):
-    def __init__(
-        self, attribute: str, n_subsets: Optional[int] = None, **kwargs
-    ):
-        super().__init__(n_subsets=n_subsets or 3, **kwargs)
-        self.attribute = attribute
-
-    def sample_once(self, log: EventLog, subset_idx: int):
-        from collections import defaultdict
-
-        groups = defaultdict(list)
-        for i, trace in enumerate(log):
-            val = trace.attributes.get(self.attribute, None)
-            groups[val].append((i, trace))
-
-        group_keys = list(groups.keys())
-        if not group_keys:
-            raise ValueError(
-                f"Attribute '{self.attribute}' not found in any trace."
-            )
-
-        # cycle if more requested than existing
-        key = group_keys[subset_idx % len(group_keys)]
-        idx, traces = zip(*groups[key])
-        return TraceSubset(traces, indices=idx)
 
 
 class ProcessModelDataset(Dataset):
@@ -700,68 +517,41 @@ class PARAM_GRID(Enum):
         "multi_processing": [False],
     }
 
+    TINY = {
+        "noise_threshold": [0.0, 0.1, 0.25, 0.4],
+        "disable_fallthroughs": [True],
+        "multi_processing": [False],
+    }
+
 
 class SAMPLER_SPECS(Enum):
     STANDARD = {
-        "full": FullSampler(n_subsets=1),
-        "random20": RandomSubsetSampler(frac=0.2, n_subsets=3, seed=42),
+        "variant_random": VariantRandomDistributionSampler(
+            n_subsets=1000,  # number of subsets: defines how often the log is sampled... basically
+            max_len_subset=100,
+            min_len_subset=10,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
+            len_distribution=torch.distributions.Exponential(
+                torch.tensor([1.0 / 100.0])
+            ),  # subset length distribution: defines the distribution of lengths across samples
+            freq_distribution=torch.distributions.Normal(
+                10.0, 5.0
+            ),  # (variant) freq_distribution: defines the reordering of traces/variants on every sampling call, by defining the sampling behavior over index(variant) -> frequency.
+            # realistically this would more likely be an exponential... but harder to parametrize... e.g.:
+            # freq_distribution=torch.distributions.Exponential(
+            #     torch.tensor([1.0 / 20.0])
+            # )
+            reconstruct_frequency=True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
+        )
     }
-
-    EXTENSIVE = (
-        {
-            "full": FullSampler(n_subsets=1),
-            "random20": RandomSubsetSampler(frac=0.2, n_subsets=10, seed=42),
-            "random50": RandomSubsetSampler(frac=0.5, n_subsets=5, seed=1337),
-            "activity_set5": ActivitySetSampler(max_groups=5),
-            "activity_set15": ActivitySetSampler(max_groups=15),
-            "activity_set25": ActivitySetSampler(max_groups=25),
-            "temporal_drift3": TemporalDriftSampler(n_bins=3),
-            "temporal_drift7": TemporalDriftSampler(n_bins=7),
-            "temporal_drift15": TemporalDriftSampler(n_bins=15),
-            "length_strat3": LengthStratifiedSampler(n_bins=3),
-            "length_strat5": LengthStratifiedSampler(n_bins=3),
-            "variant3": VariantFrequencySampler(n_bins=3),
-            "variant7": VariantFrequencySampler(n_bins=7),
-        },
-    )
-
-    SUBSETS_ONLY = {
-        "activity_set5": ActivitySetSampler(max_groups=5),
-        "activity_set15": ActivitySetSampler(max_groups=15),
-        "activity_set25": ActivitySetSampler(max_groups=25),
-        "temporal_drift3": TemporalDriftSampler(n_bins=3),
-        "temporal_drift7": TemporalDriftSampler(n_bins=7),
-        "temporal_drift15": TemporalDriftSampler(n_bins=15),
-        "length_strat3": LengthStratifiedSampler(n_bins=3),
-        "length_strat5": LengthStratifiedSampler(n_bins=3),
-        "variant3": VariantFrequencySampler(n_bins=3),
-        "variant7": VariantFrequencySampler(n_bins=7),
-    }
-
-    VARIANTS_ONLY = {
-        "variant3": VariantFrequencySampler(n_bins=3),
-        "variant7": VariantFrequencySampler(n_bins=7),
-        "variant20": VariantFrequencySampler(n_bins=20),
-    }
-
-
-def random_subset_sampler(log):
-    n = len(log)
-    indices = random.sample(range(n), k=n // 2)
-    return [log[i] for i in indices]
 
 
 if __name__ == "__main__":
-    from dataloaders.base import make_feature_fn
-    from dataloaders.csv_log import CSVEventLogDataset
     from dataloaders.xes_log import XESEventLogDataset
     from pm4py.vis import view_petri_net
 
     path = "data/63a8435a-077d-4ece-97cd-2c76d394d99c/BPIC15_2.xes"
 
-    log_dataset = XESEventLogDataset(
-        path, attribute="concept:name", feature_fn=make_feature_fn
-    )
+    log_dataset = XESEventLogDataset(path, attribute="concept:name")
 
     '''
     Example usage of the "Dedup by Variant, then define an arbitrary distribution over variants" approach.
@@ -776,7 +566,7 @@ if __name__ == "__main__":
             "disable_fallthroughs": [True],
         },
         sampler_specs={
-            "variant3": VariantRandomDistributionSampler(
+            "variant_random": VariantRandomDistributionSampler(
                 n_subsets=1000,  # number of subsets: defines how often the log is sampled... basically
                 max_len_subset=100,
                 min_len_subset=10,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
