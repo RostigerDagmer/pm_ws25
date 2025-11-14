@@ -16,7 +16,6 @@ from abc import ABC, abstractmethod
 from itertools import product
 
 from tqdm import tqdm
-from dataloaders.base import make_feature_fn
 from dataloaders.csv_log import CSVEventLogDataset
 from experiments.simulation.noise import inject_noise_trace
 from features.extractors import CompositeFeatureExtractor
@@ -350,7 +349,6 @@ if __name__ == "__main__":
     from dataloaders.net import VariantRandomDistributionSampler
     from pm4py.discovery import discover_petri_net_inductive
     import matplotlib.pyplot as plt
-    from sklearn.ensemble import RandomForestClassifier
     import numpy as np
     import pandas as pd
 
@@ -363,7 +361,6 @@ if __name__ == "__main__":
         timestamp_col="EventDateTime",
         activity_col="HandlingChannelID",
         sep=";",
-        feature_fn=make_feature_fn,
     )
 
     # subset length distribution: defines the distribution of lengths across samples
