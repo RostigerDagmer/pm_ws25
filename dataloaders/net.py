@@ -33,7 +33,6 @@ from pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.objects.petri_net.importer import importer as pnml_importer
 from pm4py.objects.petri_net.exporter import exporter as pnml_exporter
 
-
 logging.getLogger(None)
 logging.basicConfig(level=logging.INFO)
 
@@ -236,16 +235,18 @@ class VariantRandomDistributionSampler(Sampler):
         len_distribution: torch.distributions.Distribution = torch.distributions.Exponential(
             torch.tensor([1.0 / 100.0])
         ),  # defines the distribution of lengths across samples
-        freq_distributions: torch.distributions.Distribution = torch.distributions.Normal(
-            50.0, 20.0
+        freq_distribution: torch.distributions.Distribution = torch.distributions.Normal(
+            10.0, 5.0
         ),  # defines the reordering of traces by defining the sampling distribution over index(index) -> p(frequency).
+        reconstruct_frequency: bool = True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
         **kwargs,
     ):
         super().__init__(n_subsets=n_subsets, **kwargs)
         self.max_len_subset = max_len_subset
         self.min_len_subset = min_len_subset
         self.len_distribution = len_distribution
-        self.freq_distribution = freq_distributions
+        self.freq_distribution = freq_distribution
+        self.reconstruct_frequency = reconstruct_frequency
 
     def sample_once(self, log: EventLog, subset_idx: int):
         def compute_variants(l: EventLog):
@@ -257,14 +258,30 @@ class VariantRandomDistributionSampler(Sampler):
         cached = self.get_cached(log, "variants", compute_variants)
         variants = list(cached["vars"].values())
         len_set = int(self.len_distribution.sample((1,))[0].item())
-
         rand_freq = self.freq_distribution.sample((len(variants),))
-        new_order = torch.argsort(rand_freq, descending=True)
 
+        # normal returns shape (), exponential returns shape (1,)
+        if rand_freq.dim() > 1:
+            rand_freq = rand_freq.squeeze()
+
+        # clamp to positive
+        rand_freq = torch.clamp(rand_freq, min=1.0)
+        new_order = torch.argsort(rand_freq, descending=True)
+        ord_freq = torch.sort(rand_freq, descending=True).values
+
+        # reorder variants by sampled frequency
         idx = new_order[
             : max(min(len_set, self.max_len_subset), self.min_len_subset)
         ].tolist()
-        subset = [variants[i] for i in idx]
+
+        # reconstruct frequency in sampled subset
+        if not self.reconstruct_frequency:
+            subset = [variants[i] for i in idx]
+        else:
+            subset = [
+                [variants[i]] * int(f.item()) for i, f in zip(idx, ord_freq)
+            ]
+            subset = [trace for traces in subset for trace in traces]
         return TraceSubset(subset, indices=idx)
 
 
@@ -351,7 +368,7 @@ class ProcessModelDataset(Dataset):
         trace_indices: list[int] | None
 
         def hash(self) -> str:
-            d = {str(k): str(v) for k, v in self.__dict__.items()}
+            d = {str(k): str(v) for k, v in self.__dict__.items() if k != "pm"}
             return hashlib.sha1(
                 json.dumps(d, sort_keys=True).encode()
             ).hexdigest()
@@ -740,52 +757,15 @@ if __name__ == "__main__":
     from dataloaders.xes_log import XESEventLogDataset
     from pm4py.vis import view_petri_net
 
-    # path = "data/c3f3ba2d-e81e-4274-87c7-882fa1dbab0d/BPI2016_Werkmap_Messages.csv"
     path = "data/63a8435a-077d-4ece-97cd-2c76d394d99c/BPIC15_2.xes"
 
     log_dataset = XESEventLogDataset(
         path, attribute="concept:name", feature_fn=make_feature_fn
     )
 
-    # log_dataset = CSVEventLogDataset(
-    #     path,
-    #     case_id_col="CustomerID",
-    #     timestamp_col="EventDateTime",
-    #     activity_col="HandlingChannelID",
-    #     sep=";",
-    #     feature_fn=make_feature_fn,
-    # )
-
-    # pm_dataset = ProcessModelDataset(
-    #     log_dataset=log_dataset,
-    #     discovery_methods=DISCOVERY_METHODS.GURANTEED_SOUND,
-    #     param_grid=PARAM_GRID.STANDARD,
-    #     sampler_specs=SAMPLER_SPECS.VARIANTS_ONLY,
-    #     cached=True,
-    # )
-
     '''
     Example usage of the "Dedup by Variant, then define an arbitrary distribution over variants" approach.
-
     In the following "subset" is equivalent to "EventLog"... every subset is also an EventLog, however it is only a subset of the FULL eventlog that the FULL XES Dataset describes.
-
-    Note:
-    This is still unstable because of recursion depth in:
-    discover_petri_net_inductive
-    ->
-    pm4py/discovery.py", line 705
-    discover_process_tree_inductive
-    ->
-    apply
-    pm4py/algo/discovery/inductive/algorithm.py", line 112, in apply
-    return inductive_miner.apply(log, variant=variant, parameters=parameters)
-    ->
-    fold
-    pm4py/objects/process_tree/utils/generic.py", line 43, in fold
-    process_tree = pt_util.fold(process_tree)
-    ->
-    deepcopy
-    tree = copy.deepcopy(tree)
     '''
 
     pm_dataset = ProcessModelDataset(
@@ -797,24 +777,31 @@ if __name__ == "__main__":
         },
         sampler_specs={
             "variant3": VariantRandomDistributionSampler(
-                1000,  # number of subsets: defines how often the log is sampled... basically
-                100,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
-                torch.distributions.Exponential(
+                n_subsets=1000,  # number of subsets: defines how often the log is sampled... basically
+                max_len_subset=100,
+                min_len_subset=10,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
+                len_distribution=torch.distributions.Exponential(
                     torch.tensor([1.0 / 100.0])
                 ),  # subset length distribution: defines the distribution of lengths across samples
-                torch.distributions.Normal(
-                    50.0, 20.0
+                freq_distribution=torch.distributions.Normal(
+                    10.0, 5.0
                 ),  # (variant) freq_distribution: defines the reordering of traces/variants on every sampling call, by defining the sampling behavior over index(variant) -> frequency.
+                # realistically this would more likely be an exponential... but harder to parametrize... e.g.:
+                # freq_distribution=torch.distributions.Exponential(
+                #     torch.tensor([1.0 / 20.0])
+                # )
+                reconstruct_frequency=True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
             )
         },
         cached=True,
     )
 
-    for item in pm_dataset:
+    for i, item in enumerate(pm_dataset):
         print(item)
         view_petri_net(
             item.pm,
             item.im,
             item.fm,
         )
-        break
+        if i >= 10:
+            break

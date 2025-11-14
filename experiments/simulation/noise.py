@@ -11,6 +11,7 @@ def inject_noise(
     p_swap: float = 0.02,
     labels: Optional[str] = None,
     activity_key: str = "concept:name",
+    seed: Optional[int] = None,
 ) -> EventLog:
     """
     Returns a *deepcopy* of the log with noise injected.
@@ -21,7 +22,7 @@ def inject_noise(
     for trace in log:
         # rewrap into a PM4Py Trace object
         new_trace = inject_noise_trace(
-            trace, p_insert, p_delete, p_swap, labels, activity_key
+            trace, p_insert, p_delete, p_swap, labels, activity_key, seed=seed
         )
         noisy_log.append(new_trace)
 
@@ -35,7 +36,11 @@ def inject_noise_trace(
     p_swap: float = 0.02,
     labels: Optional[str] = None,
     activity_key: str = "concept:name",
+    seed: Optional[int] = None,
 ) -> Trace:
+
+    if seed is not None:
+        random.seed(seed)
     new_events = list(deepcopy(trace))  # mutable copy of events list
     i = 0
     while i < len(new_events):
