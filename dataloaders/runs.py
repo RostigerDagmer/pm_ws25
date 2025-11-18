@@ -139,6 +139,27 @@ class RunDataset(Dataset):
         algo: str
         comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
 
+    @dataclass
+    class SerializedItemType:
+        item_id: str
+        model: ProcessModelDataset.SerializedView.ItemType
+        trace: Trace
+        item: Union[typing.AlignmentResult, typing.ListAlignments]
+        perf: dict[str, Any]
+        algo: str
+        comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
+
+        def deserialize(self) -> "RunDataset.ItemType":
+            return RunDataset.ItemType(
+                self.item_id,
+                self.model.deserialize(),
+                self.trace,
+                self.item,
+                PerfCounter.from_dict(self.perf),
+                self.algo,
+                self.comb_id,
+            )
+
     def __init__(
         self,
         base_path: Path,
@@ -154,7 +175,7 @@ class RunDataset(Dataset):
             self.pm_dataset, seed=SEED, slice=slice
         )
         self.aligners = aligners
-        self.items: dict[str, "RunDataset.ItemType"] = {}
+        self.items: dict[str, "RunDataset.SerializedItemType"] = {}
         self.index: list[str] = []
         if multiprocessing:
             self._init_cache_mp()
@@ -166,9 +187,7 @@ class RunDataset(Dataset):
         if os.path.exists(path):
             with open(path, "rb") as f:
                 self.items = pickle.load(f)
-                print(f"tryload::self.items: {len(self.items)}")
                 self.index = list(self.items.keys())
-                print(f"tryload::self.index: {len(self.index)}")
 
     def save_path(self):
         return self.base_path / Path(f"{self._hash_config()}.pkl")
@@ -179,7 +198,7 @@ class RunDataset(Dataset):
         model: ProcessModelDataset.SerializedView.ItemType,
         trace: Trace,
         aligner: Aligner | str,
-    ) -> "RunDataset.ItemType":
+    ) -> "RunDataset.SerializedItemType":
 
         deser_model = model.deserialize()
         if isinstance(aligner, str):
@@ -192,9 +211,9 @@ class RunDataset(Dataset):
                 deser_model.pm, deser_model.im, deser_model.fm, trace
             )
         stats = pc.dict()
-        return RunDataset.ItemType(
+        return RunDataset.SerializedItemType(
             hash,
-            deser_model,
+            model,
             trace,
             item,
             stats,
@@ -331,9 +350,8 @@ class RunDataset(Dataset):
 
     def __getitem__(self, index: int) -> "RunDataset.ItemType":
         key = self.index[index]
-        # deserialize perf
-        item = self.items[key]
-        item.perf = PerfCounter.from_dict(item.perf)
+        # deserialize
+        item = self.items[key].deserialize()
         return item
 
 
@@ -486,7 +504,7 @@ if __name__ == "__main__":
         ]
     )
 
-    for run in run_dataset:
+    for run in tqdm(run_dataset, desc="Extracting features from runs"):
         model, trace, item, perf, algo = (
             run.model,
             run.trace,
