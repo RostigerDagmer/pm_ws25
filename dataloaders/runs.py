@@ -16,7 +16,6 @@ from abc import ABC, abstractmethod
 from itertools import product
 
 from tqdm import tqdm
-from dataloaders.csv_log import CSVEventLogDataset
 from experiments.simulation.noise import inject_noise_trace
 from features.extractors import CompositeFeatureExtractor
 from pm4py.objects.petri_net.obj import Marking, PetriNet
@@ -49,7 +48,7 @@ class Aligner(ABC):
 
     @abstractmethod
     def hash(self) -> str:
-        pass
+        return self.name
 
 
 class PerfCounter:
@@ -78,6 +77,11 @@ class PerfCounter:
 
     @staticmethod
     def from_dict(d) -> "PerfCounter":
+        if isinstance(d, PerfCounter):
+            logging.warning(
+                "PerfCounter.from_dict called on PerfCounter instance"
+            )
+            return d
         duration = d["duration"]
         stats = pstats.Stats()
         stats.stats = marshal.loads(d["stats"])
@@ -172,27 +176,38 @@ class RunDataset(Dataset):
     @staticmethod
     def _process_item(
         hash: str,
-        model: "ProcessModelDataset.ItemType",
+        model: ProcessModelDataset.SerializedView.ItemType,
         trace: Trace,
-        aligner: Aligner,
+        aligner: Aligner | str,
     ) -> "RunDataset.ItemType":
+
+        deser_model = model.deserialize()
+        if isinstance(aligner, str):
+            # reconstruct aligner from name (in the mp case)
+            aligner = next(
+                a for a in AlignerSpec.ALL.value if a.name == aligner
+            )
         with PerfCounter() as pc:
-            item = aligner(model.pm, model.im, model.fm, trace)
+            item = aligner(
+                deser_model.pm, deser_model.im, deser_model.fm, trace
+            )
         stats = pc.dict()
         return RunDataset.ItemType(
             hash,
-            model,
+            deser_model,
             trace,
             item,
             stats,
             aligner.name,
-            RunDataset._hash_comb(trace, model),
+            RunDataset._hash_comb(trace, deser_model),
         )
 
     def _init_cache(self):
         self._tryload()
         for trace in tqdm(self.trace_sampler, total=len(self.trace_sampler)):
-            for model in tqdm(self.pm_dataset, total=len(self.pm_dataset)):
+            for model in tqdm(
+                self.pm_dataset.serialized, total=len(self.pm_dataset)
+            ):
                 for aligner in self.aligners:
                     h = self._hash_item(
                         model, trace, aligner
@@ -210,42 +225,64 @@ class RunDataset(Dataset):
 
     def _init_cache_mp(self):
         self._tryload()
-
         total = (
-            len(self.trace_sampler) * len(self.pm_dataset) * len(self.aligners)
+            len(self.trace_sampler)
+            * len(self.pm_dataset.serialized)
+            * len(self.aligners)
         )
-        num_workers = min(multiprocessing.cpu_count(), 64)
+
+        num_workers = multiprocessing.cpu_count()
         logging.info(
             f"Populating run dataset cache using {num_workers} workers..."
         )
 
         existing_items = self.items
         new_items = {}
-
         with ProcessPoolExecutor(max_workers=num_workers) as pool:
+            futures = set()
+            preparing = tqdm(total=total, desc="Preparing")
+            aligned = tqdm(total=0, desc="Aligned")  # dynamic total
 
-            results = pool.map(
-                lambda args: RunDataset._process_item(*args),
-                [
-                    (t, m, a)
-                    for t, m, a in product(
-                        self.trace_sampler, self.pm_dataset, self.aligners
-                    )
-                    if RunDataset._hash_item(t, m, a) not in existing_items
-                ],
-            )
-
-            for model, trace, aligner, perf, item, algo in tqdm(
-                results, total=total, desc="Aligned"
+            for m, t, a in product(
+                self.pm_dataset.serialized, self.trace_sampler, self.aligners
             ):
-                h = self._hash_item(model, trace, aligner)
-                new_items[h] = (model, trace, item, perf, algo)
+                item_id = RunDataset._hash_item(m, t, a)
+                if item_id in existing_items:
+                    preparing.update(1)
+                    continue
 
+                fut = pool.submit(
+                    RunDataset._process_item,
+                    item_id,
+                    m,
+                    t,
+                    a.name,
+                )
+                futures.add(fut)
+                aligned.total += 1  # update total dynamically
+                preparing.update(1)
+
+                # **consume any futures that are ready immediately**
+                done = {f for f in futures if f.done()}
+                for d in done:
+                    item = d.result()
+                    new_items[item.item_id] = item
+                    futures.remove(d)
+                    aligned.update(1)
+
+            # after producer loop: drain remaining futures
+            for fut in as_completed(futures):
+                item: RunDataset.ItemType = fut.result()
+                new_items[item.item_id] = item
+                aligned.update(1)
+
+        # finalize
         self.items.update(new_items)
         self.index = list(self.items.keys())
 
         path = self.save_path()
         os.makedirs(path.parent, exist_ok=True)
+
         with open(path, "wb") as f:
             pickle.dump(self.items, f)
 
@@ -269,7 +306,7 @@ class RunDataset(Dataset):
 
     @staticmethod
     def _hash_item(
-        model: ProcessModelDataset.ItemType,
+        model: ProcessModelDataset.SerializedView.ItemType,
         trace: Trace,
         aligner: Aligner,
     ) -> str:
@@ -347,6 +384,8 @@ class SimplePerturbedTraceSampler(TraceSampler):
 if __name__ == "__main__":
     import torch
     from dataloaders.net import VariantRandomDistributionSampler
+    from dataloaders.csv_log import CSVEventLogDataset
+    from dataloaders.xes_log import XESEventLogDataset
     from pm4py.discovery import discover_petri_net_inductive
     import matplotlib.pyplot as plt
     import numpy as np
@@ -354,14 +393,9 @@ if __name__ == "__main__":
 
     PLOT = False
 
-    path = "data/c3f3ba2d-e81e-4274-87c7-882fa1dbab0d/BPI2016_Werkmap_Messages.csv"
-    log_dataset = CSVEventLogDataset(
-        path,
-        case_id_col="CustomerID",
-        timestamp_col="EventDateTime",
-        activity_col="HandlingChannelID",
-        sep=";",
-    )
+    path = "data/63a8435a-077d-4ece-97cd-2c76d394d99c/BPIC15_2.xes"
+
+    log_dataset = XESEventLogDataset(path)
 
     # subset length distribution: defines the distribution of lengths across samples
     len_distribution = torch.distributions.Exponential(
@@ -419,7 +453,7 @@ if __name__ == "__main__":
         pm_dataset,
         AlignerSpec.A_STAR.value,
         SimplePerturbedTraceSampler,
-        multiprocessing=False,
+        multiprocessing=True,
         slice=range(0, 25),  # <- for testing
     )
 
