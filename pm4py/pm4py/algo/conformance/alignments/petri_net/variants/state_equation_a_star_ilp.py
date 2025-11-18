@@ -80,6 +80,7 @@ def __compute_exact_heuristic_new_version_ilp(
     incidence_matrix,
     marking,
     fin_vec,
+    variant = lp_solver.CVXOPT_SOLVER_CUSTOM_ALIGN_ILP,
     use_cvxopt=False,
     strict=True,
 ):
@@ -103,9 +104,6 @@ def __compute_exact_heuristic_new_version_ilp(
     integrality = [1] * len(sync_net.transitions)
     parameters_solving = {"solver": "glpk", "integrality": integrality}
 
-    # call solver forcing the CVXOPT custom align ILP variant
-    variant = lp_solver.CVXOPT_SOLVER_CUSTOM_ALIGN_ILP
-
     try:
         sol = lp_solver.apply(
             cost_vec,
@@ -116,22 +114,23 @@ def __compute_exact_heuristic_new_version_ilp(
             parameters=parameters_solving,
             variant=variant,
         )
-        effective_variant = variant
+        # effective_variant = variant
     except Exception:
-        # fallback: CVXOPT ILP not available; use default solver and request integrality
-        parameters_fallback = {"require_ilp": True, "integrality": integrality}
-        sol = lp_solver.apply(
-            cost_vec,
-            g_matrix,
-            h_cvx,
-            a_matrix,
-            b_term,
-            parameters=parameters_fallback,
-            variant=lp_solver.DEFAULT_LP_SOLVER_VARIANT,
-        )
-        effective_variant = lp_solver.DEFAULT_LP_SOLVER_VARIANT
-    prim_obj = lp_solver.get_prim_obj_from_sol(sol, variant=effective_variant)
-    points = lp_solver.get_points_from_sol(sol, variant=effective_variant)
+        # TODO: remove fallback: CVXOPT ILP not available; use default solver and request integrality
+        # parameters_fallback = {"require_ilp": True, "integrality": integrality}
+        # sol = lp_solver.apply(
+        #     cost_vec,
+        #     g_matrix,
+        #     h_cvx,
+        #     a_matrix,
+        #     b_term,
+        #     parameters=parameters_fallback,
+        #     variant=lp_solver.DEFAULT_LP_SOLVER_VARIANT,
+        # )
+        # effective_variant = lp_solver.DEFAULT_LP_SOLVER_VARIANT
+        raise Exception("ILP solver variant not available.")
+    prim_obj = lp_solver.get_prim_obj_from_sol(sol, variant=variant)
+    points = lp_solver.get_points_from_sol(sol, variant=variant)
 
     prim_obj = prim_obj if prim_obj is not None else sys.maxsize
     points = (
