@@ -242,6 +242,9 @@ class RunDataset(Dataset):
         with open(self.save_path(), "wb") as f:
             pickle.dump(self.items, f)
 
+    def __len__(self):
+        return len(self.index)
+
     def _init_cache_mp(self):
         self._tryload()
         total = (
