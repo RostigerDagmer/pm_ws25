@@ -41,6 +41,8 @@ from copy import copy
 from enum import Enum
 
 import numpy as np
+# Import cvxopt components directly for lean LP solving
+from cvxopt import matrix, glpk
 
 from pm4py.objects.log import obj as log_implementation
 from pm4py.objects.petri_net.utils import align_utils as utils
@@ -58,7 +60,6 @@ from pm4py.objects.petri_net.utils.petri_utils import (
 )
 from pm4py.util import exec_utils
 from pm4py.util.constants import PARAMETER_CONSTANT_ACTIVITY_KEY
-from pm4py.util.lp import solver as lp_solver
 from pm4py.util.xes_constants import DEFAULT_NAME_KEY
 from pm4py.util import variants_util
 from typing import Optional, Dict, Any, Union
@@ -565,6 +566,67 @@ def apply_sync_prod(
     )
 
 
+def _to_cvxopt_mat(x):
+    arr = np.asarray(x, dtype=float)
+    return matrix(arr)
+
+
+def __compute_heuristic_lean_lp(
+    sync_net,
+    a_matrix,
+    h_cvx,
+    g_matrix,
+    cost_vec,
+    incidence_matrix,
+    marking,
+    fin_vec
+):
+    """
+    Computes the heuristic using a LEAN LP formulation.
+    This skips Python overhead by calling GLPK LP solver directly via CVXOPT.
+    """
+    # 1. Calculate b_term (target marking vector: m_f - m)
+    m_vec = incidence_matrix.encode_marking(marking)
+    b_term = [i - j for i, j in zip(fin_vec, m_vec)]
+    b_term = np.matrix([x * 1.0 for x in b_term]).transpose()
+
+    # 2. Convert to CVXOPT matrices (required by raw interface)
+    try:
+        cost_c = _to_cvxopt_mat(cost_vec)
+        g_c = _to_cvxopt_mat(g_matrix)
+        h_c = _to_cvxopt_mat(h_cvx)
+        a_c = _to_cvxopt_mat(a_matrix)
+        b_c = _to_cvxopt_mat(b_term)
+    except Exception:
+        # Fallback if conversion fails
+        return sys.maxsize, [0.0] * len(sync_net.transitions)
+
+    # 3. Configure GLPK options (Silent)
+    glpk.options["msg_lev"] = "GLP_MSG_OFF"
+
+    # 4. Call GLPK LP directly
+    try:
+        status, x, y, z = glpk.lp(cost_c, g_c, h_c, a_c, b_c)
+    except Exception:
+        status = None
+        x = None
+
+    # 5. Extract result
+    prim_obj = None
+    points = None
+
+    if status == 'optimal' and x is not None:
+        # Calculate objective: c^T * x
+        from cvxopt import blas
+        prim_obj = blas.dot(cost_c, x)
+        points = list(x)
+
+    prim_obj = prim_obj if prim_obj is not None else sys.maxsize
+    points = points if points is not None else [0.0] * len(sync_net.transitions)
+
+    return prim_obj, points
+
+
 def __search(
     sync_net,
     ini,
@@ -586,30 +648,15 @@ def __search(
 
     closed = set()
 
+    # Prepare static matrices for LP
+    # G and h for non-negativity constraints: -I * x <= 0  =>  x >= 0
     a_matrix = np.asmatrix(incidence_matrix.a_matrix).astype(np.float64)
     g_matrix = -np.eye(len(sync_net.transitions))
     h_cvx = np.matrix(np.zeros(len(sync_net.transitions))).transpose()
     cost_vec = [x * 1.0 for x in cost_vec]
 
-    use_cvxopt = False
-    if (
-        lp_solver.DEFAULT_LP_SOLVER_VARIANT
-        == lp_solver.CVXOPT_SOLVER_CUSTOM_ALIGN
-        or lp_solver.DEFAULT_LP_SOLVER_VARIANT
-        == lp_solver.CVXOPT_SOLVER_CUSTOM_ALIGN_ILP
-    ):
-        use_cvxopt = True
-
-    if use_cvxopt:
-        # not available in the latest version of PM4Py
-        from cvxopt import matrix
-
-        a_matrix = matrix(a_matrix)
-        g_matrix = matrix(g_matrix)
-        h_cvx = matrix(h_cvx)
-        cost_vec = matrix(cost_vec)
-
-    h, x = utils.__compute_exact_heuristic_new_version(
+    # Compute initial heuristic using LEAN LP
+    h, x = __compute_heuristic_lean_lp(
         sync_net,
         a_matrix,
         h_cvx,
@@ -617,10 +664,9 @@ def __search(
         cost_vec,
         incidence_matrix,
         ini,
-        fin_vec,
-        lp_solver.DEFAULT_LP_SOLVER_VARIANT,
-        use_cvxopt=use_cvxopt,
+        fin_vec
     )
+
     ini_state = utils.SearchTuple(0 + h, 0, h, ini, None, None, x, True)
     open_set = [ini_state]
     heapq.heapify(open_set)
@@ -651,7 +697,8 @@ def __search(
                 current_marking = curr.m
                 continue
 
-            h, x = utils.__compute_exact_heuristic_new_version(
+            # Recalculate heuristic using LEAN LP for untrusted states
+            h, x = __compute_heuristic_lean_lp(
                 sync_net,
                 a_matrix,
                 h_cvx,
@@ -659,34 +706,23 @@ def __search(
                 cost_vec,
                 incidence_matrix,
                 curr.m,
-                fin_vec,
-                lp_solver.DEFAULT_LP_SOLVER_VARIANT,
-                use_cvxopt=use_cvxopt,
+                fin_vec
             )
             lp_solved += 1
 
-            # 11/10/19: shall not a state for which we compute the exact heuristics be
-            # by nature a trusted solution?
             tp = utils.SearchTuple(
                 curr.g + h, curr.g, h, curr.m, curr.p, curr.t, x, True
             )
-            # 11/10/2019 (optimization ZA) heappushpop is slightly more efficient than pushing
-            # and popping separately
             curr = heapq.heappushpop(open_set, tp)
             current_marking = curr.m
 
-        # max allowed heuristics value (27/10/2019, due to the numerical
-        # instability of some of our solvers)
-        if curr.h > lp_solver.MAX_ALLOWED_HEURISTICS:
+        if curr.h > 10**15: # MAX_ALLOWED_HEURISTICS equivalent
             continue
 
-        # 12/10/2019: do it again, since the marking could be changed
         already_closed = current_marking in closed
         if already_closed:
             continue
 
-        # 12/10/2019: the current marking can be equal to the final marking only if the heuristics
-        # (underestimation of the remaining cost) is 0. Low-hanging fruits
         if curr.h < 0.01:
             if current_marking == fin:
                 return utils.__reconstruct_alignment(

@@ -41,6 +41,8 @@ from copy import copy
 from enum import Enum
 
 import numpy as np
+# Import cvxopt components directly
+from cvxopt import matrix, glpk
 
 from pm4py.objects.log import obj as log_implementation
 from pm4py.objects.petri_net.utils import align_utils as utils
@@ -58,86 +60,12 @@ from pm4py.objects.petri_net.utils.petri_utils import (
 )
 from pm4py.util import exec_utils
 from pm4py.util.constants import PARAMETER_CONSTANT_ACTIVITY_KEY
-from pm4py.util.lp import solver as lp_solver
 from pm4py.util.xes_constants import DEFAULT_NAME_KEY
 from pm4py.util import variants_util
 from typing import Optional, Dict, Any, Union
 from pm4py.objects.log.obj import Trace
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.util import typing
-
-
-# Local ILP-aware exact heuristic calculator copied and adapted from
-# pm4py.objects.petri_net.utils.align_utils.__compute_exact_heuristic_new_version
-# This forces the use of the CVXOPT custom ILP solver variant and passes
-# an integrality vector so the solver runs as an ILP.
-def __compute_exact_heuristic_new_version_ilp(
-    sync_net,
-    a_matrix,
-    h_cvx,
-    g_matrix,
-    cost_vec,
-    incidence_matrix,
-    marking,
-    fin_vec,
-    variant = lp_solver.CVXOPT_SOLVER_CUSTOM_ALIGN_ILP,
-    use_cvxopt=False,
-    strict=True,
-):
-    m_vec = incidence_matrix.encode_marking(marking)
-    b_term = [i - j for i, j in zip(fin_vec, m_vec)]
-    b_term = np.matrix([x * 1.0 for x in b_term]).transpose()
-
-    if not strict:
-        g_matrix = np.vstack([g_matrix, a_matrix])
-        h_cvx = np.vstack([h_cvx, b_term])
-        a_matrix = np.zeros((0, a_matrix.shape[1]))
-        b_term = np.zeros((0, b_term.shape[1]))
-
-    if use_cvxopt:
-        # not available in the latest version of PM4Py
-        from cvxopt import matrix
-
-        b_term = matrix(b_term)
-
-    # force ILP solver variant and set integrality constraints for all variables
-    integrality = [1] * len(sync_net.transitions)
-    parameters_solving = {"solver": "glpk", "integrality": integrality}
-
-    try:
-        sol = lp_solver.apply(
-            cost_vec,
-            g_matrix,
-            h_cvx,
-            a_matrix,
-            b_term,
-            parameters=parameters_solving,
-            variant=variant,
-        )
-        # effective_variant = variant
-    except Exception:
-        # TODO: remove fallback: CVXOPT ILP not available; use default solver and request integrality
-        # parameters_fallback = {"require_ilp": True, "integrality": integrality}
-        # sol = lp_solver.apply(
-        #     cost_vec,
-        #     g_matrix,
-        #     h_cvx,
-        #     a_matrix,
-        #     b_term,
-        #     parameters=parameters_fallback,
-        #     variant=lp_solver.DEFAULT_LP_SOLVER_VARIANT,
-        # )
-        # effective_variant = lp_solver.DEFAULT_LP_SOLVER_VARIANT
-        raise Exception("ILP solver variant not available.")
-    prim_obj = lp_solver.get_prim_obj_from_sol(sol, variant=variant)
-    points = lp_solver.get_points_from_sol(sol, variant=variant)
-
-    prim_obj = prim_obj if prim_obj is not None else sys.maxsize
-    points = (
-        points if points is not None else [0.0] * len(sync_net.transitions)
-    )
-
-    return prim_obj, points
 
 
 class Parameters(Enum):
@@ -638,6 +566,77 @@ def apply_sync_prod(
     )
 
 
+def _to_cvxopt_mat(x):
+    arr = np.asarray(x, dtype=float)
+    return matrix(arr)
+
+
+def __compute_heuristic_strict_ilp(
+    sync_net,
+    a_matrix,
+    h_cvx,
+    g_matrix,
+    cost_vec,
+    incidence_matrix,
+    marking,
+    fin_vec
+):
+    """
+    Computes the heuristic using a STRICT ILP formulation (forcing integer solutions),
+    bypassing the standard LP relaxation check.
+    """
+    # 1. Calculate b_term (target marking vector: m_f - m)
+    m_vec = incidence_matrix.encode_marking(marking)
+    b_term = [i - j for i, j in zip(fin_vec, m_vec)]
+    b_term = np.matrix([x * 1.0 for x in b_term]).transpose()
+
+    # 2. Convert everything to CVXOPT matrices
+    # Note: GLPK expects double precision floats ('d' matrix)
+    try:
+        cost_c = _to_cvxopt_mat(cost_vec)
+        g_c = _to_cvxopt_mat(g_matrix)
+        h_c = _to_cvxopt_mat(h_cvx)
+        a_c = _to_cvxopt_mat(a_matrix)
+        b_c = _to_cvxopt_mat(b_term)
+    except Exception:
+        # Fallback or error handling if matrix conversion fails
+        # For strict ILP we need these to be correct
+        return sys.maxsize, [0.0] * len(sync_net.transitions)
+
+    # 3. Set up Integer set I
+    # We want all variables to be integers
+    num_vars = len(cost_vec)
+    I = set(range(num_vars))
+
+    # 4. Configure GLPK options to be silent
+    glpk.options["msg_lev"] = "GLP_MSG_OFF"
+
+    # 5. Call GLPK ILP directly
+    # status, x = glpk.ilp(c, G, h, A, b, I, B)
+    # We have no binary variables B, so B=None (or omitted)
+    try:
+        status, x = glpk.ilp(cost_c, g_c, h_c, a_c, b_c, I=I)
+    except Exception:
+        status = None
+        x = None
+
+    # 6. Extract result
+    prim_obj = None
+    points = None
+
+    if status == 'optimal' and x is not None:
+        # Calculate objective: c^T * x
+        # cvxopt.blas.dot(x, y) computes inner product
+        from cvxopt import blas
+        prim_obj = blas.dot(cost_c, x)
+        points = list(x)
+
+    prim_obj = prim_obj if prim_obj is not None else sys.maxsize
+    points = points if points is not None else [0.0] * len(sync_net.transitions)
+
+    return prim_obj, points
+
+
 def __search(
     sync_net,
     ini,
@@ -659,31 +658,15 @@ def __search(
 
     closed = set()
 
+    # Prepare static matrices for LP/ILP
+    # G and h for non-negativity constraints: -I * x <= 0  =>  x >= 0
     a_matrix = np.asmatrix(incidence_matrix.a_matrix).astype(np.float64)
     g_matrix = -np.eye(len(sync_net.transitions))
     h_cvx = np.matrix(np.zeros(len(sync_net.transitions))).transpose()
     cost_vec = [x * 1.0 for x in cost_vec]
 
-    use_cvxopt = False
-    if (
-        lp_solver.DEFAULT_LP_SOLVER_VARIANT
-        == lp_solver.CVXOPT_SOLVER_CUSTOM_ALIGN
-        or lp_solver.DEFAULT_LP_SOLVER_VARIANT
-        == lp_solver.CVXOPT_SOLVER_CUSTOM_ALIGN_ILP
-    ):
-        use_cvxopt = True
-
-    if use_cvxopt:
-        # not available in the latest version of PM4Py
-        from cvxopt import matrix
-
-        a_matrix = matrix(a_matrix)
-        g_matrix = matrix(g_matrix)
-        h_cvx = matrix(h_cvx)
-        cost_vec = matrix(cost_vec)
-
-    # use local ILP helper rather than utils to force integrality
-    h, x = __compute_exact_heuristic_new_version_ilp(
+    # Compute initial heuristic using STRICT ILP
+    h, x = __compute_heuristic_strict_ilp(
         sync_net,
         a_matrix,
         h_cvx,
@@ -691,9 +674,9 @@ def __search(
         cost_vec,
         incidence_matrix,
         ini,
-        fin_vec,
-        use_cvxopt=use_cvxopt,
+        fin_vec
     )
+
     ini_state = utils.SearchTuple(0 + h, 0, h, ini, None, None, x, True)
     open_set = [ini_state]
     heapq.heapify(open_set)
@@ -724,7 +707,8 @@ def __search(
                 current_marking = curr.m
                 continue
 
-            h, x = __compute_exact_heuristic_new_version_ilp(
+            # Recalculate heuristic using STRICT ILP for untrusted states
+            h, x = __compute_heuristic_strict_ilp(
                 sync_net,
                 a_matrix,
                 h_cvx,
@@ -732,33 +716,23 @@ def __search(
                 cost_vec,
                 incidence_matrix,
                 curr.m,
-                fin_vec,
-                use_cvxopt=use_cvxopt,
+                fin_vec
             )
             lp_solved += 1
 
-            # 11/10/19: shall not a state for which we compute the exact heuristics be
-            # by nature a trusted solution?
             tp = utils.SearchTuple(
                 curr.g + h, curr.g, h, curr.m, curr.p, curr.t, x, True
             )
-            # 11/10/2019 (optimization ZA) heappushpop is slightly more efficient than pushing
-            # and popping separately
             curr = heapq.heappushpop(open_set, tp)
             current_marking = curr.m
 
-        # max allowed heuristics value (27/10/2019, due to the numerical
-        # instability of some of our solvers)
-        if curr.h > lp_solver.MAX_ALLOWED_HEURISTICS:
+        if curr.h > 10**15: # MAX_ALLOWED_HEURISTICS equivalent
             continue
 
-        # 12/10/2019: do it again, since the marking could be changed
         already_closed = current_marking in closed
         if already_closed:
             continue
 
-        # 12/10/2019: the current marking can be equal to the final marking only if the heuristics
-        # (underestimation of the remaining cost) is 0. Low-hanging fruits
         if curr.h < 0.01:
             if current_marking == fin:
                 return utils.__reconstruct_alignment(
