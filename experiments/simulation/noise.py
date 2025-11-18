@@ -39,12 +39,13 @@ def inject_noise_trace(
     seed: Optional[int] = None,
 ) -> Trace:
 
+    rng = random.Random()
     if seed is not None:
-        random.seed(seed)
+        rng.seed(seed)
     new_events = list(deepcopy(trace))  # mutable copy of events list
     i = 0
     while i < len(new_events):
-        r = random.random()
+        r = rng.random()
         if r < p_delete:
             # delete this event
             new_events.pop(i)
@@ -52,7 +53,7 @@ def inject_noise_trace(
         elif r < p_delete + p_insert and labels:
             # insert a new event copy with random label
             new_event = deepcopy(new_events[i]) if new_events else {}
-            new_event[activity_key] = random.choice(labels)
+            new_event[activity_key] = rng.choice(labels)
             new_events.insert(i, new_event)
         elif r < p_delete + p_insert + p_swap and i < len(new_events) - 1:
             # swap two adjacent events
