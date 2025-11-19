@@ -656,11 +656,12 @@ if __name__ == "__main__":
     # Wrap with deduplication
     unique_dataset = UniqueProcessModelDataset(
         base_dataset=pm_dataset,
-        dedup_config=DeduplicationConfig()
+        dedup_config=DeduplicationConfig(),
+        force_recompute=True,
     )
+    unique_dataset.save_duplicate_visualizations()
 
     for i, item in enumerate(unique_dataset):
-        print(item)
         view_petri_net(
             item.pm,
             item.im,

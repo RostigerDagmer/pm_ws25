@@ -192,7 +192,7 @@ class PetriNetDeduplicator:
                     unique_net.net, unique_net.im, unique_net.fm
                 )
                 
-                if sim3 < self.config.feature_similarity_threshold:
+                if sim3 > self.config.feature_similarity_threshold:
                     continue
                 
                 self.stats['stage3_filtered'] += 1
