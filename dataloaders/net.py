@@ -14,14 +14,6 @@ from pm4py.discovery import (
 from itertools import product
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from deduplication.deduplicator import (
-    PetriNetDeduplicator,
-    DeduplicationConfig,
-    PetriNetItem
-)
-from deduplication.normalizers import ZScoreFeatureNormalizer
-from deduplication.utils import save_duplicate_report
-from features.extractors import ModelFeatureExtractor
 import pickle
 import hashlib
 import json
@@ -31,7 +23,6 @@ import os
 import pandas as pd
 from tqdm import tqdm
 from enum import Enum
-import numpy as np
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
@@ -260,8 +251,6 @@ class ProcessModelDataset(Dataset):
         cached=False,
         cache_dir=None,
         num_workers=None,
-        deduplicate: bool = False,
-        dedup_config: Optional[DeduplicationConfig] = None,
         **kwargs,
     ):
         """
@@ -301,19 +290,13 @@ class ProcessModelDataset(Dataset):
             / Path(".cache_process_models")
         )
 
-        self.deduplicate = deduplicate
-        self.dedup_config = dedup_config
-
         self.configurations = self._generate_configurations()
-        
+
         if self.cached:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             self._populate_cache_parallel()
 
         self.serialized = self.SerializedView(self)
-
-        if self.deduplicate:
-            self._deduplicate_cached_models()
 
     def hash(self) -> str:
         base = {
@@ -498,110 +481,6 @@ class ProcessModelDataset(Dataset):
         with open(self._cache_path(key), "wb") as f:
             pickle.dump(data, f)
 
-    def _deduplicate_cached_models(self):
-        """
-        Deduplicate all cached models.
-        
-        Pipeline:
-            1. Load all cached models
-            2. Extract features for all nets
-            3. Compute feature normalizer (z-score parameters)
-            4. Create deduplicator with normalizer
-            5. Iterative deduplication
-            6. Update self.configurations
-            7. Save report
-        """
-        logging.info("Starting deduplication of cached models...")
-        
-        all_items = self._load_all_cached_models()
-        
-        if not all_items:
-            logging.warning("No cached models found for deduplication")
-            return
-        
-        feature_normalizer = self._compute_feature_normalizer(all_items)
-        
-        deduplicator = PetriNetDeduplicator(
-            config=self.dedup_config,
-            feature_normalizer=feature_normalizer
-        )
-        
-        unique_nets, duplicate_map = deduplicator.deduplicate(all_items)
-        
-        unique_indices = {item.idx for item in unique_nets}
-        self.configurations = [
-            cfg for i, cfg in enumerate(self.configurations)
-            if i in unique_indices
-        ]
-        
-        report_path = self.cache_dir / "deduplication_report.json"
-        save_duplicate_report(
-            unique_nets,
-            duplicate_map,
-            {
-                'label_threshold': self.dedup_config.label_similarity_threshold,
-                'edge_threshold': self.dedup_config.edge_similarity_threshold,
-                'feature_threshold': self.dedup_config.feature_similarity_threshold,
-            },
-            report_path
-        )
-        
-        logging.info(f"Deduplication complete. Report saved to {report_path}")
-
-
-    def _load_all_cached_models(self):
-        """
-        Load all cached models and wrap in PetriNetItem.
-        
-        Returns:
-            List of PetriNetItem instances
-        """
-        items = []
-        for idx, cfg in enumerate(self.configurations):
-            method_name, fn, params, sampler_name, subset_idx, subset = cfg
-            key = self._config_hash(method_name, params, sampler_name, subset_idx, subset)
-            path = self._cache_path(key)
-            
-            if path.exists():
-                with open(path, 'rb') as f:
-                    data = pickle.load(f)
-                pm, im, fm = pnml_importer.deserialize(data['pm'].decode('utf-8'))
-                items.append(PetriNetItem(
-                    net=pm,
-                    im=im,
-                    fm=fm,
-                    idx=idx,
-                    metadata={'variant': method_name, 'params': params}
-                ))
-        return items
-
-
-    def _compute_feature_normalizer(self, all_items):
-        """
-        Compute feature normalizer over all nets.
-        
-        Args:
-            all_items: List of PetriNetItem instances
-        
-        Returns:
-            Fitted FeatureNormalizer
-        """
-        extractor = ModelFeatureExtractor()
-        
-        logging.info("Extracting features for normalization...")
-        all_features = []
-        for item in tqdm(all_items, desc="Extracting features"):
-            feat = extractor.extract(item.net, item.im, item.fm, return_as_dict=False)
-            all_features.append(feat)
-        
-        all_features = np.vstack(all_features)
-        
-        normalizer = ZScoreFeatureNormalizer(extractor.feature_names)
-        normalizer.fit(all_features)
-        
-        return normalizer
-
-
     def __len__(self):
         return len(self.configurations)
 
@@ -717,6 +596,8 @@ class SAMPLER_SPECS(Enum):
 
 if __name__ == "__main__":
     from dataloaders.xes_log import XESEventLogDataset
+    from dataloaders.unique_net import UniqueProcessModelDataset
+    from deduplication.deduplicator import DeduplicationConfig
     from pm4py.vis import view_petri_net
 
     path = "data/63a8435a-077d-4ece-97cd-2c76d394d99c/BPIC15_2.xes"
@@ -728,6 +609,7 @@ if __name__ == "__main__":
     In the following "subset" is equivalent to "EventLog"... every subset is also an EventLog, however it is only a subset of the FULL eventlog that the FULL XES Dataset describes.
     '''
 
+    # Create base dataset with caching enabled
     pm_dataset = ProcessModelDataset(
         log_dataset=log_dataset,
         discovery_methods={"inductive": discover_petri_net_inductive},
@@ -754,11 +636,15 @@ if __name__ == "__main__":
             )
         },
         cached=True,
-        deduplicate=True,
+    )
+
+    # Wrap with deduplication
+    unique_dataset = UniqueProcessModelDataset(
+        base_dataset=pm_dataset,
         dedup_config=DeduplicationConfig()
     )
 
-    for i, item in enumerate(pm_dataset):
+    for i, item in enumerate(unique_dataset):
         print(item)
         view_petri_net(
             item.pm,
