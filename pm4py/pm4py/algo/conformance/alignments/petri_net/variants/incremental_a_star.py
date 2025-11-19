@@ -657,7 +657,7 @@ def __search(
         ext_me_parameters[EME_Params.COSTS] = cost_function
     # ensure we have a trace object
     if original_trace is None:
-        original_trace = log_implementation.Trace()
+        return None
 
     # behavior on EME solver failure: 'abort' (default original) or 'zero' to use h=0 fallback
     ext_me_on_solver_fail = exec_utils.get_param_value(
