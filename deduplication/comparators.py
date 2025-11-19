@@ -75,16 +75,17 @@ class TransitionLabelComparator(BaseComparator):
         """Compare nets using Bray-Curtis similarity on label counts."""
         counts1 = self._extract_label_counts(net1)
         counts2 = self._extract_label_counts(net2)
-        
+
         all_labels = set(counts1.keys()) | set(counts2.keys())
-        
+
         if not all_labels:
             return 1.0
-        
-        numerator = sum(min(counts1[label], counts2[label]) for label in all_labels)
+
+        numerator = sum(abs(counts1[label] - counts2[label]) for label in all_labels)
         denominator = sum(counts1[label] + counts2[label] for label in all_labels)
-        
-        return 2 * numerator / denominator if denominator > 0 else 0.0
+
+        bray_curtis_distance = numerator / denominator if denominator > 0 else 0.0
+        return 1.0 - bray_curtis_distance
 
 
 class TransitionEdgeComparator(BaseComparator):
@@ -162,25 +163,30 @@ class TransitionEdgeComparator(BaseComparator):
         """Compare nets using Bray-Curtis similarity on edge counts."""
         edges1 = self._extract_transition_edges(net1, im1, fm1)
         edges2 = self._extract_transition_edges(net2, im2, fm2)
-        
+
         all_edges = set(edges1.keys()) | set(edges2.keys())
-        
+
         if not all_edges:
             return 1.0
-        
-        numerator = sum(min(edges1[e], edges2[e]) for e in all_edges)
+
+        numerator = sum(abs(edges1[e] - edges2[e]) for e in all_edges)
         denominator = sum(edges1[e] + edges2[e] for e in all_edges)
-        
-        return 2 * numerator / denominator if denominator > 0 else 0.0
+
+        bray_curtis_distance = numerator / denominator if denominator > 0 else 0.0
+        return 1.0 - bray_curtis_distance
 
 
 class FeatureVectorComparator(BaseComparator):
     """
     Stage 3: Compare z-score normalized feature vectors using MAD.
-    
+
     Extracts feature vectors, normalizes them using pre-computed z-score parameters,
-    and computes Mean Absolute Deviation (MAD) as similarity metric.
-    
+    and computes weighted Mean Absolute Deviation (MAD) as distance metric.
+
+    Returns MAD directly (not transformed to [0,1] range). Higher values indicate
+    greater dissimilarity. MAD is interpreted as the weighted average deviation
+    in standard deviations.
+
     Requires a pre-fitted FeatureNormalizer with statistics from all nets.
     """
     
@@ -188,38 +194,73 @@ class FeatureVectorComparator(BaseComparator):
         self,
         feature_extractor: BaseFeatureExtractor,
         normalizer: ZScoreFeatureNormalizer,
-        weights: np.ndarray = None
+        weights: dict = None
     ):
         """
         Initialize comparator.
-        
+
         Args:
             feature_extractor: ModelFeatureExtractor instance
             normalizer: Pre-fitted FeatureNormalizer with z-score parameters
-            weights: Optional weight vector for features
+            weights: Optional weight dictionary for features. If None, default
+                     weights are used (2.0 for basic counts, 1.0 for others)
         """
         self.extractor = feature_extractor
         self.normalizer = normalizer
-        self.weights = weights
-        
-        if self.weights is None:
-            n_features = len(self.extractor.feature_names)
-            self.weights = np.ones(n_features)
-            self.weights[:8] = 2.0
+
+        if weights is None:
+            # Default weights: emphasize basic structural counts
+            weights_dict = {
+                'model_n_transitions': 1.0,
+                'model_n_places': 1.0,
+                'model_n_arcs': 1.0,
+                'model_n_inv_transition': 2.0,
+                'model_n_dup_transition': 1.0,
+                'model_n_uniq_transition': 1.0,
+                'model_n_and_split': 3.0,
+                'model_n_xor_split': 3.0,
+                'model_inv_tran_in_deg_mean': 1.0,
+                'model_inv_tran_in_deg_std': 1.0,
+                'model_inv_tran_out_deg_mean': 1.0,
+                'model_inv_tran_out_deg_std': 1.0,
+                'model_uniq_tran_in_deg_mean': 1.0,
+                'model_uniq_tran_in_deg_std': 1.0,
+                'model_uniq_tran_out_deg_mean': 1.0,
+                'model_uniq_tran_out_deg_std': 1.0,
+                'model_dup_tran_in_deg_mean': 1.0,
+                'model_dup_tran_in_deg_std': 1.0,
+                'model_dup_tran_out_deg_mean': 1.0,
+                'model_dup_tran_out_deg_std': 1.0,
+                'model_place_in_deg_mean': 1.0,
+                'model_place_in_deg_std': 1.0,
+                'model_place_out_deg_mean': 1.0,
+                'model_place_out_deg_std': 1.0,
+            }
+
+            self.weights = self.extractor.dict_to_vector(weights_dict)
+        else:
+            # Convert provided weights dict to vector
+            self.weights = self.extractor.dict_to_vector(weights)
     
     def compare(
         self,
         net1: PetriNet, im1: Marking, fm1: Marking,
         net2: PetriNet, im2: Marking, fm2: Marking
     ) -> float:
-        """Compare nets using MAD on z-score normalized features."""
+        """
+        Compare nets using weighted MAD on z-score normalized features.
+
+        Returns:
+            MAD value (weighted average deviation in standard deviations).
+            Higher values = greater dissimilarity. Range: [0, ∞)
+        """
         feat1 = self.extractor.extract(net1, im1, fm1, return_as_dict=False)
         feat2 = self.extractor.extract(net2, im2, fm2, return_as_dict=False)
-        
+
         feat1_norm = self.normalizer.normalize(feat1)
         feat2_norm = self.normalizer.normalize(feat2)
-        
+
         weighted_diff = self.weights * np.abs(feat1_norm - feat2_norm)
-        mad = np.mean(weighted_diff)
-        
-        return 1.0 / (1.0 + mad)
+        mad = np.sum(weighted_diff) / np.sum(self.weights)
+
+        return mad

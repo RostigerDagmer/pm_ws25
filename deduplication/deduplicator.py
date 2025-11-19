@@ -25,9 +25,9 @@ logger = logging.getLogger(__name__)
 class DeduplicationConfig:
     """Configuration for deduplication pipeline."""
     
-    label_similarity_threshold: float = 0.80
-    edge_similarity_threshold: float = 0.95
-    feature_similarity_threshold: float = 0.98
+    label_similarity_threshold: float = 0.9
+    edge_similarity_threshold: float = 0.8
+    feature_similarity_threshold: float = 0.5
     
     enable_stage1: bool = True
     enable_stage2: bool = True
