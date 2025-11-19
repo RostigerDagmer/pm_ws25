@@ -530,7 +530,6 @@ def apply_trace_net(
         EME_Params.COSTS: cost_function,
         # Default parameter values
         EME_Params.MAX_K_VALUE: exec_utils.get_param_value(
-            Parameters.EXT_ME_MAX_K_VALUE, parameters,
             Parameters.EXT_ME_MAX_K_VALUE, parameters, min(10, max(3, len(original_trace) // 5))
 
         ),
