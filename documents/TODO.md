@@ -22,9 +22,9 @@ TODOs for next 2 week:
       - process model duplicate filtering (similarity check) - Michael
    
   - classifiers would be fitting to solve our problem
-      - DecisionTree
+      - Gradient Boosting
       - XGBoosting
-      - more?
+      - Random Forest
 
   - heuristic implemenation
       - add a profiler to calculate only the A* search instead of the whole
