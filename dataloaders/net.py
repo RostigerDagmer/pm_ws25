@@ -37,6 +37,66 @@ logging.getLogger(None)
 logging.basicConfig(level=logging.INFO)
 
 
+class SerializedView:
+    """
+    Generic serialized view that provides access to serialized items
+    without full deserialization.
+
+    Works with any dataset that provides a get_serialized function.
+    """
+
+    @dataclass
+    class ItemType:
+        pm: str
+        variant: str
+        parameters: list[float | int | bool]
+        sampler: str
+        subset_idx: int
+        trace_indices: list[int] | None
+
+        def hash(self) -> str:
+            d = {
+                str(k): str(v)
+                for k, v in self.__dict__.items()
+                if k != "pm"
+            }
+            return hashlib.sha1(
+                json.dumps(d, sort_keys=True).encode()
+            ).hexdigest()
+
+        def deserialize(self) -> "ProcessModelDataset.ItemType":
+            pm, im, fm = pnml_importer.deserialize(self.pm.decode('utf-8'))
+            return ProcessModelDataset.ItemType(
+                pm=pm,
+                im=im,
+                fm=fm,
+                variant=self.variant,
+                parameters=self.parameters,
+                sampler=self.sampler,
+                subset_idx=self.subset_idx,
+                trace_indices=self.trace_indices,
+            )
+
+    def __init__(self, dataset, get_serialized_fn: Callable[[int], ItemType]):
+        """
+        Args:
+            dataset: The dataset to create a view for
+            get_serialized_fn: Function that takes an index and returns SerializedView.ItemType
+        """
+        self.dataset = dataset
+        self.get_serialized_fn = get_serialized_fn
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> ItemType:
+        return self.get_serialized_fn(idx)
+
+    def __iter__(self) -> Generator[ItemType, None, None]:
+        for i in range(len(self.dataset)):
+            yield self.get_serialized_fn(i)
+
+
 class TraceSubset(Sequence):
     """Lightweight, list-like wrapper that carries index metadata."""
 
@@ -190,52 +250,6 @@ class ProcessModelDataset(Dataset):
                 json.dumps(d, sort_keys=True).encode()
             ).hexdigest()
 
-    class SerializedView:
-        @dataclass
-        class ItemType:
-            pm: str
-            variant: str
-            parameters: list[float | int | bool]
-            sampler: str
-            subset_idx: int
-            trace_indices: list[int] | None
-
-            def hash(self) -> str:
-                d = {
-                    str(k): str(v)
-                    for k, v in self.__dict__.items()
-                    if k != "pm"
-                }
-                return hashlib.sha1(
-                    json.dumps(d, sort_keys=True).encode()
-                ).hexdigest()
-
-            def deserialize(self) -> "ProcessModelDataset.ItemType":
-                pm, im, fm = pnml_importer.deserialize(self.pm.decode('utf-8'))
-                return ProcessModelDataset.ItemType(
-                    pm=pm,
-                    im=im,
-                    fm=fm,
-                    variant=self.variant,
-                    parameters=self.parameters,
-                    sampler=self.sampler,
-                    subset_idx=self.subset_idx,
-                    trace_indices=self.trace_indices,
-                )
-
-        def __init__(self, ds: "ProcessModelDataset"):
-            self.ds = ds
-
-        def __len__(self):
-            return len(self.ds)
-
-        def __getitem__(self, idx: int) -> ItemType:
-            return self.ds.__get_serialized__(idx)
-
-        def __iter__(self) -> Generator[ItemType, None, None]:
-            for i in range(len(self.ds)):
-                yield self.ds.__get_serialized__(i)
-
     def __init__(
         self,
         log_dataset: BaseEventLogDataset,
@@ -296,7 +310,10 @@ class ProcessModelDataset(Dataset):
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             self._populate_cache_parallel()
 
-        self.serialized = self.SerializedView(self)
+    @property
+    def serialized(self):
+        """Access serialized view without deserialization."""
+        return SerializedView(self, self._get_serialized)
 
     def hash(self) -> str:
         base = {
@@ -485,9 +502,7 @@ class ProcessModelDataset(Dataset):
         return len(self.configurations)
 
     # --- skips deserialization for faster access ---
-    def __get_serialized__(
-        self, idx: int
-    ) -> "ProcessModelDataset.SerializedView.ItemType":
+    def _get_serialized(self, idx: int) -> SerializedView.ItemType:
         method_name, fn, params, sampler_name, subset_idx, subset = (
             self.configurations[idx]
         )
@@ -499,7 +514,7 @@ class ProcessModelDataset(Dataset):
         if self.cached and path.exists():
             with open(path, "rb") as f:
                 data = pickle.load(f)
-                return self.SerializedView.ItemType(**data)
+                return SerializedView.ItemType(**data)
 
         subset = _normalize_log_input(subset)
         net, im, fm = self._safe_discover(fn, subset, params)
@@ -516,10 +531,10 @@ class ProcessModelDataset(Dataset):
         if self.cached:
             with open(path, "wb") as f:
                 pickle.dump(data, f)
-        return self.SerializedView.ItemType(**data)
+        return SerializedView.ItemType(**data)
 
     def __getitem__(self, idx: int) -> "ProcessModelDataset.ItemType":
-        serialized_item = self.__get_serialized__(idx)
+        serialized_item = self._get_serialized(idx)
         return serialized_item.deserialize()
 
 

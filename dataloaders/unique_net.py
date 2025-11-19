@@ -14,7 +14,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from dataloaders.net import ProcessModelDataset
+from dataloaders.net import ProcessModelDataset, SerializedView
 from deduplication.deduplicator import (
     PetriNetDeduplicator,
     DeduplicationConfig,
@@ -23,8 +23,6 @@ from deduplication.deduplicator import (
 from deduplication.normalizers import ZScoreFeatureNormalizer
 from deduplication.utils import save_duplicate_report
 from features.extractors import ModelFeatureExtractor
-
-from pm4py.objects.petri_net.importer import importer as pnml_importer
 
 
 logging.basicConfig(level=logging.INFO)
@@ -190,28 +188,19 @@ class UniqueProcessModelDataset(Dataset):
         for base_idx in self.unique_indices:
             yield self.base_dataset[base_idx]
 
+    def _get_serialized(self, idx: int) -> SerializedView.ItemType:
+        """
+        Get serialized item for unique dataset.
+        Maps unique index to base dataset index.
+        """
+        if idx < 0 or idx >= len(self.unique_indices):
+            raise IndexError(
+                f"Index {idx} out of range for dataset of size {len(self)}"
+            )
+        base_idx = self.unique_indices[idx]
+        return self.base_dataset._get_serialized(base_idx)
+
     @property
     def serialized(self):
         """Access serialized view of unique items."""
-        return self.UniqueSerializedView(self)
-
-    class UniqueSerializedView:
-        """Serialized view that only returns unique items."""
-
-        def __init__(self, parent_dataset: "UniqueProcessModelDataset"):
-            self.parent = parent_dataset
-
-        def __len__(self):
-            return len(self.parent.unique_indices)
-
-        def __getitem__(self, idx: int):
-            """Get serialized item without deserialization."""
-            if idx < 0 or idx >= len(self.parent.unique_indices):
-                raise IndexError(f"Index {idx} out of range")
-            base_idx = self.parent.unique_indices[idx]
-            return self.parent.base_dataset.serialized[base_idx]
-
-        def __iter__(self):
-            """Iterate over serialized unique items."""
-            for base_idx in self.parent.unique_indices:
-                yield self.parent.base_dataset.serialized[base_idx]
+        return SerializedView(self, self._get_serialized)
