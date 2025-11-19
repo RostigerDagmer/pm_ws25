@@ -35,19 +35,38 @@ class BaseComparator(ABC):
 class TransitionLabelComparator(BaseComparator):
     """
     Stage 1: Compare transition label counts using Bray-Curtis similarity.
-    
+
     Extracts count vectors of transition labels from both nets and compares them.
     Works on the union of labels from both nets, no prior knowledge required.
     """
-    
+
+    def __init__(self, use_cache: bool = True):
+        """
+        Initialize comparator.
+
+        Args:
+            use_cache: Whether to cache extracted label counts
+        """
+        self.use_cache = use_cache
+        self._label_cache = {} if use_cache else None
+
     def _extract_label_counts(self, net: PetriNet) -> Counter:
-        """Extract label counts from net transitions."""
+        """Extract label counts from net transitions, using cache if enabled."""
+        if self.use_cache:
+            net_hash = hash(net)
+            if net_hash in self._label_cache:
+                return self._label_cache[net_hash]
+
         counts = Counter()
         for transition in net.transitions:
             label = transition.label if transition.label is not None else 'τ'
             counts[label] += 1
+
+        if self.use_cache:
+            self._label_cache[net_hash] = counts
+
         return counts
-    
+
     def compare(
         self,
         net1: PetriNet, im1: Marking, fm1: Marking,
@@ -71,18 +90,33 @@ class TransitionLabelComparator(BaseComparator):
 class TransitionEdgeComparator(BaseComparator):
     """
     Stage 2: Compare transition-to-transition edges using Bray-Curtis similarity.
-    
+
     Extracts edges between transitions (via places) including START/END boundaries.
     Compares edge count distributions between two nets.
     """
-    
+
+    def __init__(self, use_cache: bool = True):
+        """
+        Initialize comparator.
+
+        Args:
+            use_cache: Whether to cache extracted edge counts
+        """
+        self.use_cache = use_cache
+        self._edge_cache = {} if use_cache else None
+
     def _extract_transition_edges(
         self,
         net: PetriNet,
         im: Marking,
         fm: Marking
     ) -> Counter:
-        """Extract transition-to-transition edges via places."""
+        """Extract transition-to-transition edges via places, using cache if enabled."""
+        if self.use_cache:
+            net_hash = hash(net)
+            if net_hash in self._edge_cache:
+                return self._edge_cache[net_hash]
+
         edges = []
         start_places = set(im.keys())
         end_places = set(fm.keys())
@@ -112,8 +146,13 @@ class TransitionEdgeComparator(BaseComparator):
                     src = t_in.label if t_in.label is not None else 'τ'
                     tgt = t_out.label if t_out.label is not None else 'τ'
                     edges.append((src, tgt))
-        
-        return Counter(edges)
+
+        edge_counts = Counter(edges)
+
+        if self.use_cache:
+            self._edge_cache[net_hash] = edge_counts
+
+        return edge_counts
     
     def compare(
         self,

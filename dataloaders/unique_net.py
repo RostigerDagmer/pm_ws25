@@ -185,9 +185,12 @@ class UniqueProcessModelDataset(Dataset):
         # Get report from deduplicator
         self.dedup_report = deduplicator.get_report()
 
-        # Save deduplication report as JSON
+        # Save deduplication report as JSON in base_dataset directory
         report_path = Path(
-            os.path.join(str(self.cache_dir), "deduplication_report.json")
+            os.path.join(
+                str(self.base_dataset.cache_dir.parent),
+                "deduplication_report.json"
+            )
         )
         with open(report_path, 'w') as f:
             json.dump(self.dedup_report, f, indent=2)
