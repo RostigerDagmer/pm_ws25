@@ -558,17 +558,18 @@ class ProcessModelDataset(Dataset):
         """
         items = []
         for idx, cfg in enumerate(self.configurations):
-            method_name, fn, params, subset = cfg
-            key = self._config_hash(method_name, params, subset)
+            method_name, fn, params, sampler_name, subset_idx, subset = cfg
+            key = self._config_hash(method_name, params, sampler_name, subset_idx, subset)
             path = self._cache_path(key)
             
             if path.exists():
                 with open(path, 'rb') as f:
                     data = pickle.load(f)
+                pm, im, fm = pnml_importer.deserialize(data['pm'].decode('utf-8'))
                 items.append(PetriNetItem(
-                    net=data['pm'],
-                    im=data['im'],
-                    fm=data['fm'],
+                    net=pm,
+                    im=im,
+                    fm=fm,
                     idx=idx,
                     metadata={'variant': method_name, 'params': params}
                 ))
@@ -595,7 +596,7 @@ class ProcessModelDataset(Dataset):
         
         all_features = np.vstack(all_features)
         
-        normalizer = FeatureNormalizer(extractor.feature_names)
+        normalizer = ZScoreFeatureNormalizer(extractor.feature_names)
         normalizer.fit(all_features)
         
         return normalizer
@@ -753,6 +754,8 @@ if __name__ == "__main__":
             )
         },
         cached=True,
+        deduplicate=True,
+        dedup_config=DeduplicationConfig()
     )
 
     for i, item in enumerate(pm_dataset):
