@@ -19,7 +19,7 @@ from deduplication.deduplicator import (
     DeduplicationConfig,
     PetriNetItem
 )
-from deduplication.normalizers import FeatureNormalizer
+from deduplication.normalizers import ZScoreFeatureNormalizer
 from deduplication.utils import save_duplicate_report
 from features.extractors import ModelFeatureExtractor
 import pickle
