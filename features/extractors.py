@@ -1,0 +1,259 @@
+"""
+Feature extraction for Petri nets and traces for alignment heuristic recommendation.
+"""
+
+from abc import ABC, abstractmethod
+from typing import Dict, List, Union
+import numpy as np
+import networkx as nx
+from collections import Counter
+from pm4py.objects.petri_net.obj import PetriNet, Marking
+from pm4py.objects.petri_net.utils.networkx_graph import create_networkx_directed_graph
+
+
+class BaseFeatureExtractor(ABC):
+    """
+    Abstract base class for feature extraction from Petri nets and traces.
+    
+    Provides common interface for extracting features as numpy arrays or dicts,
+    with automatic conversion between the two representations.
+    """
+    
+    @property
+    @abstractmethod
+    def feature_names(self) -> List[str]:
+        """Returns ordered list of feature names."""
+        pass
+    
+    @abstractmethod
+    def _extract_features_internal(self, *args, **kwargs) -> Dict[str, float]:
+        """Internal feature extraction method. Must return a flat dict."""
+        pass
+    
+    def extract(self, *args, return_as_dict: bool = False, **kwargs) -> Union[np.ndarray, Dict[str, float]]:
+        """
+        Extract features from input.
+        
+        Args:
+            return_as_dict: If True, return dict. Otherwise return numpy array.
+            
+        Returns:
+            Feature vector as numpy array or dict.
+        """
+        feature_dict = self._extract_features_internal(*args, **kwargs)
+        assert set(feature_dict.keys()) == set(self.feature_names), \
+            f"Extracted features do not match expected feature names. " \
+            f"Expected: {self.feature_names}, but got: {feature_dict.keys()}"
+
+        if return_as_dict:
+            return feature_dict
+        return self.dict_to_vector(feature_dict)
+    
+    def dict_to_vector(self, feature_dict: Dict[str, float]) -> np.ndarray:
+        """Convert feature dict to numpy array using feature_names order."""
+        return np.nan_to_num(np.array([feature_dict[k] for k in self.feature_names]))
+    
+    def vector_to_dict(self, feature_vector: np.ndarray) -> Dict[str, float]:
+        """Convert feature vector to dict using feature_names order."""
+        return dict(zip(self.feature_names, feature_vector))
+
+
+class ModelFeatureExtractor(BaseFeatureExtractor):
+    """
+    Extracts structural features from Petri nets.
+    
+    Features include:
+    - Basic counts (transitions, places, arcs)
+    - Transition types (invisible, unique, duplicate)
+    - Split patterns (AND, XOR)
+    - Degree statistics per transition/place type
+    """
+    
+    @property
+    def feature_names(self) -> List[str]:
+        return [
+            'model_n_transitions',
+            'model_n_places',
+            'model_n_arcs',
+            'model_n_inv_transition',
+            'model_n_dup_transition',  # Number of transitions with a label that appears more than once
+            'model_n_uniq_transition',
+            'model_n_and_split',
+            'model_n_xor_split',
+            'model_inv_tran_in_deg_mean',
+            'model_inv_tran_in_deg_std',
+            'model_inv_tran_out_deg_mean',
+            'model_inv_tran_out_deg_std',
+            'model_uniq_tran_in_deg_mean',
+            'model_uniq_tran_in_deg_std',
+            'model_uniq_tran_out_deg_mean',
+            'model_uniq_tran_out_deg_std',
+            'model_dup_tran_in_deg_mean',
+            'model_dup_tran_in_deg_std',
+            'model_dup_tran_out_deg_mean',
+            'model_dup_tran_out_deg_std',
+            'model_place_in_deg_mean',
+            'model_place_in_deg_std',
+            'model_place_out_deg_mean',
+            'model_place_out_deg_std',
+        ]
+    
+    def _extract_features_internal(self, net: PetriNet, im: Marking, fm: Marking) -> Dict[str, float]:
+        """Extract all model features."""
+        features = {}
+        
+        G, inv_dict = create_networkx_directed_graph(net)
+        node_ids = {v: k for k, v in inv_dict.items()}
+        
+        inv_trans = [t for t in net.transitions if t.label is None]
+        visible_trans = [t for t in net.transitions if t.label is not None]
+        
+        labels = [t.label for t in visible_trans]
+        label_counts = Counter(labels)
+        uniq_trans = [t for t in visible_trans if label_counts[t.label] == 1]
+        dup_trans = [t for t in visible_trans if label_counts[t.label] > 1]
+        
+        features.update(self._extract_counts(net, inv_trans, uniq_trans, dup_trans))
+        features.update(self._extract_split_patterns(net))
+        features.update(self._extract_degree_stats(G, node_ids, net, inv_trans, uniq_trans, dup_trans))
+        
+        return features
+    
+    def _extract_counts(self, net, inv_trans, uniq_trans, dup_trans):
+        return {
+            'model_n_transitions': len(net.transitions),
+            'model_n_places': len(net.places),
+            'model_n_arcs': len(net.arcs),
+            'model_n_inv_transition': len(inv_trans),
+            'model_n_dup_transition': len(dup_trans),
+            'model_n_uniq_transition': len(uniq_trans),
+        }
+    
+    def _extract_split_patterns(self, net):
+        and_splits = sum(1 for t in net.transitions if len(t.out_arcs) > 1)
+        xor_splits = sum(1 for p in net.places if len(p.out_arcs) > 1)
+        return {
+            'model_n_and_split': and_splits,
+            'model_n_xor_split': xor_splits,
+        }
+    
+    def _extract_degree_stats(self, G, node_ids, net, inv_trans, uniq_trans, dup_trans):
+        features = {}
+        
+        for prefix, trans_list in [
+            ('inv_tran', inv_trans),
+            ('uniq_tran', uniq_trans),
+            ('dup_tran', dup_trans)
+        ]:
+            in_degs = [G.in_degree(node_ids[t]) for t in trans_list] if trans_list else [0]
+            out_degs = [G.out_degree(node_ids[t]) for t in trans_list] if trans_list else [0]
+            features[f'model_{prefix}_in_deg_mean'] = np.mean(in_degs)
+            features[f'model_{prefix}_in_deg_std'] = np.std(in_degs)
+            features[f'model_{prefix}_out_deg_mean'] = np.mean(out_degs)
+            features[f'model_{prefix}_out_deg_std'] = np.std(out_degs)
+
+        place_in_degs = [G.in_degree(node_ids[p]) for p in net.places]
+        place_out_degs = [G.out_degree(node_ids[p]) for p in net.places]
+        features['model_place_in_deg_mean'] = np.mean(place_in_degs)
+        features['model_place_in_deg_std'] = np.std(place_in_degs)
+        features['model_place_out_deg_mean'] = np.mean(place_out_degs)
+        features['model_place_out_deg_std'] = np.std(place_out_degs)
+        
+        return features
+
+
+class TraceFeatureExtractor(BaseFeatureExtractor):
+    """
+    Extracts features from trace Petri nets.
+    
+    Features include:
+    - Trace length (number of activities/events); e.g. A -> A -> B -> B has length 4
+    - Activity repetition statistics; e.g. for A -> A -> B -> B: [2, 2] -> mean=2, std=0
+    """
+    
+    @property
+    def feature_names(self) -> List[str]:
+        return [
+            'trace_length',
+            'trace_activity_repeat_mean',
+            'trace_activity_repeat_std',
+        ]
+    
+    def _extract_features_internal(self, trace_net: PetriNet, trace_im: Marking, trace_fm: Marking) -> Dict[str, float]:
+        """Extract all trace features."""
+        assert all(t.label is not None for t in trace_net.transitions), \
+            "Trace net contains invisible transitions."
+        labels = [t.label for t in trace_net.transitions]
+        
+        trace_length = len(labels)
+        
+        if trace_length == 0:
+            return {
+                'trace_length': 0,
+                'trace_activity_repeat_mean': 0,
+                'trace_activity_repeat_std': 0,
+            }
+        
+        label_counts = Counter(labels)
+        repeat_counts = list(label_counts.values())
+        
+        return {
+            'trace_length': trace_length,
+            'trace_activity_repeat_mean': np.mean(repeat_counts),
+            'trace_activity_repeat_std': np.std(repeat_counts),
+        }
+
+
+class CompositeFeatureExtractor(BaseFeatureExtractor):
+    """
+    Extracts features from both model and trace, including interaction features.
+    
+    Combines features from ModelFeatureExtractor and TraceFeatureExtractor,
+    then adds interaction features that relate model and trace characteristics.
+    """
+    
+    def __init__(self):
+        self.model_extractor = ModelFeatureExtractor()
+        self.trace_extractor = TraceFeatureExtractor()
+    
+    @property
+    def feature_names(self) -> List[str]:
+        return (
+            self.model_extractor.feature_names +
+            self.trace_extractor.feature_names +
+            ['interaction_n_activity_present_in_model',  # e.g. model has A,B,C and trace has A,B,A,D -> 3 
+             'interaction_n_activity_not_in_model']  # e.g. model has A,B,C and trace has A,B,A,D -> 1
+        )
+    
+    def _extract_features_internal(
+        self, 
+        petri_net: PetriNet, 
+        petri_net_im: Marking, 
+        petri_net_fm: Marking,
+        trace_net: PetriNet,
+        trace_net_im: Marking,
+        trace_net_fm: Marking
+    ) -> Dict[str, float]:
+        """Extract model, trace, and interaction features."""
+        model_features = self.model_extractor.extract(
+            petri_net, petri_net_im, petri_net_fm, return_as_dict=True
+        )
+        trace_features = self.trace_extractor.extract(
+            trace_net, trace_net_im, trace_net_fm, return_as_dict=True
+        )
+        interaction_features = self._extract_interactions(petri_net, trace_net)
+        
+        return {**model_features, **trace_features, **interaction_features}
+    
+    def _extract_interactions(self, model_net: PetriNet, trace_net: PetriNet) -> Dict[str, float]:
+        """Extract interaction features between model and trace."""
+        model_labels = {t.label for t in model_net.transitions if t.label is not None}
+        trace_labels = [t.label for t in trace_net.transitions if t.label is not None]
+        
+        present_in_model = sum(1 for label in trace_labels if label in model_labels)
+        not_in_model = sum(1 for label in trace_labels if label not in model_labels)
+        
+        return {
+            'interaction_n_activity_present_in_model': present_in_model,
+            'interaction_n_activity_not_in_model': not_in_model,
+        }
