@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable, Optional, Any, Union
+from typing import Callable, Generator, Optional, Any, Union
 import torch
 from torch.utils.data import Dataset
 from dataloaders.base import BaseEventLogDataset
@@ -199,6 +199,52 @@ class ProcessModelDataset(Dataset):
                 json.dumps(d, sort_keys=True).encode()
             ).hexdigest()
 
+    class SerializedView:
+        @dataclass
+        class ItemType:
+            pm: str
+            variant: str
+            parameters: list[float | int | bool]
+            sampler: str
+            subset_idx: int
+            trace_indices: list[int] | None
+
+            def hash(self) -> str:
+                d = {
+                    str(k): str(v)
+                    for k, v in self.__dict__.items()
+                    if k != "pm"
+                }
+                return hashlib.sha1(
+                    json.dumps(d, sort_keys=True).encode()
+                ).hexdigest()
+
+            def deserialize(self) -> "ProcessModelDataset.ItemType":
+                pm, im, fm = pnml_importer.deserialize(self.pm.decode('utf-8'))
+                return ProcessModelDataset.ItemType(
+                    pm=pm,
+                    im=im,
+                    fm=fm,
+                    variant=self.variant,
+                    parameters=self.parameters,
+                    sampler=self.sampler,
+                    subset_idx=self.subset_idx,
+                    trace_indices=self.trace_indices,
+                )
+
+        def __init__(self, ds: "ProcessModelDataset"):
+            self.ds = ds
+
+        def __len__(self):
+            return len(self.ds)
+
+        def __getitem__(self, idx: int) -> ItemType:
+            return self.ds.__get_serialized__(idx)
+
+        def __iter__(self) -> Generator[ItemType, None, None]:
+            for i in range(len(self.ds)):
+                yield self.ds.__get_serialized__(i)
+
     def __init__(
         self,
         log_dataset: BaseEventLogDataset,
@@ -264,8 +310,10 @@ class ProcessModelDataset(Dataset):
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             self._populate_cache_parallel()
 
-            if self.deduplicate:
-                self._deduplicate_cached_models()
+        self.serialized = self.SerializedView(self)
+
+        if self.deduplicate:
+            self._deduplicate_cached_models()
 
     def hash(self) -> str:
         base = {
@@ -556,7 +604,10 @@ class ProcessModelDataset(Dataset):
     def __len__(self):
         return len(self.configurations)
 
-    def __getitem__(self, idx: int) -> "ProcessModelDataset.ItemType":
+    # --- skips deserialization for faster access ---
+    def __get_serialized__(
+        self, idx: int
+    ) -> "ProcessModelDataset.SerializedView.ItemType":
         method_name, fn, params, sampler_name, subset_idx, subset = (
             self.configurations[idx]
         )
@@ -568,20 +619,14 @@ class ProcessModelDataset(Dataset):
         if self.cached and path.exists():
             with open(path, "rb") as f:
                 data = pickle.load(f)
-                if isinstance(data["pm"], PetriNet):
-                    return ProcessModelDataset.ItemType(**data)
-                pm, im, fm = pnml_importer.deserialize(
-                    data["pm"].decode('utf-8')
-                )
-                data = {**data, "pm": pm, "im": im, "fm": fm}
-                return ProcessModelDataset.ItemType(**data)
+                return self.SerializedView.ItemType(**data)
 
         subset = _normalize_log_input(subset)
         net, im, fm = self._safe_discover(fn, subset, params)
+        serialized = pnml_exporter.serialize(net, im, fm)
+
         data = {
-            "pm": net,
-            "im": im,
-            "fm": fm,
+            "pm": serialized,
             "variant": method_name,
             "parameters": params,
             "sampler": sampler_name,
@@ -591,7 +636,11 @@ class ProcessModelDataset(Dataset):
         if self.cached:
             with open(path, "wb") as f:
                 pickle.dump(data, f)
-        return ProcessModelDataset.ItemType(**data)
+        return self.SerializedView.ItemType(**data)
+
+    def __getitem__(self, idx: int) -> "ProcessModelDataset.ItemType":
+        serialized_item = self.__get_serialized__(idx)
+        return serialized_item.deserialize()
 
 
 class DISCOVERY_METHODS(Enum):
