@@ -97,6 +97,8 @@ class PetriNetDeduplicator:
             'final_unique': 0,
             'comparisons_performed': 0
         }
+
+        self.report = None  # Will be populated after deduplication
     
     def deduplicate(
         self,
@@ -135,10 +137,13 @@ class PetriNetDeduplicator:
                 unique_nets.append(current_net)
         
         self.stats['final_unique'] = len(unique_nets)
-        
+
         if self.config.verbose:
             self._print_stats()
-        
+
+        # Generate report
+        self._generate_report(unique_nets, duplicate_map)
+
         return unique_nets, duplicate_map
     
     def _find_duplicate(
@@ -196,6 +201,51 @@ class PetriNetDeduplicator:
         
         return False, None
     
+    def _generate_report(
+        self,
+        unique_nets: List[PetriNetItem],
+        duplicate_map: Dict[int, int]
+    ):
+        """
+        Generate deduplication report.
+
+        Args:
+            unique_nets: List of unique nets
+            duplicate_map: Mapping duplicate_idx -> representative_idx
+        """
+        self.report = {
+            'num_unique': len(unique_nets),
+            'num_total': self.stats['total_input'],
+            'num_duplicates': self.stats['total_input'] - len(unique_nets),
+            'reduction_percent': (
+                (1 - len(unique_nets) / self.stats['total_input']) * 100
+                if self.stats['total_input'] > 0 else 0.0
+            ),
+            'thresholds': {
+                'label_threshold': self.config.label_similarity_threshold,
+                'edge_threshold': self.config.edge_similarity_threshold,
+                'feature_threshold': self.config.feature_similarity_threshold,
+            },
+            'stages_enabled': {
+                'stage1': self.config.enable_stage1,
+                'stage2': self.config.enable_stage2,
+                'stage3': self.config.enable_stage3,
+            },
+            'duplicate_map': {
+                str(k): v for k, v in duplicate_map.items()
+            },
+            'stats': self.stats.copy()
+        }
+
+    def get_report(self) -> Optional[Dict]:
+        """
+        Get the deduplication report.
+
+        Returns:
+            Report dict if deduplication was run, None otherwise
+        """
+        return self.report
+
     def _print_stats(self):
         """Print deduplication statistics."""
         print("\n" + "="*60)

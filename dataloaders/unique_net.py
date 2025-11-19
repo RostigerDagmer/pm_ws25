@@ -23,6 +23,10 @@ from deduplication.deduplicator import (
 from deduplication.normalizers import ZScoreFeatureNormalizer
 from deduplication.utils import save_duplicate_report
 from features.extractors import ModelFeatureExtractor
+import hashlib
+import json
+import pickle
+import os
 
 
 logging.basicConfig(level=logging.INFO)
@@ -46,14 +50,18 @@ class UniqueProcessModelDataset(Dataset):
         self,
         base_dataset: ProcessModelDataset,
         dedup_config: Optional[DeduplicationConfig] = None,
-        report_dir: Optional[Path] = None,
+        cache_dir: Optional[Path] = None,
+        use_cache: bool = True,
+        force_recompute: bool = False,
     ):
         """
         Args:
             base_dataset: The ProcessModelDataset to deduplicate
             dedup_config: Configuration for deduplication thresholds
-            report_dir: Directory to save deduplication report
-                       (defaults to base_dataset.cache_dir)
+            cache_dir: Directory to save cache and reports
+                      (defaults to parallel directory of base_dataset.cache_dir)
+            use_cache: Whether to use caching for deduplication results
+            force_recompute: Force recomputation even if cache exists
         """
         if not base_dataset.cached:
             raise ValueError(
@@ -64,12 +72,80 @@ class UniqueProcessModelDataset(Dataset):
 
         self.base_dataset = base_dataset
         self.dedup_config = dedup_config or DeduplicationConfig()
-        self.report_dir = report_dir or base_dataset.cache_dir
+        self.use_cache = use_cache
 
-        # Store unique indices in base dataset
+        # Set cache directory (parallel to base_dataset cache)
+        if cache_dir:
+            self.cache_dir = Path(cache_dir)
+        else:
+            parent_dir = str(base_dataset.cache_dir.parent)
+            self.cache_dir = Path(
+                os.path.join(parent_dir, ".cache_unique_models")
+            )
+
+        # Initialize attributes
         self.unique_indices = []
+        self.duplicate_map = {}
+        self.dedup_report = {}
 
-        self._deduplicate()
+        # Compute cache key and path
+        cache_key = self._compute_cache_key()
+        self.cache_file = Path(
+            os.path.join(str(self.cache_dir), f"unique_dedup_{cache_key}.pkl")
+        )
+
+        # Load from cache or deduplicate
+        if use_cache and not force_recompute and self.cache_file.exists():
+            self._load_from_cache()
+        else:
+            self._deduplicate()
+            if use_cache:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                self._save_to_cache()
+
+    def _compute_cache_key(self) -> str:
+        """
+        Compute cache key based on base_dataset configuration and
+        deduplication config.
+
+        Returns:
+            16-character hash string
+        """
+        components = {
+            'base_dataset_hash': self.base_dataset.hash(),
+            'dedup_config': {
+                'label_threshold': self.dedup_config.label_similarity_threshold,
+                'edge_threshold': self.dedup_config.edge_similarity_threshold,
+                'feature_threshold': self.dedup_config.feature_similarity_threshold,
+            }
+        }
+        full_hash = hashlib.sha1(
+            json.dumps(components, sort_keys=True).encode()
+        ).hexdigest()
+        return full_hash[:16]
+
+    def _save_to_cache(self):
+        """Save unique_indices, duplicate_map, and dedup_report to cache."""
+        cache_data = {
+            'unique_indices': self.unique_indices,
+            'duplicate_map': self.duplicate_map,
+            'report': self.dedup_report,
+        }
+        with open(self.cache_file, 'wb') as f:
+            pickle.dump(cache_data, f)
+        logging.info(f"Saved deduplication cache to {self.cache_file}")
+
+    def _load_from_cache(self):
+        """Load unique_indices, duplicate_map, and dedup_report from cache."""
+        with open(self.cache_file, 'rb') as f:
+            cache_data = pickle.load(f)
+        self.unique_indices = cache_data['unique_indices']
+        self.duplicate_map = cache_data['duplicate_map']
+        self.dedup_report = cache_data['report']
+        logging.info(
+            f"Loaded {len(self.unique_indices)} unique indices from cache "
+            f"({self.cache_file})"
+        )
 
     def _deduplicate(self):
         """
@@ -104,16 +180,20 @@ class UniqueProcessModelDataset(Dataset):
         # Store unique indices (sorted for consistent ordering)
         self.unique_indices = sorted([item.idx for item in unique_nets])
 
-        # Save deduplication report
-        report_path = self.report_dir / "deduplication_report.json"
+        # Store duplicate_map as class attribute
+        self.duplicate_map = duplicate_map
+
+        # Get report from deduplicator
+        self.dedup_report = deduplicator.get_report()
+
+        # Save deduplication report as JSON
+        report_path = Path(
+            os.path.join(str(self.cache_dir), "deduplication_report.json")
+        )
         save_duplicate_report(
             unique_nets,
             duplicate_map,
-            {
-                'label_threshold': self.dedup_config.label_similarity_threshold,
-                'edge_threshold': self.dedup_config.edge_similarity_threshold,
-                'feature_threshold': self.dedup_config.feature_similarity_threshold,
-            },
+            self.dedup_report['thresholds'],
             report_path
         )
 
