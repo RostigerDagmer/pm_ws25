@@ -31,6 +31,7 @@ from pm4py.algo.conformance.alignments.petri_net.algorithm import (
 )
 from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
 from pm4py.util import typing
+from sklearn.ensemble import GradientBoostingClassifier
 
 SEED = 42
 
@@ -618,5 +619,21 @@ if __name__ == "__main__":
 
     # write to csv
     labels.to_csv("./test_labels.csv", index=False)
-    df.to_csv("./all_runs_aggregated.csv", index=False)
-    print("\nSaved aggregated results to './test_labels_aggregated.csv' and './all_runs_aggregated.csv'")
+
+    # GradientBoostingClassifier training
+    X = np.vstack(labels["feature_vector"].to_numpy())
+    y = labels["aligner"].to_numpy()
+
+    clf = GradientBoostingClassifier(
+        n_estimators=100,
+        learning_rate=0.1,
+        max_depth=3,
+        random_state=SEED,
+    )
+    clf.fit(X, y)
+    print("Classifier trained.")
+    print(f"Feature importances: {clf.feature_importances_}")
+
+    # save model
+    with open("./aligner_time_predictor.pkl", "wb") as f:
+        pickle.dump(clf, f)
