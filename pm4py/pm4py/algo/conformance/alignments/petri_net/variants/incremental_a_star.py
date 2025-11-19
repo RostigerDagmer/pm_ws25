@@ -39,33 +39,37 @@ import sys
 import time
 from copy import copy
 from enum import Enum
+from typing import Optional, Dict, Any, Union, Tuple
 
 import numpy as np
-# Import cvxopt components directly for lean LP solving
 from cvxopt import matrix, glpk
-
+# Import the Extended Marking Equation builder/variants directly
+from pm4py.algo.analysis.extended_marking_equation.variants.classic import (
+    build as eme_build,
+    Parameters as EME_Params,
+)
 from pm4py.objects.log import obj as log_implementation
+from pm4py.objects.log.obj import Trace
+from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.objects.petri_net.utils import align_utils as utils
 from pm4py.objects.petri_net.utils.incidence_matrix import (
     construct as inc_mat_construct,
-)
-from pm4py.objects.petri_net.utils.synchronous_product import (
-    construct_cost_aware,
-    construct,
 )
 from pm4py.objects.petri_net.utils.petri_utils import (
     construct_trace_net_cost_aware,
     decorate_places_preset_trans,
     decorate_transitions_prepostset,
 )
+from pm4py.objects.petri_net.utils.synchronous_product import (
+    construct_cost_aware,
+    construct,
+)
 from pm4py.util import exec_utils
-from pm4py.util.constants import PARAMETER_CONSTANT_ACTIVITY_KEY
-from pm4py.util.xes_constants import DEFAULT_NAME_KEY
-from pm4py.util import variants_util
-from typing import Optional, Dict, Any, Union
-from pm4py.objects.log.obj import Trace
-from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.util import typing
+from pm4py.util import variants_util
+from pm4py.util.constants import PARAMETER_CONSTANT_ACTIVITY_KEY
+from pm4py.util.lp import solver as lp_solver
+from pm4py.util.xes_constants import DEFAULT_NAME_KEY
 
 
 class Parameters(Enum):
@@ -84,6 +88,13 @@ class Parameters(Enum):
     ACTIVITY_KEY = PARAMETER_CONSTANT_ACTIVITY_KEY
     VARIANTS_IDX = "variants_idx"
     RETURN_SYNC_COST_FUNCTION = "return_sync_cost_function"
+    # additional knobs forwarded to the extended marking equation solver
+    EXT_ME_MAX_K_VALUE = "max_k_value"
+    EXT_ME_SPLIT_IDX = "split_idx"
+    EXT_ME_FULL_BOOTSTRAP_REQUIRED = "full_bootstrap_required"
+    # toggle and solver selection for extended-ME heuristic
+    EXT_HEUR_USE_ILP = "ext_heur_use_ilp"
+    EXT_HEUR_SOLVER_VARIANT = "ext_heur_solver_variant"
 
 
 PARAM_TRACE_COST_FUNCTION = Parameters.PARAM_TRACE_COST_FUNCTION.value
@@ -92,7 +103,7 @@ PARAM_SYNC_COST_FUNCTION = Parameters.PARAM_SYNC_COST_FUNCTION.value
 
 
 def get_best_worst_cost(
-    petri_net, initial_marking, final_marking, parameters=None
+        petri_net, initial_marking, final_marking, parameters=None
 ):
     """
     Gets the best worst cost of an alignment
@@ -126,11 +137,11 @@ def get_best_worst_cost(
 
 
 def apply(
-    trace: Trace,
-    petri_net: PetriNet,
-    initial_marking: Marking,
-    final_marking: Marking,
-    parameters: Optional[Dict[Union[str, Parameters], Any]] = None,
+        trace: Trace,
+        petri_net: PetriNet,
+        initial_marking: Marking,
+        final_marking: Marking,
+        parameters: Optional[Dict[Union[str, Parameters], Any]] = None,
 ) -> typing.AlignmentResult:
     """
     Performs the basic alignment search, given a trace and a net.
@@ -218,13 +229,15 @@ def apply(
         trace_im,
         trace_fm,
         parameters,
+        # pass original trace along for the extended marking equation heuristic
+        original_trace=trace,
     )
 
     return alignment
 
 
 def apply_from_variant(
-    variant, petri_net, initial_marking, final_marking, parameters=None
+        variant, petri_net, initial_marking, final_marking, parameters=None
 ):
     """
     Apply the alignments from the specification of a single variant
@@ -256,7 +269,7 @@ def apply_from_variant(
 
 
 def apply_from_variants_dictionary(
-    var_dictio, petri_net, initial_marking, final_marking, parameters=None
+        var_dictio, petri_net, initial_marking, final_marking, parameters=None
 ):
     """
     Apply the alignments from the specification of a variants dictionary
@@ -294,7 +307,7 @@ def apply_from_variants_dictionary(
 
 
 def apply_from_variants_list(
-    var_list, petri_net, initial_marking, final_marking, parameters=None
+        var_list, petri_net, initial_marking, final_marking, parameters=None
 ):
     """
     Apply the alignments from the specification of a list of variants in the log
@@ -345,7 +358,7 @@ def apply_from_variants_list(
 
 
 def apply_from_variants_list_petri_string(
-    var_list, petri_net_string, parameters=None
+        var_list, petri_net_string, parameters=None
 ):
     """
     Apply the alignments from the specification of a list of variants in the log
@@ -384,7 +397,7 @@ def apply_from_variants_list_petri_string(
 
 
 def apply_from_variants_list_petri_string_mprocessing(
-    mp_output, var_list, petri_net_string, parameters=None
+        mp_output, var_list, petri_net_string, parameters=None
 ):
     """
     Apply the alignments from the specification of a list of variants in the log
@@ -413,13 +426,14 @@ def apply_from_variants_list_petri_string_mprocessing(
 
 
 def apply_trace_net(
-    petri_net,
-    initial_marking,
-    final_marking,
-    trace_net,
-    trace_im,
-    trace_fm,
-    parameters=None,
+        petri_net,
+        initial_marking,
+        final_marking,
+        trace_net,
+        trace_im,
+        trace_fm,
+        parameters=None,
+        original_trace: Optional[Trace] = None,
 ):
     """
     Performs the basic alignment search, given a trace net and a net.
@@ -465,9 +479,9 @@ def apply_trace_net(
     )
 
     if (
-        trace_cost_function is None
-        or model_cost_function is None
-        or sync_cost_function is None
+            trace_cost_function is None
+            or model_cost_function is None
+            or sync_cost_function is None
     ):
         sync_prod, sync_initial_marking, sync_final_marking = construct(
             trace_net,
@@ -509,6 +523,28 @@ def apply_trace_net(
         Parameters.PARAM_MAX_ALIGN_TIME_TRACE, parameters, sys.maxsize
     )
 
+    # Prepare parameters for EME (Extended Marking Equation)
+    # These will be passed to __search, which will handle the EME builder setup internally
+    ext_me_parameters = {
+        # Costs are mandatory for EME, use the same cost function as the alignment
+        EME_Params.COSTS: cost_function,
+        # Default parameter values
+        EME_Params.MAX_K_VALUE: exec_utils.get_param_value(
+            Parameters.EXT_ME_MAX_K_VALUE, parameters, min(10, max(3, len(original_trace) // 5))
+
+        ),
+        EME_Params.SPLIT_IDX: exec_utils.get_param_value(
+            Parameters.EXT_ME_SPLIT_IDX, parameters, None
+        ),
+        EME_Params.FULL_BOOTSTRAP_REQUIRED: exec_utils.get_param_value(
+            Parameters.EXT_ME_FULL_BOOTSTRAP_REQUIRED, parameters, True
+        ),
+    }
+
+    use_ilp = exec_utils.get_param_value(
+        Parameters.EXT_HEUR_USE_ILP, parameters, False
+    )
+
     alignment = apply_sync_prod(
         sync_prod,
         sync_initial_marking,
@@ -517,6 +553,9 @@ def apply_trace_net(
         utils.SKIP,
         ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
         max_align_time_trace=max_align_time_trace,
+        original_trace=original_trace,
+        ext_me_parameters=ext_me_parameters,
+        use_ilp=use_ilp
     )
 
     return_sync_cost = exec_utils.get_param_value(
@@ -531,13 +570,17 @@ def apply_trace_net(
 
 
 def apply_sync_prod(
-    sync_prod,
-    initial_marking,
-    final_marking,
-    cost_function,
-    skip,
-    ret_tuple_as_trans_desc=False,
-    max_align_time_trace=sys.maxsize,
+        sync_prod,
+        initial_marking,
+        final_marking,
+        cost_function,
+        skip,
+        ret_tuple_as_trans_desc=False,
+        max_align_time_trace=sys.maxsize,
+        original_trace: Optional[Trace] = None,
+        ext_me_parameters: Optional[Dict[Any, Any]] = None,
+        use_ilp: bool = False,
+        solver_variant: Optional[str] = None,
 ):
     """
     Performs the basic alignment search on top of the synchronous product net, given a cost function and skip-symbol
@@ -563,110 +606,146 @@ def apply_sync_prod(
         skip,
         ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
         max_align_time_trace=max_align_time_trace,
+        original_trace=original_trace,
+        ext_me_parameters=ext_me_parameters,
+        use_ilp=use_ilp,
+        solver_variant=solver_variant,
     )
 
 
-def _to_cvxopt_mat(x):
-    arr = np.asarray(x, dtype=float)
-    return matrix(arr)
-
-
-def __compute_heuristic_lean_lp(
-    sync_net,
-    a_matrix,
-    h_cvx,
-    g_matrix,
-    cost_vec,
-    incidence_matrix,
-    marking,
-    fin_vec
-):
+def to_mat_cvtopt(m):
     """
-    Computes the heuristic using a LEAN LP formulation.
-    This skips Python overhead by calling GLPK LP solver directly via CVXOPT.
+    Helper to convert numpy arrays/matrices to CVXOPT matrix.
     """
-    # 1. Calculate b_term (target marking vector: m_f - m)
-    m_vec = incidence_matrix.encode_marking(marking)
-    b_term = [i - j for i, j in zip(fin_vec, m_vec)]
-    b_term = np.matrix([x * 1.0 for x in b_term]).transpose()
+    if isinstance(m, (np.ndarray, np.matrix)):
+        if m.size == 0:
+            # Handle empty matrices explicitly for safety
+            return matrix([], (m.shape[0], m.shape[1] if len(m.shape) > 1 else 1))
+        return matrix(np.asarray(m, dtype=np.float64))
+    return matrix(m)
 
-    # 2. Convert to CVXOPT matrices (required by raw interface)
+
+def _eme_solve_inner(
+        eme_solver_obj,
+        current_marking: Marking,
+        use_ilp: bool,
+) -> Tuple[float, np.ndarray, bool]:
+    """
+    Internal function to solve the EME problem for a given marking using LEAN LP.
+    Uses cvxopt.glpk.lp directly for performance.
+    """
+
     try:
-        cost_c = _to_cvxopt_mat(cost_vec)
-        g_c = _to_cvxopt_mat(g_matrix)
-        h_c = _to_cvxopt_mat(h_cvx)
-        a_c = _to_cvxopt_mat(a_matrix)
-        b_c = _to_cvxopt_mat(b_term)
+        # 1. Update initial marking vector in the solver object
+        # This recalculates vectors based on the new current marking
+        eme_solver_obj.change_ini_vec(current_marking)
+
+        # 2. Get components (c, Aub, bub, Aeq, beq) from the solver object
+        c, Aub, bub, Aeq, beq = eme_solver_obj.get_components()
+
+        # 3. Convert to CVXOPT matrices (required for glpk.lp)
+        c_cvx = to_mat_cvtopt(c)
+        Aub_cvx = to_mat_cvtopt(Aub)
+        bub_cvx = to_mat_cvtopt(bub)
+        Aeq_cvx = to_mat_cvtopt(Aeq)
+        beq_cvx = to_mat_cvtopt(beq)
+
+        # 4. Configure GLPK options (Silent)
+        glpk.options["msg_lev"] = "GLP_MSG_OFF"
+
+        # 5. Solve directly using GLPK (Lean LP)
+        # We always use LP relaxation as per Incremental A* paper recommendation
+        # If use_ilp is True, we *could* use glpk.ilp, but for incremental performance
+        # the paper relies on LP relaxation + derived updates.
+        # However, if strict ILP was requested for some reason, we could swap calls here.
+        # Assuming "Lean LP" logic for incremental A*:
+        status, x, y, z = glpk.lp(c_cvx, Aub_cvx, bub_cvx, Aeq_cvx, beq_cvx)
+
+        # 6. Extract result
+        if status == 'optimal' and x is not None:
+            # Calculate h = c^T * x
+            from cvxopt import blas
+            h_val = blas.dot(c_cvx, x)
+
+            # Convert x to list for EME object, then to numpy for return
+            x_list = list(x)
+
+            # Use EME solver to map variables back correctly
+            x_vec_list = eme_solver_obj.get_x_vector(x_list)
+            # use EME solver to get h value (more robust)
+            h_val = float(eme_solver_obj.get_h(x_list))
+
+            return h_val, np.array(x_vec_list), True
+        else:
+            # If solver fails/infeasible
+            return float(sys.maxsize), np.array([]), False
+
     except Exception:
-        # Fallback if conversion fails
-        return sys.maxsize, [0.0] * len(sync_net.transitions)
-
-    # 3. Configure GLPK options (Silent)
-    glpk.options["msg_lev"] = "GLP_MSG_OFF"
-
-    # 4. Call GLPK LP directly
-    try:
-        status, x, y, z = glpk.lp(cost_c, g_c, h_c, a_c, b_c)
-    except Exception:
-        status = None
-        x = None
-
-    # 5. Extract result
-    prim_obj = None
-    points = None
-
-    if status == 'optimal' and x is not None:
-        # Calculate objective: c^T * x
-        from cvxopt import blas
-        prim_obj = blas.dot(cost_c, x)
-        points = list(x)
-
-    prim_obj = prim_obj if prim_obj is not None else sys.maxsize
-    points = points if points is not None else [0.0] * len(sync_net.transitions)
-
-    return prim_obj, points
+        return float(sys.maxsize), np.array([]), False
 
 
 def __search(
-    sync_net,
-    ini,
-    fin,
-    cost_function,
-    skip,
-    ret_tuple_as_trans_desc=False,
-    max_align_time_trace=sys.maxsize,
+        sync_net,
+        ini,
+        fin,
+        cost_function,
+        skip,
+        ret_tuple_as_trans_desc=False,
+        max_align_time_trace=sys.maxsize,
+        original_trace: Optional[Trace] = None,
+        ext_me_parameters: Optional[Dict[Any, Any]] = None,
+        use_ilp: bool = False,
+        solver_variant: Optional[str] = None,
 ):
     start_time = time.time()
 
+    # 1. Setup Petri Net Decorators and Incidence Matrix (Standard A* Setup)
     decorate_transitions_prepostset(sync_net)
     decorate_places_preset_trans(sync_net)
 
     incidence_matrix = inc_mat_construct(sync_net)
+
     ini_vec, fin_vec, cost_vec = utils.__vectorize_initial_final_cost(
         incidence_matrix, ini, fin, cost_function
     )
 
+    # Ensure float for calculations
+    cost_vec_derivation = [x * 1.0 for x in cost_vec]
+
+    # Initialize counters and sets
     closed = set()
+    lp_solved = [0]
 
-    # Prepare static matrices for LP
-    # G and h for non-negativity constraints: -I * x <= 0  =>  x >= 0
-    a_matrix = np.asmatrix(incidence_matrix.a_matrix).astype(np.float64)
-    g_matrix = -np.eye(len(sync_net.transitions))
-    h_cvx = np.matrix(np.zeros(len(sync_net.transitions))).transpose()
-    cost_vec = [x * 1.0 for x in cost_vec]
+    # EME SOLVER SETUP
+    if ext_me_parameters is None:
+        ext_me_parameters = {}
 
-    # Compute initial heuristic using LEAN LP
-    h, x = __compute_heuristic_lean_lp(
+    if EME_Params.COSTS not in ext_me_parameters:
+        ext_me_parameters[EME_Params.COSTS] = cost_function
+
+    if original_trace is None:
+        # If no original trace is provided, we cannot build EME.
+        # This shouldn't happen in normal usage
+        return None
+
+    # Build the EME solver object locally
+    eme_solver = eme_build(
+        original_trace,
         sync_net,
-        a_matrix,
-        h_cvx,
-        g_matrix,
-        cost_vec,
-        incidence_matrix,
         ini,
-        fin_vec
+        fin,
+        parameters=ext_me_parameters,
     )
 
+    # 2. Initial EME Solve (Full Solve)
+    h, x, is_feasible = _eme_solve_inner(
+        eme_solver, ini, use_ilp
+    )
+
+    if not is_feasible:
+        return None  # Infeasible alignment from start
+
+    # Start A* Search
     ini_state = utils.SearchTuple(0 + h, 0, h, ini, None, None, x, True)
     open_set = [ini_state]
     heapq.heapify(open_set)
@@ -679,64 +758,70 @@ def __search(
         t for t in sync_net.transitions if len(t.in_arcs) == 0
     )
 
-    while not len(open_set) == 0:
+    while open_set:
         if (time.time() - start_time) > max_align_time_trace:
             return None
 
         curr = heapq.heappop(open_set)
-
         current_marking = curr.m
 
+        # 3. Handle Untrusted State (RE-SOLVE REQUIRED)
         while not curr.trust:
             if (time.time() - start_time) > max_align_time_trace:
                 return None
 
+            # Skip if already closed
             already_closed = current_marking in closed
             if already_closed:
                 curr = heapq.heappop(open_set)
                 current_marking = curr.m
                 continue
 
-            # Recalculate heuristic using LEAN LP for untrusted states
-            h, x = __compute_heuristic_lean_lp(
-                sync_net,
-                a_matrix,
-                h_cvx,
-                g_matrix,
-                cost_vec,
-                incidence_matrix,
-                curr.m,
-                fin_vec
+            # Perform full EME solve for the current marking
+            h, x, is_feasible = _eme_solve_inner(
+                eme_solver, curr.m, use_ilp
             )
-            lp_solved += 1
 
+            if not is_feasible:
+                # Optimization: If LP is infeasible for this marking, this path is dead.
+                # We treat it as h=infinity and just drop this state.
+                # Continue to pop the next state from queue.
+                if open_set:
+                    curr = heapq.heappop(open_set)
+                    current_marking = curr.m
+                    continue
+                else:
+                    return None
+
+            lp_solved += 1
             tp = utils.SearchTuple(
                 curr.g + h, curr.g, h, curr.m, curr.p, curr.t, x, True
             )
             curr = heapq.heappushpop(open_set, tp)
             current_marking = curr.m
 
-        if curr.h > 10**15: # MAX_ALLOWED_HEURISTICS equivalent
+        # 4. Process Trusted State
+        if curr.h > lp_solver.MAX_ALLOWED_HEURISTICS:
             continue
-
         already_closed = current_marking in closed
         if already_closed:
             continue
 
-        if curr.h < 0.01:
-            if current_marking == fin:
-                return utils.__reconstruct_alignment(
-                    curr,
-                    visited,
-                    queued,
-                    traversed,
-                    ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
-                    lp_solved=lp_solved,
-                )
+        # Goal check
+        if curr.h < 0.01 and current_marking == fin:
+            return utils.__reconstruct_alignment(
+                curr,
+                visited,
+                queued,
+                traversed,
+                ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
+                lp_solved=lp_solved,
+            )
 
         closed.add(current_marking)
         visited += 1
 
+        # Determine enabled transitions
         enabled_trans = copy(trans_empty_preset)
         for p in current_marking:
             for t in p.ass_trans:
@@ -747,28 +832,35 @@ def __search(
             (t, cost_function[t])
             for t in enabled_trans
             if not (
-                t is not None
-                and utils.__is_log_move(t, skip)
-                and utils.__is_model_move(t, skip)
+                    t is not None
+                    and utils.__is_log_move(t, skip)
+                    and utils.__is_model_move(t, skip)
             )
         ]
 
+        # 5. Expand Neighbors using Incremental Update (Derivation Trick)
         for t, cost in trans_to_visit_with_cost:
             traversed += 1
             new_marking = utils.add_markings(current_marking, t.add_marking)
 
             if new_marking in closed:
                 continue
+
             g = curr.g + cost
 
-            queued += 1
-            h, x = utils.__derive_heuristic(
-                incidence_matrix, cost_vec, curr.x, t, curr.h
+            # Derive heuristic cheaply from current EME solution (curr.x)
+            h_derived, x_derived = utils.__derive_heuristic(
+                incidence_matrix, cost_vec_derivation, curr.x, t, curr.h
             )
-            trustable = utils.__trust_solution(x)
-            new_f = g + h
 
+            # Check admissibility: is the derived solution still valid?
+            trustable = utils.__trust_solution(x_derived)
+            new_f = g + h_derived
+
+            queued += 1
             tp = utils.SearchTuple(
-                new_f, g, h, new_marking, curr, t, x, trustable
+                new_f, g, h_derived, new_marking, curr, t, x_derived, trustable
             )
             heapq.heappush(open_set, tp)
+
+    return None

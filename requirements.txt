@@ -1,2 +1,7 @@
+numpy
+cvxopt
+cvxopt;python_version<'3.14'
+pulp-cli
 jupyterlab
 aiohttp
+torch

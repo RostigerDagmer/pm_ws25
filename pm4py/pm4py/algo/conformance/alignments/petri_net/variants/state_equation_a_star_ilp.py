@@ -41,7 +41,7 @@ from copy import copy
 from enum import Enum
 
 import numpy as np
-# Import cvxopt components directly for lean LP solving
+# Import cvxopt components directly
 from cvxopt import matrix, glpk
 
 from pm4py.objects.log import obj as log_implementation
@@ -571,7 +571,7 @@ def _to_cvxopt_mat(x):
     return matrix(arr)
 
 
-def __compute_heuristic_lean_lp(
+def __compute_heuristic_strict_ilp(
     sync_net,
     a_matrix,
     h_cvx,
@@ -582,15 +582,16 @@ def __compute_heuristic_lean_lp(
     fin_vec
 ):
     """
-    Computes the heuristic using a LEAN LP formulation.
-    This skips Python overhead by calling GLPK LP solver directly via CVXOPT.
+    Computes the heuristic using a STRICT ILP formulation (forcing integer solutions),
+    bypassing the standard LP relaxation check.
     """
     # 1. Calculate b_term (target marking vector: m_f - m)
     m_vec = incidence_matrix.encode_marking(marking)
     b_term = [i - j for i, j in zip(fin_vec, m_vec)]
     b_term = np.matrix([x * 1.0 for x in b_term]).transpose()
 
-    # 2. Convert to CVXOPT matrices (required by raw interface)
+    # 2. Convert everything to CVXOPT matrices
+    # Note: GLPK expects double precision floats ('d' matrix)
     try:
         cost_c = _to_cvxopt_mat(cost_vec)
         g_c = _to_cvxopt_mat(g_matrix)
@@ -598,25 +599,34 @@ def __compute_heuristic_lean_lp(
         a_c = _to_cvxopt_mat(a_matrix)
         b_c = _to_cvxopt_mat(b_term)
     except Exception:
-        # Fallback if conversion fails
+        # Fallback or error handling if matrix conversion fails
+        # For strict ILP we need these to be correct
         return sys.maxsize, [0.0] * len(sync_net.transitions)
 
-    # 3. Configure GLPK options (Silent)
+    # 3. Set up Integer set I
+    # We want all variables to be integers
+    num_vars = len(cost_vec)
+    I = set(range(num_vars))
+
+    # 4. Configure GLPK options to be silent
     glpk.options["msg_lev"] = "GLP_MSG_OFF"
 
-    # 4. Call GLPK LP directly
+    # 5. Call GLPK ILP directly
+    # status, x = glpk.ilp(c, G, h, A, b, I, B)
+    # We have no binary variables B, so B=None (or omitted)
     try:
-        status, x, y, z = glpk.lp(cost_c, g_c, h_c, a_c, b_c)
+        status, x = glpk.ilp(cost_c, g_c, h_c, a_c, b_c, I=I)
     except Exception:
         status = None
         x = None
 
-    # 5. Extract result
+    # 6. Extract result
     prim_obj = None
     points = None
 
     if status == 'optimal' and x is not None:
         # Calculate objective: c^T * x
+        # cvxopt.blas.dot(x, y) computes inner product
         from cvxopt import blas
         prim_obj = blas.dot(cost_c, x)
         points = list(x)
@@ -648,15 +658,15 @@ def __search(
 
     closed = set()
 
-    # Prepare static matrices for LP
+    # Prepare static matrices for LP/ILP
     # G and h for non-negativity constraints: -I * x <= 0  =>  x >= 0
     a_matrix = np.asmatrix(incidence_matrix.a_matrix).astype(np.float64)
     g_matrix = -np.eye(len(sync_net.transitions))
     h_cvx = np.matrix(np.zeros(len(sync_net.transitions))).transpose()
     cost_vec = [x * 1.0 for x in cost_vec]
 
-    # Compute initial heuristic using LEAN LP
-    h, x = __compute_heuristic_lean_lp(
+    # Compute initial heuristic using STRICT ILP
+    h, x = __compute_heuristic_strict_ilp(
         sync_net,
         a_matrix,
         h_cvx,
@@ -697,8 +707,8 @@ def __search(
                 current_marking = curr.m
                 continue
 
-            # Recalculate heuristic using LEAN LP for untrusted states
-            h, x = __compute_heuristic_lean_lp(
+            # Recalculate heuristic using STRICT ILP for untrusted states
+            h, x = __compute_heuristic_strict_ilp(
                 sync_net,
                 a_matrix,
                 h_cvx,
