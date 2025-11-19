@@ -1,6 +1,5 @@
-import torch
 from pm4py.objects.log.importer.xes import importer as xes_importer
-from dataloaders.base import BaseEventLogDataset, make_feature_fn
+from dataloaders.base import BaseEventLogDataset
 
 
 class XESEventLogDataset(BaseEventLogDataset):
@@ -14,12 +13,10 @@ class XESEventLogDataset(BaseEventLogDataset):
 if __name__ == "__main__":
     path = "data/d9769f3d-0ab0-4fb8-803b-0d1120ffcf54/Hospital_log.xes"
     dataset = XESEventLogDataset(
-        path, attribute="concept:name", feature_fn=make_feature_fn
-    )
-    dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=4, collate_fn=dataset.collate_fn
+        path,
+        attribute="concept:name",
     )
 
-    for batch in dataloader:
-        print(batch)
+    for item in dataset:
+        print(item)
         break
