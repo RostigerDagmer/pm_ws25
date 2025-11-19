@@ -21,7 +21,6 @@ from deduplication.deduplicator import (
     PetriNetItem
 )
 from deduplication.normalizers import ZScoreFeatureNormalizer
-from deduplication.utils import save_duplicate_report
 from features.extractors import ModelFeatureExtractor
 import hashlib
 import json
@@ -190,12 +189,8 @@ class UniqueProcessModelDataset(Dataset):
         report_path = Path(
             os.path.join(str(self.cache_dir), "deduplication_report.json")
         )
-        save_duplicate_report(
-            unique_nets,
-            duplicate_map,
-            self.dedup_report['thresholds'],
-            report_path
-        )
+        with open(report_path, 'w') as f:
+            json.dump(self.dedup_report, f, indent=2)
 
         logging.info(
             f"Deduplication complete. Kept {len(unique_nets)} unique nets "

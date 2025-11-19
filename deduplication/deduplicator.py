@@ -138,11 +138,11 @@ class PetriNetDeduplicator:
         
         self.stats['final_unique'] = len(unique_nets)
 
-        if self.config.verbose:
-            self._print_stats()
-
         # Generate report
         self._generate_report(unique_nets, duplicate_map)
+
+        if self.config.verbose:
+            self.print_report()
 
         return unique_nets, duplicate_map
     
@@ -246,18 +246,33 @@ class PetriNetDeduplicator:
         """
         return self.report
 
-    def _print_stats(self):
-        """Print deduplication statistics."""
+    def print_report(self):
+        """Print formatted deduplication report."""
+        if self.report is None:
+            print("No deduplication report available. Run deduplicate() first.")
+            return
+
         print("\n" + "="*60)
-        print("DEDUPLICATION STATISTICS")
+        print("DEDUPLICATION REPORT")
         print("="*60)
-        print(f"Total input nets:            {self.stats['total_input']}")
-        print(f"Total comparisons performed: {self.stats['comparisons_performed']}")
-        print(f"  Passed stage 1:            {self.stats['stage1_filtered']}")
-        print(f"  Passed stage 2:            {self.stats['stage2_filtered']}")
-        print(f"  Passed stage 3 (duplicates):{self.stats['stage3_filtered']}")
-        print(f"Final unique nets:           {self.stats['final_unique']}")
-        print(f"Duplicates found:            {self.stats['total_input'] - self.stats['final_unique']}")
-        reduction = (1 - self.stats['final_unique']/self.stats['total_input']) * 100
-        print(f"Reduction:                   {reduction:.1f}%")
+        print(f"Total input nets:            {self.report['num_total']}")
+        print(f"Final unique nets:           {self.report['num_unique']}")
+        print(f"Duplicates found:            {self.report['num_duplicates']}")
+        print(f"Reduction:                   {self.report['reduction_percent']:.1f}%")
+        print()
+        print("COMPARISON STATISTICS:")
+        print(f"  Total comparisons:         {self.report['stats']['comparisons_performed']}")
+        print(f"  Passed stage 1 (labels):   {self.report['stats']['stage1_filtered']}")
+        print(f"  Passed stage 2 (edges):    {self.report['stats']['stage2_filtered']}")
+        print(f"  Passed stage 3 (features): {self.report['stats']['stage3_filtered']}")
+        print()
+        print("THRESHOLDS:")
+        print(f"  Label similarity:          {self.report['thresholds']['label_threshold']:.2f}")
+        print(f"  Edge similarity:           {self.report['thresholds']['edge_threshold']:.2f}")
+        print(f"  Feature similarity:        {self.report['thresholds']['feature_threshold']:.2f}")
+        print()
+        print("STAGES ENABLED:")
+        print(f"  Stage 1 (labels):          {self.report['stages_enabled']['stage1']}")
+        print(f"  Stage 2 (edges):           {self.report['stages_enabled']['stage2']}")
+        print(f"  Stage 3 (features):        {self.report['stages_enabled']['stage3']}")
         print("="*60 + "\n")
