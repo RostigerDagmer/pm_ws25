@@ -14,7 +14,6 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from itertools import product
-import numpy as np
 
 from tqdm import tqdm
 from experiments.simulation.noise import inject_noise_trace
@@ -33,6 +32,9 @@ from pm4py.algo.conformance.alignments.petri_net.algorithm import (
 from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
 from pm4py.util import typing
 from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from sklearn.preprocessing import LabelEncoder
 
 SEED = 42
 
@@ -53,47 +55,11 @@ class Aligner(ABC):
         return self.name
 
 
-class PM4pyAligner(Aligner):
-    def __init__(self, variant: Variants):
-        super().__init__(name=str(variant))
-        self.variant = variant
-
-    def __call__(self, pm: PetriNet, im: Marking, fm: Marking, trace: Trace):
-        return apply(
-            EventLog([trace]),
-            pm,
-            im,
-            fm,
-            None,
-            variant=self.variant,
-        )
-
-    def hash(self) -> str:
-        base = {"variant": str(self.variant.value)}
-        return hashlib.sha1(
-            json.dumps(base, sort_keys=True).encode()
-        ).hexdigest()
-
-
-class AlignerSpec(Enum):
-    ALL = list(map(lambda v: PM4pyAligner(v), Variants))
-    A_STAR = [
-        PM4pyAligner(Variants.VERSION_DIJKSTRA_NO_HEURISTICS),
-        PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR),
-        PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR_ILP),
-        PM4pyAligner(Variants.VERSION_INCREMENTAL_A_STAR),
-    ]
-
-
 class PerfCounter:
     def __init__(self):
         self._profiler = cProfile.Profile()
         self.duration: float | None = None
         self.stats: pstats.Stats | None = None
-
-        # Specific metrics extracted from profile
-        self.search_time: float = 0.0
-        self.lp_time: float = 0.0
 
     def __enter__(self):
         self._t_start = time.perf_counter()
@@ -105,37 +71,12 @@ class PerfCounter:
         self._t_end = time.perf_counter()
         self.duration = self._t_end - self._t_start
         self.stats = pstats.Stats(self._profiler).strip_dirs()
-        self.extract_metrics()
         return False
-
-    def extract_metrics(self) -> Optional[dict[str, float]]:
-        """
-        Parses the pstats to find cumulative time for specific functions
-        (__search and LP solvers).
-        """
-        if not self.stats:
-            return
-
-        self.search_time = 0.0
-        self.lp_time = 0.0
-
-        # ps.stats is a dict: (filename, line, funcname) -> (cc, nc, tt, ct, callers)
-        for func, (cc, nc, tt, ct, callers) in self.stats.stats.items():
-            fname = func[2]
-
-            if "__search" in fname or "synchr" in fname:
-                self.search_time += ct
-            elif "cvxopt.glpk.lp" in fname or "cvxopt.glpk.ilp" in fname:
-                self.lp_time += ct
-        return {
-            "search_time": self.search_time,
-            "lp_time": self.lp_time,
-        }
 
     def dict(self) -> dict[str, Any]:
         return {
             "duration": self.duration,
-            "stats": marshal.dumps(self.stats.stats) if self.stats else None,
+            "stats": marshal.dumps(self.stats.stats),
         }
 
     @staticmethod
@@ -190,20 +131,6 @@ class TraceSampler(ABC):
         ).hexdigest()
 
 
-class SimplePerturbedTraceSampler(TraceSampler):
-    def __init__(
-        self,
-        ds: ProcessModelDataset,
-        seed: Optional[int] = None,
-        slice: Optional[range] = None,
-    ):
-        super().__init__(ds, seed, slice)
-
-    def __getitem__(self, index: int) -> Trace:
-        trace: Trace = self.log[index]
-        return inject_noise_trace(trace=trace, seed=self.seed)
-
-
 class RunDataset(Dataset):
 
     @dataclass
@@ -212,7 +139,7 @@ class RunDataset(Dataset):
         model: ProcessModelDataset.ItemType
         trace: Trace
         item: Union[typing.AlignmentResult, typing.ListAlignments]
-        perf: list[PerfCounter]
+        perf: PerfCounter
         algo: str
         comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
 
@@ -222,7 +149,7 @@ class RunDataset(Dataset):
         model: ProcessModelDataset.SerializedView.ItemType
         trace: Trace
         item: Union[typing.AlignmentResult, typing.ListAlignments]
-        perf: list[dict[str, Any]]
+        perf: dict[str, Any]
         algo: str
         comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
 
@@ -232,7 +159,7 @@ class RunDataset(Dataset):
                 self.model.deserialize(),
                 self.trace,
                 self.item,
-                [PerfCounter.from_dict(p) for p in self.perf],
+                PerfCounter.from_dict(self.perf),
                 self.algo,
                 self.comb_id,
             )
@@ -243,7 +170,6 @@ class RunDataset(Dataset):
         process_model_dataset: ProcessModelDataset,
         aligners: Sequence[Aligner],
         trace_sampler: TraceSampler.__class__,
-        n_runs: int = 1,  # Number of runs per trace/model pair
         multiprocessing: bool = True,
         slice: Optional[range] = None,
     ):
@@ -253,7 +179,6 @@ class RunDataset(Dataset):
             self.pm_dataset, seed=SEED, slice=slice
         )
         self.aligners = aligners
-        self.n_runs = n_runs
         self.items: dict[str, "RunDataset.SerializedItemType"] = {}
         self.index: list[str] = []
         if multiprocessing:
@@ -277,7 +202,6 @@ class RunDataset(Dataset):
         model: ProcessModelDataset.SerializedView.ItemType,
         trace: Trace,
         aligner: Aligner | str,
-        n_runs: int = 1,
     ) -> "RunDataset.SerializedItemType":
 
         deser_model = model.deserialize()
@@ -286,30 +210,20 @@ class RunDataset(Dataset):
             aligner = next(
                 a for a in AlignerSpec.ALL.value if a.name == aligner
             )
-
-            # MULTI-RUN BENCHMARK LOGIC
-            stats = []
-            last_item = None
-
-            # Loop n times to collect statistics
-            for _ in range(n_runs):
-                with PerfCounter() as pc:
-                    item = aligner(
-                        deser_model.pm, deser_model.im, deser_model.fm, trace
-                    )
-                stats.append(pc.dict())
-                last_item = item
-
-            # Calculate aggregates
-            return RunDataset.SerializedItemType(
-                hash,
-                model,
-                trace,
-                last_item,
-                stats,
-                aligner.name,
-                RunDataset._hash_comb(trace, deser_model),
+        with PerfCounter() as pc:
+            item = aligner(
+                deser_model.pm, deser_model.im, deser_model.fm, trace
             )
+        stats = pc.dict()
+        return RunDataset.SerializedItemType(
+            hash,
+            model,
+            trace,
+            item,
+            stats,
+            aligner.name,
+            RunDataset._hash_comb(trace, deser_model),
+        )
 
     def _init_cache(self):
         self._tryload()
@@ -324,7 +238,7 @@ class RunDataset(Dataset):
                     if h in self.items:
                         continue
                     self.items[h] = RunDataset._process_item(
-                        h, model, trace, aligner, self.n_runs
+                        h, model, trace, aligner
                     )
 
         self.index = list(self.items.keys())
@@ -369,7 +283,6 @@ class RunDataset(Dataset):
                     m,
                     t,
                     a.name,
-                    self.n_runs,  # pass n_runs to worker
                 )
                 futures.add(fut)
                 aligned.total += 1  # update total dynamically
@@ -400,11 +313,10 @@ class RunDataset(Dataset):
             pickle.dump(self.items, f)
 
     def _hash_config(self):
-        base: dict[str, str | list[str] | int] = {
+        base: dict[str, str | list[str]] = {
             "model_ds_hash": self.pm_dataset.hash(),
             "trace_sampler_hash": self.trace_sampler.hash(),
             "aligner_hash": [a.hash() for a in self.aligners],
-            "n_runs": self.n_runs,  # Hash must include n_runs to invalidate cache if changed
         }
         return hashlib.sha1(
             json.dumps(base, sort_keys=True).encode()
@@ -450,30 +362,48 @@ class RunDataset(Dataset):
         return item
 
 
-def get_stats(stats: list[PerfCounter]) -> dict[str, float]:
-    durations = [s.duration for s in stats if s.duration is not None]
-    ms = [s.extract_metrics() for s in stats]
-    search_times = [s["search_time"] for s in ms]
-    lp_times = [s["lp_time"] for s in ms]
+class PM4pyAligner(Aligner):
+    def __init__(self, variant: Variants):
+        super().__init__(name=str(variant))
+        self.variant = variant
 
-    def compute_metrics(data: list[float]) -> dict[str, float]:
-        return {
-            "mean": float(np.mean(data)) if data else 0.0,
-            "std": float(np.std(data)) if data else 0.0,
-            "median": float(np.median(data)) if data else 0.0,
-        }
+    def __call__(self, pm: PetriNet, im: Marking, fm: Marking, trace: Trace):
+        return apply(
+            EventLog([trace]),
+            pm,
+            im,
+            fm,
+            None,
+            variant=self.variant,
+        )
 
-    return {
-        "mean_total": compute_metrics(durations)["mean"],
-        "std_total": compute_metrics(durations)["std"],
-        "median_total": compute_metrics(durations)["median"],
-        "mean_search": compute_metrics(search_times)["mean"],
-        "std_search": compute_metrics(search_times)["std"],
-        "median_search": compute_metrics(search_times)["median"],
-        "mean_lp": compute_metrics(lp_times)["mean"],
-        "std_lp": compute_metrics(lp_times)["std"],
-        "median_lp": compute_metrics(lp_times)["median"],
-    }
+    def hash(self) -> str:
+        base = {"variant": str(self.variant.value)}
+        return hashlib.sha1(
+            json.dumps(base, sort_keys=True).encode()
+        ).hexdigest()
+
+
+class AlignerSpec(Enum):
+    ALL = list(map(lambda v: PM4pyAligner(v), Variants))
+    A_STAR = [
+        PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR),
+        PM4pyAligner(Variants.VERSION_DIJKSTRA_LESS_MEMORY),
+    ]
+
+
+class SimplePerturbedTraceSampler(TraceSampler):
+    def __init__(
+        self,
+        ds: ProcessModelDataset,
+        seed: Optional[int] = None,
+        slice: Optional[range] = None,
+    ):
+        super().__init__(ds, seed, slice)
+
+    def __getitem__(self, index: int) -> Trace:
+        trace: Trace = self.log[index]
+        return inject_noise_trace(trace=trace, seed=self.seed)
 
 
 if __name__ == "__main__":
@@ -483,12 +413,12 @@ if __name__ == "__main__":
     from dataloaders.xes_log import XESEventLogDataset
     from pm4py.discovery import discover_petri_net_inductive
     import matplotlib.pyplot as plt
+    import numpy as np
     import pandas as pd
 
-    # CONFIGURATION
     PLOT = False
-    N_RUNS = 5  # set number of runs here
-    path = "data/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/Hospital%20Billing%20-%20Event%20Log.xes"
+
+    path = "data/63a8435a-077d-4ece-97cd-2c76d394d99c/BPIC15_2.xes"
 
     log_dataset = XESEventLogDataset(path)
 
@@ -548,9 +478,8 @@ if __name__ == "__main__":
         pm_dataset,
         AlignerSpec.A_STAR.value,
         SimplePerturbedTraceSampler,
-        n_runs=N_RUNS,
         multiprocessing=True,
-        slice=range(0, 50),  # <- for testing
+        slice=range(0, 25),  # <- for testing
     )
 
     fe = CompositeFeatureExtractor()
@@ -558,8 +487,6 @@ if __name__ == "__main__":
     def format_row(
         run: RunDataset.ItemType, feature_vector: np.typing.NDArray[np.float32]
     ) -> pd.Series:
-        stats = get_stats(run.perf)
-
         return pd.Series(
             {
                 "item_id": run.item_id,
@@ -568,13 +495,7 @@ if __name__ == "__main__":
                 "trace_id": RunDataset._hash_trace(run.trace),
                 "aligner": run.algo,
                 "feature_vector": feature_vector,
-                # metric for decision making
-                "time_total_mean": stats.get("mean_total"),
-                "time_total_std": stats.get("std_total"),
-                "time_total_median": stats.get("median_total"),
-                # breakdown metrics
-                "time_search_mean": stats.get("mean_search"),
-                "time_lp_mean": stats.get("mean_lp"),
+                "time": run.perf.duration,  # <- probably shouldn't be total time but only search time
             }
         )
 
@@ -586,11 +507,7 @@ if __name__ == "__main__":
             "trace_id",
             "aligner",
             "feature_vector",
-            "time_total_mean",
-            "time_total_std",
-            "time_total_median",
-            "time_search_mean",
-            "time_lp_mean",
+            "time",
         ]
     )
 
@@ -612,38 +529,65 @@ if __name__ == "__main__":
     print(df.head())
 
     # group by combination_id and choose the minimum time across aligners
-    best_indices = df.groupby("combination_id")["time_total_mean"].idxmin()
-    labels = df.loc[best_indices]
-
-    # print(f"labels.head(): {labels.head()}")
-    print("\nBest Aligner Labels (Head):")
-    print(labels[["aligner", "time_total_mean", "time_total_std"]].head())
+    labels = df.loc[df.groupby("combination_id")["time"].idxmin()]
+    print(f"labels.head(): {labels.head()}")
     print("Summary statistics (minimum time across aligners):")
-    print(labels["time_total_mean"].describe())
+    print(labels["time"].describe())
     print("Distribution of aligners chosen:")
     print(labels["aligner"].value_counts())
 
     # write to csv
     labels.to_csv("./test_labels.csv", index=False)
-    df.to_csv("./all_runs_aggregated.csv", index=False)
-    print(
-        "\nSaved aggregated results to './test_labels_aggregated.csv' and './all_runs_aggregated.csv'"
-    )
 
-    # GradientBoostingClassifier training
+    # 1. GradientBoostingClassifier training
     X = np.vstack(labels["feature_vector"].to_numpy())
     y = labels["aligner"].to_numpy()
 
-    clf = GradientBoostingClassifier(
+    gb_clf = GradientBoostingClassifier(
         n_estimators=100,
         learning_rate=0.1,
-        max_depth=3,
+        max_depth=5,
         random_state=SEED,
     )
-    clf.fit(X, y)
-    print("Classifier trained.")
-    print(f"Feature importances: {clf.feature_importances_}")
+    gb_clf.fit(X, y)
+    print("Gradient Boosting Classifier trained.")
+    print(f"GB Feature importances: {gb_clf.feature_importances_}")
 
-    # save model
-    with open("./aligner_time_predictor.pkl", "wb") as f:
-        pickle.dump(clf, f)
+    # 1. Save model
+    with open("./aligner_time_predictor_gb.pkl", "wb") as f:
+        pickle.dump({'model': gb_clf}, f)
+
+    # 2. RandomForestClassifier training
+    rf_clf = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=5,
+        random_state=SEED,
+    )
+    rf_clf.fit(X, y)
+    print("Random Forest Classifier trained.")
+    print(f"RF Feature importances: {rf_clf.feature_importances_}")
+
+    # 2. Save model
+    with open("./aligner_time_predictor_rf.pkl", "wb") as f:
+        pickle.dump({'model': rf_clf}, f)
+
+    # 3. XGBClassifier training
+    # XGBoost benötigt numerische Labels, daher wird eine Kodierung durchgeführt
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(y)
+
+    xgb_clf = XGBClassifier(
+        n_estimators=100,
+        learning_rate=0.1,
+        max_depth=5,
+        random_state=SEED,
+        use_label_encoder=False,
+        eval_metric='logloss',  # Für binäre Klassifikation wird logloss verwendet
+    )
+    xgb_clf.fit(X, y_encoded)  # Training mit kodierten Labels
+    print("XGBoost Classifier trained.")
+    print(f"XGB Feature importances: {xgb_clf.feature_importances_}")
+
+    # 3. Save model
+    with open("./aligner_time_predictor_xgb.pkl", "wb") as f:
+        pickle.dump({'model': xgb_clf, 'label_encoder': label_encoder}, f)

@@ -1,7 +1,12 @@
 numpy
 cvxopt
-cvxopt;python_version<'3.14'
 pulp-cli
 jupyterlab
 aiohttp
 torch
+pm4py
+pandas
+tqdm
+pyyaml
+charset-normalizer
+networkx
