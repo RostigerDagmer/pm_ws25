@@ -10,3 +10,5 @@ tqdm
 pyyaml
 charset-normalizer
 networkx
+scikit-learn
+xgboost
