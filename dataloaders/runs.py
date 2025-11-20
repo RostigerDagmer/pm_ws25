@@ -14,6 +14,7 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from itertools import product
+import numpy as np
 
 from tqdm import tqdm
 from experiments.simulation.noise import inject_noise_trace
@@ -84,7 +85,6 @@ class AlignerSpec(Enum):
     ]
 
 
-
 class PerfCounter:
     def __init__(self):
         self._profiler = cProfile.Profile()
@@ -108,7 +108,7 @@ class PerfCounter:
         self.extract_metrics()
         return False
 
-    def extract_metrics(self):
+    def extract_metrics(self) -> Optional[dict[str, float]]:
         """
         Parses the pstats to find cumulative time for specific functions
         (__search and LP solvers).
@@ -127,13 +127,15 @@ class PerfCounter:
                 self.search_time += ct
             elif "cvxopt.glpk.lp" in fname or "cvxopt.glpk.ilp" in fname:
                 self.lp_time += ct
+        return {
+            "search_time": self.search_time,
+            "lp_time": self.lp_time,
+        }
 
     def dict(self) -> dict[str, Any]:
         return {
             "duration": self.duration,
-            "search_time": self.search_time,
-            "lp_time": self.lp_time,
-            # "stats": marshal.dumps(self.stats.stats) if self.stats else None
+            "stats": marshal.dumps(self.stats.stats) if self.stats else None,
         }
 
     @staticmethod
@@ -202,7 +204,6 @@ class SimplePerturbedTraceSampler(TraceSampler):
         return inject_noise_trace(trace=trace, seed=self.seed)
 
 
-
 class RunDataset(Dataset):
 
     @dataclass
@@ -211,7 +212,7 @@ class RunDataset(Dataset):
         model: ProcessModelDataset.ItemType
         trace: Trace
         item: Union[typing.AlignmentResult, typing.ListAlignments]
-        perf: PerfCounter
+        perf: list[PerfCounter]
         algo: str
         comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
 
@@ -221,7 +222,7 @@ class RunDataset(Dataset):
         model: ProcessModelDataset.SerializedView.ItemType
         trace: Trace
         item: Union[typing.AlignmentResult, typing.ListAlignments]
-        perf: dict[str, Any]
+        perf: list[dict[str, Any]]
         algo: str
         comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
 
@@ -231,7 +232,7 @@ class RunDataset(Dataset):
                 self.model.deserialize(),
                 self.trace,
                 self.item,
-                PerfCounter.from_dict(self.perf),
+                [PerfCounter.from_dict(p) for p in self.perf],
                 self.algo,
                 self.comb_id,
             )
@@ -287,9 +288,7 @@ class RunDataset(Dataset):
             )
 
             # MULTI-RUN BENCHMARK LOGIC
-            durations = []
-            search_times = []
-            lp_times = []
+            stats = []
             last_item = None
 
             # Loop n times to collect statistics
@@ -298,28 +297,10 @@ class RunDataset(Dataset):
                     item = aligner(
                         deser_model.pm, deser_model.im, deser_model.fm, trace
                     )
-
-                durations.append(pc.duration)
-                search_times.append(pc.search_time)
-                lp_times.append(pc.lp_time)
+                stats.append(pc.dict())
                 last_item = item
 
             # Calculate aggregates
-            stats = {
-                "mean_total": float(np.mean(durations)),
-                "std_total": float(np.std(durations)),
-                "median_total": float(np.median(durations)),
-                "min_total": float(np.min(durations)),
-
-                "mean_search": float(np.mean(search_times)),
-                "std_search": float(np.std(search_times)),
-
-                "mean_lp": float(np.mean(lp_times)),
-                "std_lp": float(np.std(lp_times)),
-
-                "n_runs": n_runs
-            }
-
             return RunDataset.SerializedItemType(
                 hash,
                 model,
@@ -357,9 +338,9 @@ class RunDataset(Dataset):
     def _init_cache_mp(self):
         self._tryload()
         total = (
-                len(self.trace_sampler)
-                * len(self.pm_dataset.serialized)
-                * len(self.aligners)
+            len(self.trace_sampler)
+            * len(self.pm_dataset.serialized)
+            * len(self.aligners)
         )
 
         num_workers = multiprocessing.cpu_count()
@@ -423,7 +404,7 @@ class RunDataset(Dataset):
             "model_ds_hash": self.pm_dataset.hash(),
             "trace_sampler_hash": self.trace_sampler.hash(),
             "aligner_hash": [a.hash() for a in self.aligners],
-            "n_runs": self.n_runs  # Hash must include n_runs to invalidate cache if changed
+            "n_runs": self.n_runs,  # Hash must include n_runs to invalidate cache if changed
         }
         return hashlib.sha1(
             json.dumps(base, sort_keys=True).encode()
@@ -439,9 +420,9 @@ class RunDataset(Dataset):
 
     @staticmethod
     def _hash_item(
-            model: ProcessModelDataset.SerializedView.ItemType,
-            trace: Trace,
-            aligner: Aligner,
+        model: ProcessModelDataset.SerializedView.ItemType,
+        trace: Trace,
+        aligner: Aligner,
     ) -> str:
         item: dict[str, str | int] = {
             "model_hash": model.hash(),
@@ -469,6 +450,32 @@ class RunDataset(Dataset):
         return item
 
 
+def get_stats(stats: list[PerfCounter]) -> dict[str, float]:
+    durations = [s.duration for s in stats if s.duration is not None]
+    ms = [s.extract_metrics() for s in stats]
+    search_times = [s["search_time"] for s in ms]
+    lp_times = [s["lp_time"] for s in ms]
+
+    def compute_metrics(data: list[float]) -> dict[str, float]:
+        return {
+            "mean": float(np.mean(data)) if data else 0.0,
+            "std": float(np.std(data)) if data else 0.0,
+            "median": float(np.median(data)) if data else 0.0,
+        }
+
+    return {
+        "mean_total": compute_metrics(durations)["mean"],
+        "std_total": compute_metrics(durations)["std"],
+        "median_total": compute_metrics(durations)["median"],
+        "mean_search": compute_metrics(search_times)["mean"],
+        "std_search": compute_metrics(search_times)["std"],
+        "median_search": compute_metrics(search_times)["median"],
+        "mean_lp": compute_metrics(lp_times)["mean"],
+        "std_lp": compute_metrics(lp_times)["std"],
+        "median_lp": compute_metrics(lp_times)["median"],
+    }
+
+
 if __name__ == "__main__":
     import torch
     from dataloaders.net import VariantRandomDistributionSampler
@@ -476,13 +483,12 @@ if __name__ == "__main__":
     from dataloaders.xes_log import XESEventLogDataset
     from pm4py.discovery import discover_petri_net_inductive
     import matplotlib.pyplot as plt
-    import numpy as np
     import pandas as pd
 
     # CONFIGURATION
     PLOT = False
     N_RUNS = 5  # set number of runs here
-    path = "../data/63a8435a-077d-4ece-97cd-2c76d394d99c/BPIC15_2.xes"
+    path = "data/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/Hospital%20Billing%20-%20Event%20Log.xes"
 
     log_dataset = XESEventLogDataset(path)
 
@@ -544,7 +550,7 @@ if __name__ == "__main__":
         SimplePerturbedTraceSampler,
         n_runs=N_RUNS,
         multiprocessing=True,
-        slice=range(0, 10),  # <- for testing
+        slice=range(0, 50),  # <- for testing
     )
 
     fe = CompositeFeatureExtractor()
@@ -552,7 +558,8 @@ if __name__ == "__main__":
     def format_row(
         run: RunDataset.ItemType, feature_vector: np.typing.NDArray[np.float32]
     ) -> pd.Series:
-        stats = run.perf
+        stats = get_stats(run.perf)
+
         return pd.Series(
             {
                 "item_id": run.item_id,
@@ -571,7 +578,6 @@ if __name__ == "__main__":
             }
         )
 
-
     df = pd.DataFrame(
         columns=[
             "item_id",
@@ -584,7 +590,7 @@ if __name__ == "__main__":
             "time_total_std",
             "time_total_median",
             "time_search_mean",
-            "time_lp_mean"
+            "time_lp_mean",
         ]
     )
 
@@ -609,7 +615,7 @@ if __name__ == "__main__":
     best_indices = df.groupby("combination_id")["time_total_mean"].idxmin()
     labels = df.loc[best_indices]
 
-    #print(f"labels.head(): {labels.head()}")
+    # print(f"labels.head(): {labels.head()}")
     print("\nBest Aligner Labels (Head):")
     print(labels[["aligner", "time_total_mean", "time_total_std"]].head())
     print("Summary statistics (minimum time across aligners):")
@@ -619,6 +625,10 @@ if __name__ == "__main__":
 
     # write to csv
     labels.to_csv("./test_labels.csv", index=False)
+    df.to_csv("./all_runs_aggregated.csv", index=False)
+    print(
+        "\nSaved aggregated results to './test_labels_aggregated.csv' and './all_runs_aggregated.csv'"
+    )
 
     # GradientBoostingClassifier training
     X = np.vstack(labels["feature_vector"].to_numpy())
