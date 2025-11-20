@@ -45,7 +45,7 @@ echo "======================================"
 # Run Experiment
 # ====================================
 
-python sandbox_heuristics_parallel.py --run_id $SLURM_ARRAY_TASK_ID --output-dir results
+python run_heuristics_parallel.py --run_id $SLURM_ARRAY_TASK_ID --output-dir results
 
 EXIT_CODE=$?
 
@@ -59,12 +59,12 @@ echo "Job Finished: $(date)"
 echo "Exit Code: $EXIT_CODE"
 echo "======================================"
 
-# Wenn der letzte Job (ID 79), aggregiere Ergebnisse
+# Wenn der letzte Job (ID 79), aggregiere Ergebnisse und trainiere ML Modelle
 if [ $SLURM_ARRAY_TASK_ID -eq 79 ]; then
     echo ""
-    echo "Last job completed - aggregating results..."
+    echo "Last job completed - aggregating results and training ML models..."
     sleep 10  # Warte kurz, damit alle Jobs ihre Dateien schreiben können
-    python sandbox_heuristics_parallel.py --aggregate --output-dir results
+    python run_heuristics_parallel.py --aggregate --output-dir results
 fi
 
 exit $EXIT_CODE
