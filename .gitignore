@@ -7,4 +7,5 @@
 data
 *.csv
 *.pkl
-
+*.err
+*.out
