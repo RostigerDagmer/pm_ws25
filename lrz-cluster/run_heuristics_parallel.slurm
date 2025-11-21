@@ -8,7 +8,7 @@
 #SBATCH --mem=4G                        # 4GB RAM
 #SBATCH -o logs/job_%A_%a.out           # %A = Array-ID, %a = Task-ID
 #SBATCH -e logs/job_%A_%a.err           # Error logs
-#SBATCH --mail-type=END,FAIL            # Email bei Ende/Fehler (optional)
+# SBATCH --mail-type=END,FAIL            # Email bei Ende/Fehler (optional)
 # SBATCH --mail-user=deine@email.de    # Deine Email (optional, auskommentiert)
 
 # ====================================
