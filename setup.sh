@@ -1,6 +1,31 @@
 #!/usr/bin/env bash
 set -e  # stop on first error
 
+# ====================================
+# LRZ Cluster-specific setup
+# ====================================
+if [[ -d "/dss/dsshome1" ]] || [[ "$HOSTNAME" == *"lrz.de"* ]]; then
+  echo "=== LRZ Cluster detected ==="
+
+  # Unload base Python if loaded
+  if module is-loaded python/3.10.12-base 2>/dev/null; then
+    echo "Unloading python/3.10.12-base..."
+    module unload python/3.10.12-base
+  fi
+
+  # Load extended Python (includes dev headers for cvxopt)
+  if ! module is-loaded python/3.10.12-extended 2>/dev/null; then
+    echo "Loading python/3.10.12-extended..."
+    module load python/3.10.12-extended
+  fi
+
+  # Remove old venv if it exists (might be created with wrong Python version)
+  if [ -d ".venv" ]; then
+    echo "Removing existing .venv (will recreate with Python 3.10 extended)..."
+    rm -rf .venv
+  fi
+fi
+
 echo "=== [1/6] Checking for .venv ==="
 if [ ! -d ".venv" ]; then
   echo "Creating virtual environment..."
@@ -10,7 +35,7 @@ else
 fi
 
 # Detect OS for activation command
-if [[ "$OSTYPE" == "darwin"* || "$OSTYPE" == "linux-gnu"* ]]; then
+if [[ "$OSTYPE" == "darwin"* || "$OSTYPE" == "linux-gnu"* || "$OSTYPE" == "linux"* ]]; then
   source .venv/bin/activate
 elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
   source .venv/Scripts/activate
@@ -49,3 +74,6 @@ else
 fi
 
 echo "🚀 Ready!"
+
+
+
