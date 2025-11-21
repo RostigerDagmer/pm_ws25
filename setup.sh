@@ -10,7 +10,7 @@ else
 fi
 
 # Detect OS for activation command
-if [[ "$OSTYPE" == "darwin"* || "$OSTYPE" == "linux-gnu"* ]]; then
+if [[ "$OSTYPE" == "darwin"* || "$OSTYPE" == "linux"* ]]; then
   source .venv/bin/activate
 elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
   source .venv/Scripts/activate
