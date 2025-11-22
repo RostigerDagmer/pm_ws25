@@ -118,7 +118,7 @@ class UniqueProcessModelDataset(Dataset):
             'dedup_config': {
                 'label_threshold': self.dedup_config.label_similarity_threshold,
                 'edge_threshold': self.dedup_config.edge_similarity_threshold,
-                'feature_threshold': self.dedup_config.feature_similarity_threshold,
+                'feature_threshold': self.dedup_config.feature_distance_threshold,
             }
         }
         full_hash = hashlib.sha1(
@@ -372,6 +372,61 @@ class UniqueProcessModelDataset(Dataset):
 
         logging.info(
             f"Saved visualizations for {len(groups)} groups to {output_dir}"
+        )
+
+    def save_unique_visualizations(
+        self,
+        output_dir: Optional[str] = None,
+        bgcolor: str = "white",
+        format: str = "png"
+    ):
+        """
+        Save visualizations of all unique nets.
+
+        Args:
+            output_dir: Directory to save visualizations. Defaults to
+                       '<dataset_folder>/unique_visualizations_<timestamp>'.
+            bgcolor: Background color for visualizations (default: "white")
+            format: Image format (default: "png", options: "png", "svg", "pdf")
+        """
+        if not self.unique_indices:
+            logging.warning("No unique nets found. Nothing to visualize.")
+            return
+
+        # Set output directory
+        if output_dir is None:
+            dataset_folder = str(self.base_dataset.cache_dir.parent)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = os.path.join(
+                dataset_folder,
+                f"unique_visualizations_{timestamp}"
+            )
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        logging.info(
+            f"Saving visualizations for {len(self.unique_indices)} unique nets to "
+            f"{output_dir}"
+        )
+
+        # Process each unique net
+        for idx, base_idx in enumerate(tqdm(self.unique_indices, desc="Visualizing unique nets")):
+            item = self.base_dataset[base_idx]
+            file_path = os.path.join(
+                output_dir,
+                f"unique_{idx:04d}_base_{base_idx}.{format}"
+            )
+            self._save_single_visualization(
+                item.pm,
+                item.im,
+                item.fm,
+                file_path,
+                title=f"Unique {idx} (Base Index {base_idx})",
+                bgcolor=bgcolor
+            )
+
+        logging.info(
+            f"Saved {len(self.unique_indices)} unique nets to {output_dir}"
         )
 
     def _save_single_visualization(

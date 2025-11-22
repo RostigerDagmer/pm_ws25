@@ -616,6 +616,9 @@ if __name__ == "__main__":
     from pm4py.vis import view_petri_net
 
     path = "data/63a8435a-077d-4ece-97cd-2c76d394d99c/BPIC15_2.xes"
+    # path = "data/6a0a26d2-82d0-4018-b1cd-89afb0e8627f/DomesticDeclarations.xes"
+    # path = "data/3301445f-95e8-4ff0-98a4-901f1f204972/BPI%20Challenge%202018.xes"
+    # path = "data/d9769f3d-0ab0-4fb8-803b-0d1120ffcf54/Hospital_log.xes"
 
     log_dataset = XESEventLogDataset(path, attribute="concept:name")
 

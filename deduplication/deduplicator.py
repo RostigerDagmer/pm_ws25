@@ -23,11 +23,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DeduplicationConfig:
-    """Configuration for deduplication pipeline."""
+    """
+    Configuration for deduplication pipeline.
+        To be considered a duplicate, nets must have
+        similarity >= label_similarity_threshold (stage 1)
+        similarity >= edge_similarity_threshold (stage 2)
+        distance <= feature_distance_threshold (stage 3)
+    """
     
     label_similarity_threshold: float = 0.9
     edge_similarity_threshold: float = 0.8
-    feature_similarity_threshold: float = 0.5
+    feature_distance_threshold: float = 0.5
     
     enable_stage1: bool = True
     enable_stage2: bool = True
@@ -191,8 +197,8 @@ class PetriNetDeduplicator:
                     candidate.net, candidate.im, candidate.fm,
                     unique_net.net, unique_net.im, unique_net.fm
                 )
-                
-                if sim3 > self.config.feature_similarity_threshold:
+
+                if sim3 > self.config.feature_distance_threshold:
                     continue
                 
                 self.stats['stage3_filtered'] += 1
@@ -224,7 +230,7 @@ class PetriNetDeduplicator:
             'thresholds': {
                 'label_threshold': self.config.label_similarity_threshold,
                 'edge_threshold': self.config.edge_similarity_threshold,
-                'feature_threshold': self.config.feature_similarity_threshold,
+                'feature_threshold': self.config.feature_distance_threshold,
             },
             'stages_enabled': {
                 'stage1': self.config.enable_stage1,
