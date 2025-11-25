@@ -22,7 +22,7 @@ Contact: info@processintelligence.solutions
 import heapq
 import sys
 from copy import copy
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any, Optional
 
 import numpy as np
 
@@ -343,6 +343,55 @@ def __vectorize_initial_final_cost(incidence_matrix, ini, fin, cost_function):
     for t in cost_function.keys():
         cost_vec[incidence_matrix.transitions[t]] = cost_function[t]
     return ini_vec, fini_vec, cost_vec
+
+def __build_place_to_trace_index(
+    net,
+    trace_len: int = 0,
+    *,
+    infer_source_sink: bool = False,
+) -> Dict[Any, int]:
+    """
+    Build a mapping from places in a (synchronous) net to a trace index.
+
+    * Normal case: parse names like 'trace_p_3', 'p_3', '..._5' and map to int index.
+    * If infer_source_sink is True, also:
+      - map 'source' places to index 0
+      - map 'sink'/'end' places to index trace_len
+    Handles tuple-wrapped places (e.g. (place, ...)) used in some sync nets.
+    """
+    place_to_idx: Dict[Any, int] = {}
+
+    for p in net.places:
+        # unwrap tuple places used in some sync product variants
+        place = p[0] if isinstance(p, tuple) and len(p) > 0 else p
+        pname = getattr(place, "name", None)
+        if pname is None:
+            continue
+
+        pname_str = str(pname)
+        idx: Optional[int] = None
+
+        # 1) typical trace places like 'trace_p_3', 'p_3', or any '..._<digit>'
+        parts = pname_str.split("_")
+        if parts and parts[-1].isdigit():
+            try:
+                idx = int(parts[-1])
+            except ValueError:
+                idx = None
+
+        # 2) optionally handle source/sink labels
+        if idx is None and infer_source_sink:
+            if "source" in pname_str and "model" not in pname_str:
+                idx = 0
+            elif "sink" in pname_str or "end" in pname_str:
+                idx = trace_len
+
+        if idx is not None:
+            place_to_idx[place] = idx
+            if place is not p:
+                place_to_idx[p] = idx
+
+    return place_to_idx
 
 
 class SearchTuple:
