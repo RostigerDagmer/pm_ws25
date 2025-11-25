@@ -282,13 +282,13 @@ class ProcessModelDataset(Dataset):
         self.max_models = max_models
         self.cached = cached
         self.num_workers = num_workers or os.cpu_count()
-
-        self.cache_dir = (
-            Path(cache_dir)
-            if cache_dir
-            else Path('/'.join(log_dataset.source_path.split('/')[:-1]))
-            / Path(".cache_process_models")
-        )
+        if cached:
+            self.cache_dir = (
+                Path(cache_dir)
+                if cache_dir
+                else Path('/'.join(log_dataset.source_path.split('/')[:-1]))
+                / Path(".cache_process_models")
+            )
 
         self.configurations = self._generate_configurations()
 
