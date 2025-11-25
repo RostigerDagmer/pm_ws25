@@ -42,6 +42,28 @@ All possible permutations of parameters that are valid for a given function will
 This means the dataset can get quite big... especially if you use the PARAM_GRID.EXTENSIVE default.
 
 
+# Runs Dataset
+
+Runs Dataset is the pipeline for running alignement computations, recording their results and their profile.
+A Run Dataset takes a Process Model Dataset as a parameter.
+
+So overall we get BaseEventLogDataset -> ProcessModelDataset -> RunDataset.
+
+An item in RunDataset should record everything we can record for a combination of ProcessModel x Trace (to be aligned) x Alignment method.
+
+Right now this happens using CProfiler AND time.perf_counter() because the former has a hard time with exact timings in very short executions.
+
+In runs.py `__main__` one can find an example of an end to end construction of a dataset starting from an xes file.
+
+Initial construction can take quite a while. Process Discovery takes quite some time and running every process model against every trace with slight perturbations expands the total item set a lot.
+One can restrict the number of traces taken from the original dataset by specifying a slice range: e.g. only try to align traces (10, 50).
+
+After caching is complete extracting a "labeled" dataset becomes quite simple by grouping on the ids of each dataset item.
+Example for this is also in `__main__`.
+
+
+
+
 TODOs:
 
-    [] caching.
+    🔄 caching.
