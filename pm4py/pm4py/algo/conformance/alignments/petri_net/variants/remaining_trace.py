@@ -462,46 +462,19 @@ def _compute_place_remaining_dist(
 
     place_to_remaining_dist: Dict[Any, float] = {}
 
-    for p in sync_net.places:
-        # normalize potential tuple places (like in incremental A*)
-        place = p[0] if isinstance(p, tuple) and len(p) > 0 else p
-        pname = getattr(place, "name", None)
-        if pname is None:
-            continue
+    place_to_trace_index = utils.__build_place_to_trace_index(
+        sync_net,
+        trace_len=trace_len,
+        infer_source_sink=True,
+    )
 
-        pname_str = str(pname)
-        idx = -1
-
-        # typical trace places like "trace_p_3" or "p_3"
-        if pname_str.startswith("trace_p_") or (
-            pname_str.startswith("p_") and pname_str[2:].isdigit()
-        ):
-            try:
-                idx = int(pname_str.split("_")[-1])
-            except ValueError:
-                idx = -1
-
-        if idx != -1:
-            # intermediate place: compute remaining cost
-            remaining = max(0, trace_len - idx)
-            dist = remaining * heuristic_weight
-            place_to_remaining_dist[place] = dist
-            if place is not p:
-                place_to_remaining_dist[p] = dist
-        elif "source" in pname_str and "model" not in pname_str:
-            # starting place: assume full trace still to go
-            dist = trace_len * heuristic_weight
-            place_to_remaining_dist[place] = dist
-            if place is not p:
-                place_to_remaining_dist[p] = dist
-        elif "sink" in pname_str or "end" in pname_str:
-            # final place: no remaining cost
-            place_to_remaining_dist[place] = 0
-            if place is not p:
-                place_to_remaining_dist[p] = 0
+    # for each place, compute remaining distance (heuristic)
+    for place, idx in place_to_trace_index.items():
+        remaining = max(0, trace_len - idx)
+        dist = remaining * heuristic_weight
+        place_to_remaining_dist[place] = dist
 
     return place_to_remaining_dist
-
 
 def _heuristic_from_marking(
     marking: Marking,
