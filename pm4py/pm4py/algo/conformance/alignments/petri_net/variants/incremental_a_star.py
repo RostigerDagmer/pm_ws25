@@ -102,6 +102,16 @@ PARAM_MODEL_COST_FUNCTION = Parameters.PARAM_MODEL_COST_FUNCTION.value
 PARAM_SYNC_COST_FUNCTION = Parameters.PARAM_SYNC_COST_FUNCTION.value
 
 
+class RestartException(Exception):
+    """
+    Internal exception to trigger a restart of the A* search
+    when a new split point is added.
+    """
+
+    def __init__(self, new_split_index):
+        self.new_split_index = new_split_index
+
+
 def get_best_worst_cost(
         petri_net, initial_marking, final_marking, parameters=None
 ):
@@ -626,7 +636,7 @@ def to_mat_cvtopt(m):
 
 
 def _eme_solve_inner(
-        eme_solver_obj,
+        eme_solver,
         current_marking: Marking,
         use_ilp: bool,
 ) -> Tuple[float, np.ndarray, bool]:
@@ -636,12 +646,12 @@ def _eme_solve_inner(
     """
 
     try:
-        # 1. Update initial marking vector in the solver object
+        # 1. Update initial marking vector in the solver
         # This recalculates vectors based on the new current marking
-        eme_solver_obj.change_ini_vec(current_marking)
+        eme_solver.change_ini_vec(current_marking)
 
-        # 2. Get components (c, Aub, bub, Aeq, beq) from the solver object
-        c, Aub, bub, Aeq, beq = eme_solver_obj.get_components()
+        # 2. Get components (c, Aub, bub, Aeq, beq) from the solver
+        c, Aub, bub, Aeq, beq = eme_solver.get_components()
 
         # 3. Convert to CVXOPT matrices (required for glpk.lp)
         c_cvx = to_mat_cvtopt(c)
@@ -655,7 +665,7 @@ def _eme_solve_inner(
 
         # 5. Solve directly using GLPK (Lean LP)
         # We always use LP relaxation as per Incremental A* paper recommendation
-        # If use_ilp is True, we *could* use glpk.ilp, but for incremental performance
+        # If use_ilp is True, we could use glpk.ilp, but for incremental performance
         # the paper relies on LP relaxation + derived updates.
         # However, if strict ILP was requested for some reason, we could swap calls here.
         # Assuming "Lean LP" logic for incremental A*:
@@ -671,9 +681,9 @@ def _eme_solve_inner(
             x_list = list(x)
 
             # Use EME solver to map variables back correctly
-            x_vec_list = eme_solver_obj.get_x_vector(x_list)
+            x_vec_list = eme_solver.get_x_vector(x_list)
             # use EME solver to get h value (more robust)
-            h_val = float(eme_solver_obj.get_h(x_list))
+            h_val = float(eme_solver.get_h(x_list))
 
             return h_val, np.array(x_vec_list), True
         else:
@@ -682,6 +692,27 @@ def _eme_solve_inner(
 
     except Exception:
         return float(sys.maxsize), np.array([]), False
+
+
+def get_trace_index(marking: Marking, place_to_trace_index: Dict[Any, int], trace_len: int) -> int:
+    """
+    Infers the current trace index from a synchronous product marking.
+    Iterates through the marked places and checks if they correspond to a known trace net place.
+    """
+    for p in marking:
+        if p in place_to_trace_index:
+            return place_to_trace_index[p]
+
+    # Fallback: Check for common final place names or assume bounds
+    for p in marking:
+        if p.name == "sink" or p.name == "p_sink" or p.name == "end":
+            return trace_len
+
+    # Default to trace_len if we are at the end (no trace places marked usually means end in some constructions)
+    # However, standard trace net has a token in 'sink' at the end.
+    # If no mapped place is found, and we are not empty, return a safe fallback (e.g. 0 or trace_len)
+    # For A*, returning trace_len usually forces a specific heuristic check.
+    return trace_len
 
 
 def __search(
@@ -704,163 +735,161 @@ def __search(
     decorate_places_preset_trans(sync_net)
 
     incidence_matrix = inc_mat_construct(sync_net)
-
     ini_vec, fin_vec, cost_vec = utils.__vectorize_initial_final_cost(
         incidence_matrix, ini, fin, cost_function
     )
-
-    # Ensure float for calculations
     cost_vec_derivation = [x * 1.0 for x in cost_vec]
 
-    # Initialize counters and sets
-    closed = set()
-    lp_solved = [0]
+    # 2. Build Mapping from SyncNet Places -> Trace Index
+    trace_len = len(original_trace) if original_trace else 0
+    place_to_trace_index = utils.__build_place_to_trace_index(sync_net)
 
-    # EME SOLVER SETUP
+    # 3. Initialize Split Points
+    # "Incremental" means we start with minimum split points (Start and End)
+    split_points = {0, trace_len}
+    restarts = 0
+
     if ext_me_parameters is None:
         ext_me_parameters = {}
-
     if EME_Params.COSTS not in ext_me_parameters:
         ext_me_parameters[EME_Params.COSTS] = cost_function
 
-    if original_trace is None:
-        # If no original trace is provided, we cannot build EME.
-        # This shouldn't happen in normal usage
-        return None
+    # === MAIN RESTART LOOP ===
+    while True:
+        try:
+            # A. Update EME Solver Parameters
+            # We MUST set MAX_K_VALUE to a high number to prevent the 'classic' solver from dropping our splits
+            valid_split_idx = sorted([i for i in split_points if i < trace_len])
 
-    # Build the EME solver object locally
-    eme_solver = eme_build(
-        original_trace,
-        sync_net,
-        ini,
-        fin,
-        parameters=ext_me_parameters,
-    )
+            ext_me_parameters[EME_Params.SPLIT_IDX] = valid_split_idx
+            ext_me_parameters[EME_Params.MAX_K_VALUE] = len(valid_split_idx) + 5  # Ensure no trimming
 
-    # 2. Initial EME Solve (Full Solve)
-    h, x, is_feasible = _eme_solve_inner(
-        eme_solver, ini, use_ilp
-    )
+            # B. Build EME Solver
+            eme_solver = eme_build(original_trace, sync_net, ini, fin, parameters=ext_me_parameters)
 
-    if not is_feasible:
-        return None  # Infeasible alignment from start
+            # C. A* Initialization
+            closed = set()
+            visited = 0
+            queued = 0
+            traversed = 0
+            lp_solved = 1
 
-    # Start A* Search
-    ini_state = utils.SearchTuple(0 + h, 0, h, ini, None, None, x, True)
-    open_set = [ini_state]
-    heapq.heapify(open_set)
-    visited = 0
-    queued = 0
-    traversed = 0
-    lp_solved = 1
+            # Initial Heuristic (Exact at start)
+            h, x, is_feasible = _eme_solve_inner(eme_solver, ini, use_ilp)
+            if not is_feasible: return None
 
-    trans_empty_preset = set(
-        t for t in sync_net.transitions if len(t.in_arcs) == 0
-    )
+            ini_state = utils.SearchTuple(0 + h, 0, h, ini, None, None, x, True)
+            open_set = [ini_state]
+            heapq.heapify(open_set)
 
-    while open_set:
-        if (time.time() - start_time) > max_align_time_trace:
-            return None
+            trans_empty_preset = set(t for t in sync_net.transitions if len(t.in_arcs) == 0)
 
-        curr = heapq.heappop(open_set)
-        current_marking = curr.m
+            # D. Inner A* Loop
+            while open_set:
+                if (time.time() - start_time) > max_align_time_trace: return None
 
-        # 3. Handle Untrusted State (RE-SOLVE REQUIRED)
-        while not curr.trust:
-            if (time.time() - start_time) > max_align_time_trace:
-                return None
-
-            # Skip if already closed
-            already_closed = current_marking in closed
-            if already_closed:
                 curr = heapq.heappop(open_set)
                 current_marking = curr.m
-                continue
 
-            # Perform full EME solve for the current marking
-            h, x, is_feasible = _eme_solve_inner(
-                eme_solver, curr.m, use_ilp
-            )
+                # --- INCREMENTAL LOGIC START ---
+                # Logic: If a state is "Trusted" (heuristic derived from parent), we skip LP.
+                # BUT if it is "Untrusted" (trust=False), we MUST solve the LP.
+                # The Incremental optimization is: If we are forced to solve the LP, and we are NOT
+                # at a designated "split point", we assume our current approximation is too coarse.
+                # So we stop, add this index to split points, and restart with a finer grid.
 
-            if not is_feasible:
-                # Optimization: If LP is infeasible for this marking, this path is dead.
-                # We treat it as h=infinity and just drop this state.
-                # Continue to pop the next state from queue.
-                if open_set:
-                    curr = heapq.heappop(open_set)
+                while not curr.trust:
+                    if (time.time() - start_time) > max_align_time_trace: return None
+
+                    if current_marking in closed:
+                        if open_set:
+                            curr = heapq.heappop(open_set)
+                            current_marking = curr.m
+                            continue
+                        else:
+                            return None
+
+                    # Check trace index
+                    curr_trace_idx = get_trace_index(current_marking, place_to_trace_index, trace_len)
+
+                    # If we need an exact calculation but are not at a split point -> RESTART
+                    if curr_trace_idx not in split_points:
+                        raise RestartException(curr_trace_idx)
+
+                    # If we are at a split point, we solve normally
+                    h, x, is_feasible = _eme_solve_inner(eme_solver, curr.m, use_ilp)
+
+                    if not is_feasible:
+                        # Path dead
+                        if open_set:
+                            curr = heapq.heappop(open_set)
+                            current_marking = curr.m
+                            continue
+                        else:
+                            return None
+
+                    lp_solved += 1
+                    tp = utils.SearchTuple(curr.g + h, curr.g, h, curr.m, curr.p, curr.t, x, True)
+                    curr = heapq.heappushpop(open_set, tp)
                     current_marking = curr.m
-                    continue
-                else:
-                    return None
+                # --- INCREMENTAL LOGIC END ---
 
-            lp_solved += 1
-            tp = utils.SearchTuple(
-                curr.g + h, curr.g, h, curr.m, curr.p, curr.t, x, True
-            )
-            curr = heapq.heappushpop(open_set, tp)
-            current_marking = curr.m
+                # Standard A* checks
+                if curr.h > lp_solver.MAX_ALLOWED_HEURISTICS: continue
+                if current_marking in closed: continue
 
-        # 4. Process Trusted State
-        if curr.h > lp_solver.MAX_ALLOWED_HEURISTICS:
+                # Goal Reached?
+                if curr.h < 0.01 and current_marking == fin:
+                    return utils.__reconstruct_alignment(
+                        curr, visited, queued, traversed,
+                        ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
+                        lp_solved=lp_solved
+                    )
+
+                closed.add(current_marking)
+                visited += 1
+
+                # Explore
+                enabled_trans = copy(trans_empty_preset)
+                for p in current_marking:
+                    for t in p.ass_trans:
+                        if t.sub_marking <= current_marking:
+                            enabled_trans.add(t)
+
+                trans_to_visit_with_cost = [
+                    (t, cost_function[t]) for t in enabled_trans
+                    if not (t is not None and utils.__is_log_move(t, skip) and utils.__is_model_move(t, skip))
+                ]
+
+                for t, cost in trans_to_visit_with_cost:
+                    traversed += 1
+                    new_marking = utils.add_markings(current_marking, t.add_marking)
+                    if new_marking in closed: continue
+
+                    g = curr.g + cost
+
+                    # Try to derive heuristic (cheaply - no lp computation)
+                    h_derived, x_derived = utils.__derive_heuristic(
+                        incidence_matrix, cost_vec_derivation, curr.x, t, curr.h
+                    )
+
+                    # If derivation is valid, trust=True. If invalid, trust=False.
+                    trustable = utils.__trust_solution(x_derived)
+
+                    queued += 1
+                    new_f = g + h_derived
+
+                    # Add to queue. If trustable=False, it will trigger the Incremental Logic check when popped.
+                    tp = utils.SearchTuple(new_f, g, h_derived, new_marking, curr, t, x_derived, trustable)
+                    heapq.heappush(open_set, tp)
+
+            return None
+
+        except RestartException as e:
+            # Handle Restart
+            split_points.add(e.new_split_index)
+            restarts += 1
+            # Loop continues, rebuilding eme_solver with new splits
             continue
-        already_closed = current_marking in closed
-        if already_closed:
-            continue
-
-        # Goal check
-        if curr.h < 0.01 and current_marking == fin:
-            return utils.__reconstruct_alignment(
-                curr,
-                visited,
-                queued,
-                traversed,
-                ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
-                lp_solved=lp_solved,
-            )
-
-        closed.add(current_marking)
-        visited += 1
-
-        # Determine enabled transitions
-        enabled_trans = copy(trans_empty_preset)
-        for p in current_marking:
-            for t in p.ass_trans:
-                if t.sub_marking <= current_marking:
-                    enabled_trans.add(t)
-
-        trans_to_visit_with_cost = [
-            (t, cost_function[t])
-            for t in enabled_trans
-            if not (
-                    t is not None
-                    and utils.__is_log_move(t, skip)
-                    and utils.__is_model_move(t, skip)
-            )
-        ]
-
-        # 5. Expand Neighbors using Incremental Update (Derivation Trick)
-        for t, cost in trans_to_visit_with_cost:
-            traversed += 1
-            new_marking = utils.add_markings(current_marking, t.add_marking)
-
-            if new_marking in closed:
-                continue
-
-            g = curr.g + cost
-
-            # Derive heuristic cheaply from current EME solution (curr.x)
-            h_derived, x_derived = utils.__derive_heuristic(
-                incidence_matrix, cost_vec_derivation, curr.x, t, curr.h
-            )
-
-            # Check admissibility: is the derived solution still valid?
-            trustable = utils.__trust_solution(x_derived)
-            new_f = g + h_derived
-
-            queued += 1
-            tp = utils.SearchTuple(
-                new_f, g, h_derived, new_marking, curr, t, x_derived, trustable
-            )
-            heapq.heappush(open_set, tp)
 
     return None
