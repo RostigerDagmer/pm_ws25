@@ -25,5 +25,6 @@ from pm4py.algo.conformance.alignments.petri_net.variants import (
     state_equation_a_star,
     state_equation_a_star_ilp,
     discounted_a_star,
-    incremental_a_star
+    incremental_a_star,
+    remaining_trace,
 )
