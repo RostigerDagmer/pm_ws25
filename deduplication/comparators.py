@@ -238,7 +238,7 @@ class DualScoreFeatureComparator(BaseComparator):
     """
 
     def __init__(self, debug_callback: Optional[Callable] = None):
-        """Initialize comparator with ModelFeatureExtractor."""
+        """Initialize comparator with ModelFeatureExtractor and feature weights."""
         self.extractor = ModelFeatureExtractor()
         self.epsilon = 1e-10
         self.debug_callback = debug_callback
@@ -249,22 +249,60 @@ class DualScoreFeatureComparator(BaseComparator):
         self.structural_indices = list(range(0, 8))
         self.degree_indices = list(range(8, 24))
 
+        # Hardcoded weights for structural features (indices 0-7)
+        # Number of transitions, places, arcs, etc. are already measured by the edge/label comparators,
+        # thats why their weights are relatively low compared to splits.
+        self.structural_weights = np.array([
+            1.0,  # model_n_transitions
+            1.0,  # model_n_places
+            1.0,  # model_n_arcs
+            1.0,  # model_n_inv_transition
+            1.0,  # model_n_dup_transition
+            1.0,  # model_n_uniq_transition
+            3.0,  # model_n_and_split
+            3.0,  # model_n_xor_split
+        ])
+
+        # Hardcoded weights for degree features (indices 8-23)
+        # Almost all transitions (invisible, duplicate, unique) have an in/out-degree of 1
+        # resulting in high similarity scores, thus we downweight them.
+        self.degree_weights = np.array([
+            1.0,  # model_inv_tran_in_deg_mean
+            1.0,  # model_inv_tran_in_deg_std
+            1.0,  # model_inv_tran_out_deg_mean
+            1.0,  # model_inv_tran_out_deg_std
+            1.0,  # model_uniq_tran_in_deg_mean
+            1.0,  # model_uniq_tran_in_deg_std
+            1.0,  # model_uniq_tran_out_deg_mean
+            1.0,  # model_uniq_tran_out_deg_std
+            1.0,  # model_dup_tran_in_deg_mean
+            1.0,  # model_dup_tran_in_deg_std
+            1.0,  # model_dup_tran_out_deg_mean
+            1.0,  # model_dup_tran_out_deg_std
+            5.0,  # model_place_in_deg_mean
+            5.0,  # model_place_in_deg_std
+            5.0,  # model_place_out_deg_mean
+            5.0,  # model_place_out_deg_std
+        ])
+
     def _canberra_distance(
         self,
         x: np.ndarray,
         y: np.ndarray,
-        indices: list
+        indices: list,
+        weights: np.ndarray
     ) -> float:
         """
-        Compute robust Canberra Distance for specified feature indices.
+        Compute weighted Canberra Distance for specified feature indices.
 
         Args:
             x: First feature vector
             y: Second feature vector
             indices: List of feature indices to include
+            weights: Weight array for the features
 
         Returns:
-            Normalized Canberra Distance in [0, 1]
+            Normalized weighted Canberra Distance in [0, 1]
         """
         x_subset = x[indices]
         y_subset = y[indices]
@@ -273,8 +311,9 @@ class DualScoreFeatureComparator(BaseComparator):
         denominator = np.abs(x_subset) + np.abs(y_subset) + self.epsilon
 
         distances = numerator / denominator
-        # Normalize by number of features to get value in [0, 1]
-        return np.mean(distances)
+        # Apply weights and normalize by sum of weights
+        weighted_distances = distances * weights
+        return np.sum(weighted_distances) / np.sum(weights)
 
     def compare(
         self,
@@ -282,7 +321,7 @@ class DualScoreFeatureComparator(BaseComparator):
         net2: PetriNet, im2: Marking, fm2: Marking
     ) -> float:
         """
-        Compare nets using dual-score Canberra Distance.
+        Compare nets using weighted dual-score Canberra Distance.
 
         Returns:
             Similarity score in [0, 1], where higher = more similar
@@ -290,12 +329,12 @@ class DualScoreFeatureComparator(BaseComparator):
         feat1 = self.extractor.extract(net1, im1, fm1, return_as_dict=False)
         feat2 = self.extractor.extract(net2, im2, fm2, return_as_dict=False)
 
-        # Compute Canberra Distance for each feature group
+        # Compute weighted Canberra Distance for each feature group
         structural_dist = self._canberra_distance(
-            feat1, feat2, self.structural_indices
+            feat1, feat2, self.structural_indices, self.structural_weights
         )
         degree_dist = self._canberra_distance(
-            feat1, feat2, self.degree_indices
+            feat1, feat2, self.degree_indices, self.degree_weights
         )
 
         # Combine with 50/50 weighting

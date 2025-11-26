@@ -16,6 +16,8 @@ from dataloaders.net import ProcessModelDataset
 from dataloaders.unique_net import UniqueProcessModelDataset
 from deduplication.deduplicator import DeduplicationConfig
 from pm4py.discovery import discover_petri_net_inductive
+from dataloaders.net import VariantRandomDistributionSampler
+import torch
 
 # Dataset mapping (only .xes files)
 DATASETS = {
@@ -75,6 +77,14 @@ def evaluate_dataset(dataset_uuid: str, filename: str, dedup_config: Deduplicati
         print(f"Loading event log from {dataset_path}...")
         log_dataset = XESEventLogDataset(str(dataset_path), attribute="concept:name")
 
+        len_distribution = torch.distributions.Exponential(
+        torch.tensor([1.0 / 100.0])
+        )
+        mean, std = 10.0, 5.0
+        freq_distribution = torch.distributions.Normal(
+            mean, std
+        )
+
         # Create ProcessModelDataset with 10 models
         print("Creating ProcessModelDataset with 10 models...")
         pm_dataset = ProcessModelDataset(
@@ -84,10 +94,17 @@ def evaluate_dataset(dataset_uuid: str, filename: str, dedup_config: Deduplicati
                 "noise_threshold": [0.0, 0.1, 0.2, 0.3, 0.4],
                 "disable_fallthroughs": [True],
             },
-            sampler_specs=None,  # Use default FullSampler
+            sampler_specs={
+                "variant3": VariantRandomDistributionSampler(
+                    n_subsets=50,  # number of subsets: defines how often the log is sampled... basically
+                    max_len_subset=150,
+                    min_len_subset=20,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
+                    len_distribution=len_distribution,
+                    freq_distribution=freq_distribution,
+            )
+        },
             cached=True,
             max_models=10,
-            discovery_timeout=10,  # 10 second timeout per model
         )
 
         # Apply deduplication

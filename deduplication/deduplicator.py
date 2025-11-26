@@ -36,10 +36,10 @@ class DeduplicationConfig:
     """
 
     # Stage 1: Label-based prefilter (similarity, higher = more similar)
-    label_similarity_threshold: float = 0.9
+    label_similarity_threshold: float = 0.95
 
     # Stage 2: Combined edge+feature comparison (similarity, higher = more similar)
-    combined_similarity_threshold: float = 0.9
+    combined_similarity_threshold: float = 0.95
 
     # Enable/disable stages
     enable_stage1: bool = True

@@ -426,3 +426,55 @@ class UniqueProcessModelDataset(Dataset):
             parameters=parameters
         )
         pn_visualizer.save(gviz, file_path)
+
+
+
+if __name__ == "__main__":
+    from dataloaders.xes_log import XESEventLogDataset
+    from dataloaders.unique_net import UniqueProcessModelDataset
+    from deduplication.deduplicator import DeduplicationConfig
+    from pm4py.discovery import discover_petri_net_inductive
+    from net import VariantRandomDistributionSampler
+    import torch
+
+
+    path = "data/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/Hospital%20Billing%20-%20Event%20Log.xes"
+    # path = "data/6a0a26d2-82d0-4018-b1cd-89afb0e8627f/DomesticDeclarations.xes"
+    # path = "data/3301445f-95e8-4ff0-98a4-901f1f204972/BPI%20Challenge%202018.xes"
+    # path = "data/d9769f3d-0ab0-4fb8-803b-0d1120ffcf54/Hospital_log.xes"
+
+    log_dataset = XESEventLogDataset(path, attribute="concept:name")
+
+    # Create base dataset with caching enabled
+    pm_dataset = ProcessModelDataset(
+        log_dataset=log_dataset,
+        discovery_methods={"inductive": discover_petri_net_inductive},
+        param_grid={
+            "noise_threshold": [0.0, 0.1, 0.2, 0.3],
+            "disable_fallthroughs": [True],
+        },
+        sampler_specs={
+            "variant_random": VariantRandomDistributionSampler(
+                n_subsets=1000,  # number of subsets: defines how often the log is sampled... basically
+                max_len_subset=100,
+                min_len_subset=10,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
+                len_distribution=torch.distributions.Exponential(
+                    torch.tensor([1.0 / 100.0])
+                ),  # subset length distribution: defines the distribution of lengths across samples
+                freq_distribution=torch.distributions.Normal(
+                    10.0, 5.0
+                ),  # (variant) freq_distribution: defines the reordering of traces/variants on every sampling call, by defining the sampling behavior over index(variant) -> frequency.
+                reconstruct_frequency=True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
+            )
+        },
+        max_models=400,
+        cached=True,
+    )
+
+    unique_dataset = UniqueProcessModelDataset(
+        base_dataset=pm_dataset,
+        dedup_config=DeduplicationConfig(),
+        force_recompute=False,
+    )
+    unique_dataset.save_unique_visualizations()
+    unique_dataset.save_duplicate_visualizations()
