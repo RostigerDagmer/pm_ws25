@@ -412,9 +412,7 @@ def apply_trace_net(
         ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
         max_align_time_trace=max_align_time_trace,
         trace_len=trace_len,
-        sync_costs=sync_costs,
         log_costs=log_costs,
-        parameters=parameters,
     )
 
 
@@ -427,9 +425,7 @@ def apply_sync_prod(
     ret_tuple_as_trans_desc=False,
     max_align_time_trace=sys.maxsize,
     trace_len=0,
-    sync_costs=None,
     log_costs=None,
-    parameters=None,
 ):
     return __search(
         sync_prod,
@@ -440,9 +436,7 @@ def apply_sync_prod(
         ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
         max_align_time_trace=max_align_time_trace,
         trace_len=trace_len,
-        sync_costs=sync_costs,
         log_costs=log_costs,
-        parameters=parameters,
     )
 
 def _compute_place_remaining_dist(
@@ -501,9 +495,7 @@ def __search(
     ret_tuple_as_trans_desc=False,
     max_align_time_trace=sys.maxsize,
     trace_len=0,
-    sync_costs=None,
     log_costs=None,
-    parameters=None,
 ):
     start_time = time.time()
 
@@ -519,7 +511,7 @@ def __search(
     def get_heuristic(marking: Marking) -> float:
         return _heuristic_from_marking(marking, place_to_remaining_dist)
 
-    # --- A* algorithm, identical to Dijkstra but with f = g + h ---
+    # A* algorithm, identical to Dijkstra but with f = g + h
     closed = set()
 
     h0 = get_heuristic(ini)
