@@ -41,9 +41,6 @@ class DeduplicationConfig:
     # Stage 2: Combined edge+feature comparison (similarity, higher = more similar)
     combined_similarity_threshold: float = 0.7
 
-    # Stage weights for combined comparator
-    edge_weight: float = 0.5  # Weight for edge comparison (feature weight = 1 - edge_weight)
-
     # Enable/disable stages
     enable_stage1: bool = True
     enable_stage2: bool = True
@@ -102,7 +99,6 @@ class PetriNetDeduplicator:
         self.stage2 = CombinedComparator(
             edge_comparator=edge_comparator,
             feature_comparator=feature_comparator,
-            edge_weight=config.edge_weight
         )
 
         self.stats = {
@@ -232,10 +228,6 @@ class PetriNetDeduplicator:
                 'label_threshold': self.config.label_similarity_threshold,
                 'combined_threshold': self.config.combined_similarity_threshold,
             },
-            'weights': {
-                'edge_weight': self.config.edge_weight,
-                'feature_weight': 1.0 - self.config.edge_weight,
-            },
             'stages_enabled': {
                 'stage1': self.config.enable_stage1,
                 'stage2': self.config.enable_stage2,
@@ -277,10 +269,6 @@ class PetriNetDeduplicator:
         print("THRESHOLDS:")
         print(f"  Label similarity:          >= {self.report['thresholds']['label_threshold']:.2f}")
         print(f"  Combined similarity:       >= {self.report['thresholds']['combined_threshold']:.2f}")
-        print()
-        print("STAGE 2 WEIGHTS:")
-        print(f"  Edge comparison:           {self.report['weights']['edge_weight']:.2f}")
-        print(f"  Feature comparison:        {self.report['weights']['feature_weight']:.2f}")
         print()
         print("STAGES ENABLED:")
         print(f"  Stage 1 (prefilter):       {self.report['stages_enabled']['stage1']}")

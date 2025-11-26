@@ -115,7 +115,6 @@ class UniqueProcessModelDataset(Dataset):
             'dedup_config': {
                 'label_threshold': self.dedup_config.label_similarity_threshold,
                 'combined_threshold': self.dedup_config.combined_similarity_threshold,
-                'edge_weight': self.dedup_config.edge_weight,
             }
         }
         full_hash = hashlib.sha1(
