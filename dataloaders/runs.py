@@ -246,7 +246,7 @@ class RunDataset(Dataset):
         aligners: Sequence[Aligner],
         trace_sampler: TraceSampler.__class__,
         n_runs: int = 1,  # Number of runs per trace/model pair
-        multiprocessing: bool = True,
+        n_workers: int = 0,
         slice: Optional[range] = None,
     ):
         self.base_path = base_path
@@ -258,7 +258,8 @@ class RunDataset(Dataset):
         self.n_runs = n_runs
         self.items: dict[str, "RunDataset.SerializedItemType"] = {}
         self.index: list[str] = []
-        if multiprocessing:
+        self.n_workers = n_workers
+        if n_workers != 1:
             self._init_cache_mp()
         else:
             self._init_cache()
@@ -345,7 +346,11 @@ class RunDataset(Dataset):
             * len(self.aligners)
         )
 
-        num_workers = multiprocessing.cpu_count()
+        num_workers = (
+            self.n_workers
+            if self.n_workers > 0
+            else multiprocessing.cpu_count()
+        )
         logging.info(
             f"Populating run dataset cache using {num_workers} workers..."
         )
@@ -551,7 +556,7 @@ if __name__ == "__main__":
         AlignerSpec.A_STAR.value,
         SimplePerturbedTraceSampler,
         n_runs=N_RUNS,
-        multiprocessing=True,
+        n_workers=4,
         slice=range(0, 50),  # <- for testing
     )
 
