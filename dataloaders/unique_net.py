@@ -49,7 +49,7 @@ class UniqueProcessModelDataset(Dataset):
         self,
         base_dataset: ProcessModelDataset,
         dedup_config: Optional[DeduplicationConfig] = None,
-        cache_dir: Optional[Path] = None,
+        dedup_cache_dir: Optional[Path] = None,
         use_cache: bool = True,
         force_recompute: bool = False,
     ):
@@ -74,11 +74,12 @@ class UniqueProcessModelDataset(Dataset):
         self.use_cache = use_cache
 
         # Set cache directory (parallel to base_dataset cache)
-        if cache_dir:
-            self.cache_dir = Path(cache_dir)
+        # Use _dedup_cache_dir internally to avoid conflict with cache_dir property
+        if dedup_cache_dir:
+            self._dedup_cache_dir = Path(dedup_cache_dir)
         else:
             parent_dir = str(base_dataset.cache_dir.parent)
-            self.cache_dir = Path(
+            self._dedup_cache_dir = Path(
                 os.path.join(parent_dir, ".cache_unique_models")
             )
 
@@ -90,7 +91,7 @@ class UniqueProcessModelDataset(Dataset):
         # Compute cache key and path
         cache_key = self._compute_cache_key()
         self.cache_file = Path(
-            os.path.join(str(self.cache_dir), f"unique_dedup_{cache_key}.pkl")
+            os.path.join(str(self._dedup_cache_dir), f"unique_dedup_{cache_key}.pkl")
         )
 
         # Load from cache or deduplicate
@@ -99,7 +100,7 @@ class UniqueProcessModelDataset(Dataset):
         else:
             self._deduplicate()
             if use_cache:
-                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                self._dedup_cache_dir.mkdir(parents=True, exist_ok=True)
                 self._save_to_cache()
 
     def _compute_cache_key(self) -> str:
@@ -247,6 +248,37 @@ class UniqueProcessModelDataset(Dataset):
     def serialized(self):
         """Access serialized view of unique items."""
         return SerializedView(self, self._get_serialized)
+
+    @property
+    def log(self):
+        """Access the event log from the base dataset."""
+        return self.base_dataset.log
+
+    @property
+    def cache_dir(self):
+        """Access the cache directory from the base dataset."""
+        return self.base_dataset.cache_dir
+
+    def hash(self) -> str:
+        """
+        Compute hash for the unique dataset.
+
+        Combines the base dataset hash with deduplication config to create
+        a unique identifier for this specific deduplicated dataset.
+        """
+        base = {
+            "base_dataset_hash": self.base_dataset.hash(),
+            "dedup_config": {
+                "label_similarity_threshold": self.dedup_config.label_similarity_threshold,
+                "combined_similarity_threshold": self.dedup_config.combined_similarity_threshold,
+                "enable_stage1": self.dedup_config.enable_stage1,
+                "enable_stage2": self.dedup_config.enable_stage2,
+            },
+            "num_unique": len(self.unique_indices),
+        }
+        return hashlib.sha1(
+            json.dumps(base, sort_keys=True).encode()
+        ).hexdigest()
 
     def save_duplicate_visualizations(
         self,

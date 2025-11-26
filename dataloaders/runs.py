@@ -24,7 +24,8 @@ import cProfile
 import pstats
 from dataclasses import dataclass
 
-from dataloaders.net import ProcessModelDataset
+from dataloaders.net import ProcessModelDataset, SerializedView
+from dataloaders.unique_net import UniqueProcessModelDataset
 from pm4py.algo.conformance.alignments.petri_net.algorithm import (
     Variants,
     apply,
@@ -95,7 +96,7 @@ class TraceSampler(ABC):
 
     def __init__(
         self,
-        ds: ProcessModelDataset,
+        ds: Union[ProcessModelDataset, UniqueProcessModelDataset],
         seed: Optional[int] = None,
         slice: Optional[range] = None,
     ):
@@ -142,7 +143,7 @@ class RunDataset(Dataset):
     @dataclass
     class SerializedItemType:
         item_id: str
-        model: ProcessModelDataset.SerializedView.ItemType
+        model: SerializedView.ItemType
         trace: Trace
         item: Union[typing.AlignmentResult, typing.ListAlignments]
         perf: dict[str, Any]
@@ -163,7 +164,7 @@ class RunDataset(Dataset):
     def __init__(
         self,
         base_path: Path,
-        process_model_dataset: ProcessModelDataset,
+        process_model_dataset: Union[ProcessModelDataset, UniqueProcessModelDataset],
         aligners: Sequence[Aligner],
         trace_sampler: TraceSampler.__class__,
         multiprocessing: bool = True,
@@ -195,7 +196,7 @@ class RunDataset(Dataset):
     @staticmethod
     def _process_item(
         hash: str,
-        model: ProcessModelDataset.SerializedView.ItemType,
+        model: SerializedView.ItemType,
         trace: Trace,
         aligner: Aligner | str,
     ) -> "RunDataset.SerializedItemType":
@@ -328,7 +329,7 @@ class RunDataset(Dataset):
 
     @staticmethod
     def _hash_item(
-        model: ProcessModelDataset.SerializedView.ItemType,
+        model: SerializedView.ItemType,
         trace: Trace,
         aligner: Aligner,
     ) -> str:
@@ -469,9 +470,11 @@ if __name__ == "__main__":
         cached=True,
     )
 
+    unique_pm_dataset = UniqueProcessModelDataset(pm_dataset)
+
     run_dataset = RunDataset(
         Path('./data/runs'),
-        pm_dataset,
+        unique_pm_dataset,
         AlignerSpec.A_STAR.value,
         SimplePerturbedTraceSampler,
         multiprocessing=True,
