@@ -79,9 +79,11 @@ class AlignerSpec(Enum):
     ALL = list(map(lambda v: PM4pyAligner(v), Variants))
     A_STAR = [
         PM4pyAligner(Variants.VERSION_DIJKSTRA_NO_HEURISTICS),
+        PM4pyAligner(Variants.VERSION_REMAINING_TRACE),
+        PM4pyAligner(Variants.VERSION_REQUIRED_ACTIVITIES),
         PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR),
         PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR_ILP),
-        PM4pyAligner(Variants.VERSION_INCREMENTAL_A_STAR),
+        #PM4pyAligner(Variants.VERSION_INCREMENTAL_A_STAR),
     ]
 
 
