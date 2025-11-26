@@ -59,8 +59,9 @@ class TransitionLabelComparator(BaseComparator):
 
         counts = Counter()
         for transition in net.transitions:
-            label = transition.label if transition.label is not None else 'τ'
-            counts[label] += 1
+            label = transition.label
+            if label != None:  # Ignore invisible transitions
+                counts[label] += 1
 
         if self.use_cache:
             self._label_cache[net_hash] = counts
