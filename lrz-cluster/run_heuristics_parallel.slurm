@@ -26,6 +26,12 @@ module load python/3.10.12-extended
 # Virtual Environment aktivieren
 source ~/venv/.venv/bin/activate
 
+# Set Python module path (to find features module)
+export PYTHONPATH="${PYTHONPATH}:${HOME}/pm_ws25"
+
+# Change to project directory
+cd ${HOME}/pm_ws25
+
 # ====================================
 # Job Information
 # ====================================
@@ -45,7 +51,7 @@ echo "======================================"
 # Run Experiment
 # ====================================
 
-python run_heuristics_parallel.py --run_id $SLURM_ARRAY_TASK_ID --output-dir results
+python lrz-cluster/run_heuristics_parallel.py --run_id $SLURM_ARRAY_TASK_ID --output-dir results
 
 EXIT_CODE=$?
 
@@ -64,7 +70,7 @@ if [ $SLURM_ARRAY_TASK_ID -eq 79 ]; then
     echo ""
     echo "Last job completed - aggregating results and training ML models..."
     sleep 10  # Warte kurz, damit alle Jobs ihre Dateien schreiben können
-    python run_heuristics_parallel.py --aggregate --output-dir results
+    python lrz-cluster/run_heuristics_parallel.py --aggregate --output-dir results
 fi
 
 exit $EXIT_CODE
