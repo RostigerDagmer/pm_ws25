@@ -11,10 +11,10 @@ from tqdm import tqdm
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from deduplication.comparators import (
     TransitionLabelComparator,
-    TransitionEdgeComparator,
-    FeatureVectorComparator
+    PathBasedTransitionEdgeComparator,
+    DualScoreFeatureComparator,
+    CombinedComparator
 )
-from deduplication.normalizers import ZScoreFeatureNormalizer
 from features.extractors import ModelFeatureExtractor
 
 
@@ -24,21 +24,30 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DeduplicationConfig:
     """
-    Configuration for deduplication pipeline.
-        To be considered a duplicate, nets must have
+    Configuration for improved deduplication pipeline.
+
+    Two-stage pipeline:
+        Stage 1 (Prefilter): Transition label counts comparison
+        Stage 2 (Combined): Path-based edges + dual-score features
+
+    To be considered a duplicate, nets must pass both stages:
         similarity >= label_similarity_threshold (stage 1)
-        similarity >= edge_similarity_threshold (stage 2)
-        distance <= feature_distance_threshold (stage 3)
+        similarity >= combined_similarity_threshold (stage 2)
     """
-    
+
+    # Stage 1: Label-based prefilter (similarity, higher = more similar)
     label_similarity_threshold: float = 0.9
-    edge_similarity_threshold: float = 0.8
-    feature_distance_threshold: float = 0.5
-    
+
+    # Stage 2: Combined edge+feature comparison (similarity, higher = more similar)
+    combined_similarity_threshold: float = 0.7
+
+    # Stage weights for combined comparator
+    edge_weight: float = 0.5  # Weight for edge comparison (feature weight = 1 - edge_weight)
+
+    # Enable/disable stages
     enable_stage1: bool = True
     enable_stage2: bool = True
-    enable_stage3: bool = True
-    
+
     verbose: bool = True
 
 
@@ -60,46 +69,46 @@ class PetriNetItem:
 class PetriNetDeduplicator:
     """
     Iterative deduplicator for Petri nets.
-    
+
     Pipeline:
         1. First net → unique_nets
         2. For each subsequent net:
            - Compare with ALL nets already in unique_nets
            - If too similar → mark as duplicate
            - If unique → add to unique_nets
-    
-    Uses three-stage comparison with early stopping:
-        Stage 1: Transition label counts (Bray-Curtis)
-        Stage 2: Transition edges (Bray-Curtis)
-        Stage 3: Feature vectors (MAD on z-scores)
+
+    Uses improved two-stage comparison with early stopping:
+        Stage 1: Transition label counts (Bray-Curtis, prefilter)
+        Stage 2: Combined path-based edges + dual-score features
     """
-    
-    def __init__(
-        self,
-        config: DeduplicationConfig,
-        feature_normalizer: ZScoreFeatureNormalizer
-    ):
+
+    def __init__(self, config: DeduplicationConfig):
         """
         Initialize deduplicator.
-        
+
         Args:
             config: Deduplication configuration
-            feature_normalizer: Pre-fitted normalizer with z-score parameters
         """
         self.config = config
-        
+
+        # Stage 1: Label-based prefilter
         self.stage1 = TransitionLabelComparator()
-        self.stage2 = TransitionEdgeComparator()
-        self.stage3 = FeatureVectorComparator(
-            feature_extractor=ModelFeatureExtractor(),
-            normalizer=feature_normalizer
+
+        # Stage 2: Combined edge + feature comparison
+        edge_comparator = PathBasedTransitionEdgeComparator()
+        feature_comparator = DualScoreFeatureComparator(
+            feature_extractor=ModelFeatureExtractor()
         )
-        
+        self.stage2 = CombinedComparator(
+            edge_comparator=edge_comparator,
+            feature_comparator=feature_comparator,
+            edge_weight=config.edge_weight
+        )
+
         self.stats = {
             'total_input': 0,
             'stage1_filtered': 0,
             'stage2_filtered': 0,
-            'stage3_filtered': 0,
             'final_unique': 0,
             'comparisons_performed': 0
         }
@@ -159,52 +168,44 @@ class PetriNetDeduplicator:
     ) -> Tuple[bool, Optional[int]]:
         """
         Check if candidate is duplicate of any unique net.
-        
+
         Args:
             candidate: Net to check
             unique_nets: List of already identified unique nets
-        
+
         Returns:
             Tuple of (is_duplicate, representative_idx)
         """
         for unique_net in unique_nets:
             self.stats['comparisons_performed'] += 1
-            
+
+            # Stage 1: Label-based prefilter (similarity metric)
             if self.config.enable_stage1:
-                sim1 = self.stage1.compare(
-                    candidate.net, candidate.im, candidate.fm,
-                    unique_net.net, unique_net.im, unique_net.fm
-                )
-                
-                if sim1 < self.config.label_similarity_threshold:
-                    continue
-                
-                self.stats['stage1_filtered'] += 1
-            
-            if self.config.enable_stage2:
-                sim2 = self.stage2.compare(
-                    candidate.net, candidate.im, candidate.fm,
-                    unique_net.net, unique_net.im, unique_net.fm
-                )
-                
-                if sim2 < self.config.edge_similarity_threshold:
-                    continue
-                
-                self.stats['stage2_filtered'] += 1
-            
-            if self.config.enable_stage3:
-                sim3 = self.stage3.compare(
+                label_similarity = self.stage1.compare(
                     candidate.net, candidate.im, candidate.fm,
                     unique_net.net, unique_net.im, unique_net.fm
                 )
 
-                if sim3 > self.config.feature_distance_threshold:
+                if label_similarity < self.config.label_similarity_threshold:
                     continue
-                
-                self.stats['stage3_filtered'] += 1
-            
+
+                self.stats['stage1_filtered'] += 1
+
+            # Stage 2: Combined edge+feature comparison (similarity metric)
+            if self.config.enable_stage2:
+                combined_similarity = self.stage2.compare(
+                    candidate.net, candidate.im, candidate.fm,
+                    unique_net.net, unique_net.im, unique_net.fm
+                )
+
+                if combined_similarity < self.config.combined_similarity_threshold:
+                    continue
+
+                self.stats['stage2_filtered'] += 1
+
+            # Passed all enabled stages → is a duplicate
             return True, unique_net.idx
-        
+
         return False, None
     
     def _generate_report(
@@ -229,13 +230,15 @@ class PetriNetDeduplicator:
             ),
             'thresholds': {
                 'label_threshold': self.config.label_similarity_threshold,
-                'edge_threshold': self.config.edge_similarity_threshold,
-                'feature_threshold': self.config.feature_distance_threshold,
+                'combined_threshold': self.config.combined_similarity_threshold,
+            },
+            'weights': {
+                'edge_weight': self.config.edge_weight,
+                'feature_weight': 1.0 - self.config.edge_weight,
             },
             'stages_enabled': {
                 'stage1': self.config.enable_stage1,
                 'stage2': self.config.enable_stage2,
-                'stage3': self.config.enable_stage3,
             },
             'duplicate_map': {
                 str(k): v for k, v in duplicate_map.items()
@@ -258,9 +261,9 @@ class PetriNetDeduplicator:
             print("No deduplication report available. Run deduplicate() first.")
             return
 
-        print("\n" + "="*60)
-        print("DEDUPLICATION REPORT")
-        print("="*60)
+        print("\n" + "="*70)
+        print("DEDUPLICATION REPORT (Improved Pipeline)")
+        print("="*70)
         print(f"Total input nets:            {self.report['num_total']}")
         print(f"Final unique nets:           {self.report['num_unique']}")
         print(f"Duplicates found:            {self.report['num_duplicates']}")
@@ -269,16 +272,17 @@ class PetriNetDeduplicator:
         print("COMPARISON STATISTICS:")
         print(f"  Total comparisons:         {self.report['stats']['comparisons_performed']}")
         print(f"  Passed stage 1 (labels):   {self.report['stats']['stage1_filtered']}")
-        print(f"  Passed stage 2 (edges):    {self.report['stats']['stage2_filtered']}")
-        print(f"  Passed stage 3 (features): {self.report['stats']['stage3_filtered']}")
+        print(f"  Passed stage 2 (combined): {self.report['stats']['stage2_filtered']}")
         print()
         print("THRESHOLDS:")
-        print(f"  Label similarity:          {self.report['thresholds']['label_threshold']:.2f}")
-        print(f"  Edge similarity:           {self.report['thresholds']['edge_threshold']:.2f}")
-        print(f"  Feature similarity:        {self.report['thresholds']['feature_threshold']:.2f}")
+        print(f"  Label similarity:          >= {self.report['thresholds']['label_threshold']:.2f}")
+        print(f"  Combined similarity:       >= {self.report['thresholds']['combined_threshold']:.2f}")
+        print()
+        print("STAGE 2 WEIGHTS:")
+        print(f"  Edge comparison:           {self.report['weights']['edge_weight']:.2f}")
+        print(f"  Feature comparison:        {self.report['weights']['feature_weight']:.2f}")
         print()
         print("STAGES ENABLED:")
-        print(f"  Stage 1 (labels):          {self.report['stages_enabled']['stage1']}")
-        print(f"  Stage 2 (edges):           {self.report['stages_enabled']['stage2']}")
-        print(f"  Stage 3 (features):        {self.report['stages_enabled']['stage3']}")
-        print("="*60 + "\n")
+        print(f"  Stage 1 (prefilter):       {self.report['stages_enabled']['stage1']}")
+        print(f"  Stage 2 (combined):        {self.report['stages_enabled']['stage2']}")
+        print("="*70 + "\n")

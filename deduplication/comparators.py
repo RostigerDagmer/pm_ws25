@@ -4,11 +4,12 @@ Each comparator implements a stage of the deduplication process.
 """
 
 from abc import ABC, abstractmethod
-from collections import Counter
+from collections import Counter, deque
 import numpy as np
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from features.extractors import BaseFeatureExtractor
 from deduplication.normalizers import ZScoreFeatureNormalizer
+from typing import *
 
 class BaseComparator(ABC):
     """Interface for all comparators."""
@@ -176,6 +177,129 @@ class TransitionEdgeComparator(BaseComparator):
         return 1.0 - bray_curtis_distance
 
 
+class PathBasedTransitionEdgeComparator(BaseComparator):
+    """
+    Improved edge comparator that skips invisible transitions.
+    
+    Uses a single efficient forward-BFS to determine structural edges between
+    visible transitions (Structural Directly-Follows Edges).
+    """
+
+    def __init__(self, use_cache: bool = True):
+        self.use_cache = use_cache
+        self._edge_cache = {} if use_cache else None
+
+    def _find_successors_and_end(
+        self,
+        start_places: List[PetriNet.Place],
+        final_places: Set[PetriNet.Place]
+    ) -> Tuple[List[str], bool]:
+        """
+        Performs BFS starting from given places to find next reachable visible transitions.
+        Also checks if the final marking is reachable via invisible steps.
+        """
+        visible_labels = []
+        reaches_end = False
+        
+        visited = set()
+        queue = deque(start_places)
+
+        while queue:
+            curr_place = queue.popleft()
+            
+            if curr_place in visited:
+                continue
+            visited.add(curr_place)
+
+            if curr_place in final_places:
+                reaches_end = True
+
+            for arc in curr_place.out_arcs:
+                trans = arc.target
+                
+                if trans in visited: 
+                    continue
+                
+                if trans.label is not None:
+                    # Found visible transition: record and stop this branch
+                    visible_labels.append(trans.label)
+                else:
+                    # Invisible transition: continue search
+                    visited.add(trans)
+                    for out_arc in trans.out_arcs:
+                        queue.append(out_arc.target)
+                        
+        return visible_labels, reaches_end
+
+    def _extract_transition_edges(
+        self,
+        net: PetriNet,
+        im: Marking,
+        fm: Marking
+    ) -> Counter:
+        """
+        Extracts structural edges (A -> B) by skipping invisible transitions.
+        """
+        if self.use_cache:
+            net_hash = hash(net)
+            if net_hash in self._edge_cache:
+                return self._edge_cache[net_hash]
+
+        edges = []
+        final_places = set(fm.keys())
+        
+        # 1. Handle START -> ...
+        next_labels, reaches_end = self._find_successors_and_end(
+            list(im.keys()), final_places
+        )
+        
+        for label in next_labels:
+            edges.append(('START', label))
+        
+        if reaches_end:
+            edges.append(('START', 'END'))
+
+        # 2. Handle Visible Transition -> ...
+        for t in net.transitions:
+            if t.label is not None:
+                out_places = [arc.target for arc in t.out_arcs]
+                
+                next_labels, reaches_end = self._find_successors_and_end(
+                    out_places, final_places
+                )
+                
+                for target_label in next_labels:
+                    edges.append((t.label, target_label))
+                
+                if reaches_end:
+                    edges.append((t.label, 'END'))
+
+        edge_counts = Counter(edges)
+
+        if self.use_cache:
+            self._edge_cache[net_hash] = edge_counts
+
+        return edge_counts
+
+    def compare(
+        self,
+        net1: PetriNet, im1: Marking, fm1: Marking,
+        net2: PetriNet, im2: Marking, fm2: Marking
+    ) -> float:
+        edges1 = self._extract_transition_edges(net1, im1, fm1)
+        edges2 = self._extract_transition_edges(net2, im2, fm2)
+
+        all_edges = set(edges1.keys()) | set(edges2.keys())
+
+        if not all_edges:
+            return 1.0
+
+        numerator = sum(abs(edges1[e] - edges2[e]) for e in all_edges)
+        denominator = sum(edges1[e] + edges2[e] for e in all_edges)
+
+        return 1.0 - (numerator / denominator if denominator > 0 else 0.0)
+
+
 class FeatureVectorComparator(BaseComparator):
     """
     Stage 3: Compare z-score normalized feature vectors using MAD.
@@ -264,3 +388,152 @@ class FeatureVectorComparator(BaseComparator):
         mad = np.sum(weighted_diff) / np.sum(self.weights)
 
         return mad
+
+
+class DualScoreFeatureComparator(BaseComparator):
+    """
+    Improved feature comparator using Canberra Distance with dual scoring.
+
+    Splits features into two groups:
+    1. Structural features (model_n_transitions to model_n_xor_split)
+    2. Degree statistics (all degree-related features)
+
+    Computes Canberra Distance for each group separately and combines
+    them with 50/50 weighting.
+
+    Returns similarity score (higher = more similar). Range: [0, 1]
+    """
+
+    def __init__(self, feature_extractor: BaseFeatureExtractor, epsilon: float = 1e-10):
+        """
+        Initialize comparator.
+
+        Args:
+            feature_extractor: ModelFeatureExtractor instance
+            epsilon: Small value to avoid division by zero in Canberra Distance
+        """
+        self.extractor = feature_extractor
+        self.epsilon = epsilon
+
+        # Define feature group indices based on ModelFeatureExtractor.feature_names
+        # Structural: indices 0-7 (model_n_transitions to model_n_xor_split)
+        # Degree stats: indices 8-23 (all degree features)
+        self.structural_indices = list(range(0, 8))
+        self.degree_indices = list(range(8, 24))
+
+    def _canberra_distance(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        indices: list
+    ) -> float:
+        """
+        Compute robust Canberra Distance for specified feature indices.
+
+        Args:
+            x: First feature vector
+            y: Second feature vector
+            indices: List of feature indices to include
+
+        Returns:
+            Normalized Canberra Distance in [0, 1]
+        """
+        x_subset = x[indices]
+        y_subset = y[indices]
+
+        numerator = np.abs(x_subset - y_subset)
+        denominator = np.abs(x_subset) + np.abs(y_subset) + self.epsilon
+
+        distances = numerator / denominator
+        # Normalize by number of features to get value in [0, 1]
+        return np.mean(distances)
+
+    def compare(
+        self,
+        net1: PetriNet, im1: Marking, fm1: Marking,
+        net2: PetriNet, im2: Marking, fm2: Marking
+    ) -> float:
+        """
+        Compare nets using dual-score Canberra Distance.
+
+        Returns:
+            Similarity score in [0, 1], where higher = more similar
+        """
+        feat1 = self.extractor.extract(net1, im1, fm1, return_as_dict=False)
+        feat2 = self.extractor.extract(net2, im2, fm2, return_as_dict=False)
+
+        # Compute Canberra Distance for each feature group
+        structural_dist = self._canberra_distance(
+            feat1, feat2, self.structural_indices
+        )
+        degree_dist = self._canberra_distance(
+            feat1, feat2, self.degree_indices
+        )
+
+        # Combine with 50/50 weighting
+        combined_dissimilarity = 0.5 * structural_dist + 0.5 * degree_dist
+
+        # Convert dissimilarity to similarity
+        return 1.0 - combined_dissimilarity
+
+
+class CombinedComparator(BaseComparator):
+    """
+    Combines path-based edge comparison with dual-score feature comparison.
+
+    This comparator integrates two complementary comparison approaches:
+    1. Path-based transition edge comparison (structural/behavioral similarity)
+    2. Dual-score feature comparison (statistical similarity)
+
+    Both similarity scores are combined with configurable weighting (default 50/50).
+
+    Returns similarity score (higher = more similar). Range: [0, 1]
+    """
+
+    def __init__(
+        self,
+        edge_comparator: PathBasedTransitionEdgeComparator,
+        feature_comparator: DualScoreFeatureComparator,
+        edge_weight: float = 0.5
+    ):
+        """
+        Initialize combined comparator.
+
+        Args:
+            edge_comparator: PathBasedTransitionEdgeComparator instance
+            feature_comparator: DualScoreFeatureComparator instance
+            edge_weight: Weight for edge score (feature weight = 1 - edge_weight)
+        """
+        self.edge_comparator = edge_comparator
+        self.feature_comparator = feature_comparator
+        self.edge_weight = edge_weight
+        self.feature_weight = 1.0 - edge_weight
+
+    def compare(
+        self,
+        net1: PetriNet, im1: Marking, fm1: Marking,
+        net2: PetriNet, im2: Marking, fm2: Marking
+    ) -> float:
+        """
+        Compare nets using combined edge and feature scores.
+
+        Returns:
+            Similarity score in [0, 1], where higher = more similar
+        """
+        # Get edge similarity (range [0, 1], 1 = identical)
+        edge_similarity = self.edge_comparator.compare(
+            net1, im1, fm1, net2, im2, fm2
+        )
+
+        # Get feature similarity (range [0, 1], 1 = identical)
+        feature_similarity = self.feature_comparator.compare(
+            net1, im1, fm1, net2, im2, fm2
+        )
+
+        # Combine similarities with weighted average
+        combined_similarity = (
+            self.edge_weight * edge_similarity +
+            self.feature_weight * feature_similarity
+        )
+
+        return combined_similarity

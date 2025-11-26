@@ -21,9 +21,7 @@ from deduplication.deduplicator import (
     DeduplicationConfig,
     PetriNetItem
 )
-from deduplication.normalizers import ZScoreFeatureNormalizer
 from deduplication.utils import duplicate_map_to_groups
-from features.extractors import ModelFeatureExtractor
 from pm4py.visualization.petri_net import visualizer as pn_visualizer
 import hashlib
 import json
@@ -39,10 +37,9 @@ class UniqueProcessModelDataset(Dataset):
     Dataset wrapper that deduplicates a ProcessModelDataset.
 
     This class wraps a ProcessModelDataset and removes duplicate Petri nets
-    using a three-stage comparison pipeline:
-    1. Transition label counts comparison
-    2. Transition edge structure comparison
-    3. Feature vector comparison
+    using an improved two-stage comparison pipeline:
+    1. Transition label counts comparison (prefilter)
+    2. Combined path-based edges + dual-score features comparison
 
     The deduplication is performed on cached models and updates the
     underlying dataset's configuration list.
@@ -117,8 +114,8 @@ class UniqueProcessModelDataset(Dataset):
             'base_dataset_hash': self.base_dataset.hash(),
             'dedup_config': {
                 'label_threshold': self.dedup_config.label_similarity_threshold,
-                'edge_threshold': self.dedup_config.edge_similarity_threshold,
-                'feature_threshold': self.dedup_config.feature_distance_threshold,
+                'combined_threshold': self.dedup_config.combined_similarity_threshold,
+                'edge_weight': self.dedup_config.edge_weight,
             }
         }
         full_hash = hashlib.sha1(
@@ -155,12 +152,10 @@ class UniqueProcessModelDataset(Dataset):
 
         Pipeline:
             1. Load all cached models
-            2. Extract features for all nets
-            3. Compute feature normalizer (z-score parameters)
-            4. Create deduplicator with normalizer
-            5. Iterative deduplication
-            6. Update base_dataset.configurations
-            7. Save report
+            2. Create deduplicator (no normalizer needed)
+            3. Iterative deduplication
+            4. Update base_dataset.configurations
+            5. Save report
         """
         logging.info("Starting deduplication of cached models...")
 
@@ -170,12 +165,7 @@ class UniqueProcessModelDataset(Dataset):
             logging.warning("No cached models found for deduplication")
             return
 
-        feature_normalizer = self._compute_feature_normalizer(all_items)
-
-        deduplicator = PetriNetDeduplicator(
-            config=self.dedup_config,
-            feature_normalizer=feature_normalizer
-        )
+        deduplicator = PetriNetDeduplicator(config=self.dedup_config)
 
         unique_nets, duplicate_map = deduplicator.deduplicate(all_items)
 
@@ -223,33 +213,6 @@ class UniqueProcessModelDataset(Dataset):
                 }
             ))
         return items
-
-    def _compute_feature_normalizer(self, all_items):
-        """
-        Compute feature normalizer over all nets.
-
-        Args:
-            all_items: List of PetriNetItem instances
-
-        Returns:
-            Fitted FeatureNormalizer
-        """
-        extractor = ModelFeatureExtractor()
-
-        logging.info("Extracting features for normalization...")
-        all_features = []
-        for item in tqdm(all_items, desc="Extracting features"):
-            feat = extractor.extract(
-                item.net, item.im, item.fm, return_as_dict=False
-            )
-            all_features.append(feat)
-
-        all_features = np.vstack(all_features)
-
-        normalizer = ZScoreFeatureNormalizer(extractor.feature_names)
-        normalizer.fit(all_features)
-
-        return normalizer
 
     def __len__(self):
         return len(self.unique_indices)
