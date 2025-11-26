@@ -39,7 +39,7 @@ class DeduplicationConfig:
     label_similarity_threshold: float = 0.9
 
     # Stage 2: Combined edge+feature comparison (similarity, higher = more similar)
-    combined_similarity_threshold: float = 0.7
+    combined_similarity_threshold: float = 0.9
 
     # Enable/disable stages
     enable_stage1: bool = True
@@ -88,17 +88,33 @@ class PetriNetDeduplicator:
         """
         self.config = config
 
+        # Initialize comparison logging
+        self.comparison_log = []
+        self._current_comparison = {}
+
+        # Create callbacks for score collection
+        def label_callback(scores):
+            self._current_comparison.update(scores)
+
+        def edge_callback(scores):
+            self._current_comparison.update(scores)
+
+        def feature_callback(scores):
+            self._current_comparison.update(scores)
+
+        def combined_callback(scores):
+            self._current_comparison.update(scores)
+
         # Stage 1: Label-based prefilter
-        self.stage1 = TransitionLabelComparator()
+        self.stage1 = TransitionLabelComparator(debug_callback=label_callback)
 
         # Stage 2: Combined edge + feature comparison
-        edge_comparator = PathBasedTransitionEdgeComparator()
-        feature_comparator = DualScoreFeatureComparator(
-            feature_extractor=ModelFeatureExtractor()
-        )
+        edge_comparator = PathBasedTransitionEdgeComparator(debug_callback=edge_callback)
+        feature_comparator = DualScoreFeatureComparator(debug_callback=feature_callback)
         self.stage2 = CombinedComparator(
             edge_comparator=edge_comparator,
             feature_comparator=feature_comparator,
+            debug_callback=combined_callback
         )
 
         self.stats = {
@@ -175,6 +191,15 @@ class PetriNetDeduplicator:
         for unique_net in unique_nets:
             self.stats['comparisons_performed'] += 1
 
+            # Reset current comparison dict
+            self._current_comparison = {
+                'candidate_idx': candidate.idx,
+                'unique_idx': unique_net.idx,
+                'passed_stage1': False,
+                'passed_stage2': False,
+                'is_duplicate': False
+            }
+
             # Stage 1: Label-based prefilter (similarity metric)
             if self.config.enable_stage1:
                 label_similarity = self.stage1.compare(
@@ -183,8 +208,11 @@ class PetriNetDeduplicator:
                 )
 
                 if label_similarity < self.config.label_similarity_threshold:
+                    # Log and continue
+                    self.comparison_log.append(self._current_comparison.copy())
                     continue
 
+                self._current_comparison['passed_stage1'] = True
                 self.stats['stage1_filtered'] += 1
 
             # Stage 2: Combined edge+feature comparison (similarity metric)
@@ -195,11 +223,16 @@ class PetriNetDeduplicator:
                 )
 
                 if combined_similarity < self.config.combined_similarity_threshold:
+                    # Log and continue
+                    self.comparison_log.append(self._current_comparison.copy())
                     continue
 
+                self._current_comparison['passed_stage2'] = True
                 self.stats['stage2_filtered'] += 1
 
             # Passed all enabled stages → is a duplicate
+            self._current_comparison['is_duplicate'] = True
+            self.comparison_log.append(self._current_comparison.copy())
             return True, unique_net.idx
 
         return False, None
@@ -235,7 +268,8 @@ class PetriNetDeduplicator:
             'duplicate_map': {
                 str(k): v for k, v in duplicate_map.items()
             },
-            'stats': self.stats.copy()
+            'stats': self.stats.copy(),
+            'comparison_log': self.comparison_log
         }
 
     def get_report(self) -> Optional[Dict]:

@@ -99,7 +99,7 @@ def evaluate_dataset(dataset_uuid: str, filename: str, dedup_config: Deduplicati
         )
 
         # Create config-specific output directory
-        config_name = f"l{dedup_config.label_similarity_threshold:.2f}_e{dedup_config.edge_similarity_threshold:.2f}_f{dedup_config.feature_distance_threshold:.2f}"
+        config_name = f"l{dedup_config.label_similarity_threshold:.2f}_e{dedup_config.combined_similarity_threshold:.2f}"
         dataset_output_dir = base_output_dir / config_name / filename.replace('.xes', '')
         dataset_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -126,6 +126,25 @@ def evaluate_dataset(dataset_uuid: str, filename: str, dedup_config: Deduplicati
                 json.dump(unique_dataset.dedup_report, f, indent=2)
             print(f"Report saved to {report_path}")
 
+        # Save similarity scores (comparison log)
+        if unique_dataset.dedup_report and 'comparison_log' in unique_dataset.dedup_report:
+            scores_path = dataset_output_dir / "similarity_scores.json"
+            comparison_log = unique_dataset.dedup_report['comparison_log']
+
+            scores_data = {
+                'dataset': filename,
+                'config': {
+                    'label_threshold': dedup_config.label_similarity_threshold,
+                    'combined_threshold': dedup_config.combined_similarity_threshold
+                },
+                'num_comparisons': len(comparison_log),
+                'comparisons': comparison_log
+            }
+
+            with open(scores_path, 'w') as f:
+                json.dump(scores_data, f, indent=2)
+            print(f"Similarity scores saved to {scores_path}")
+
         # Print summary
         if unique_dataset.dedup_report:
             print(f"\nSummary for {filename}:")
@@ -146,18 +165,10 @@ if __name__ == "__main__":
     print(f"Total datasets to process: {len(DATASETS)}")
 
     # Define deduplication configuration
-    dedup_config = DeduplicationConfig(
-        label_similarity_threshold=0.9,
-        edge_similarity_threshold=0.8,
-        feature_distance_threshold=0.5,
-        enable_stage1=True,
-        enable_stage2=True,
-        enable_stage3=False,
-        verbose=True
-    )
+    dedup_config = DeduplicationConfig()
 
     # Create base output directory
-    base_output_dir = Path("outputs") / "evaluate_deduplication" / "10_models"
+    base_output_dir = Path("outputs") / "evaluate_improved_dedupliation" / "10_models"
     base_output_dir.mkdir(parents=True, exist_ok=True)
 
     # Process each dataset

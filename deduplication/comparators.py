@@ -40,15 +40,17 @@ class TransitionLabelComparator(BaseComparator):
     Works on the union of labels from both nets, no prior knowledge required.
     """
 
-    def __init__(self, use_cache: bool = True):
+    def __init__(self, use_cache: bool = True, debug_callback: Optional[Callable] = None):
         """
         Initialize comparator.
 
         Args:
             use_cache: Whether to cache extracted label counts
+            debug_callback: Optional callback function for debugging scores
         """
         self.use_cache = use_cache
         self._label_cache = {} if use_cache else None
+        self.debug_callback = debug_callback
 
     def _extract_label_counts(self, net: PetriNet) -> Counter:
         """Extract label counts from net transitions, using cache if enabled."""
@@ -80,13 +82,17 @@ class TransitionLabelComparator(BaseComparator):
         all_labels = set(counts1.keys()) | set(counts2.keys())
 
         if not all_labels:
-            return 1.0
+            similarity = 1.0
+        else:
+            numerator = sum(abs(counts1[label] - counts2[label]) for label in all_labels)
+            denominator = sum(counts1[label] + counts2[label] for label in all_labels)
+            bray_curtis_distance = numerator / denominator if denominator > 0 else 0.0
+            similarity = 1.0 - bray_curtis_distance
 
-        numerator = sum(abs(counts1[label] - counts2[label]) for label in all_labels)
-        denominator = sum(counts1[label] + counts2[label] for label in all_labels)
+        if self.debug_callback:
+            self.debug_callback({'label_similarity': similarity})
 
-        bray_curtis_distance = numerator / denominator if denominator > 0 else 0.0
-        return 1.0 - bray_curtis_distance
+        return similarity
 
 
 class PathBasedTransitionEdgeComparator(BaseComparator):
@@ -97,9 +103,10 @@ class PathBasedTransitionEdgeComparator(BaseComparator):
     visible transitions (Structural Directly-Follows Edges).
     """
 
-    def __init__(self, use_cache: bool = True):
+    def __init__(self, use_cache: bool = True, debug_callback: Optional[Callable] = None):
         self.use_cache = use_cache
         self._edge_cache = {} if use_cache else None
+        self.debug_callback = debug_callback
 
     def _find_successors_and_end(
         self,
@@ -204,12 +211,16 @@ class PathBasedTransitionEdgeComparator(BaseComparator):
         all_edges = set(edges1.keys()) | set(edges2.keys())
 
         if not all_edges:
-            return 1.0
+            similarity = 1.0
+        else:
+            numerator = sum(abs(edges1[e] - edges2[e]) for e in all_edges)
+            denominator = sum(edges1[e] + edges2[e] for e in all_edges)
+            similarity = 1.0 - (numerator / denominator if denominator > 0 else 0.0)
 
-        numerator = sum(abs(edges1[e] - edges2[e]) for e in all_edges)
-        denominator = sum(edges1[e] + edges2[e] for e in all_edges)
+        if self.debug_callback:
+            self.debug_callback({'edge_similarity': similarity})
 
-        return 1.0 - (numerator / denominator if denominator > 0 else 0.0)
+        return similarity
 
 
 class DualScoreFeatureComparator(BaseComparator):
@@ -226,10 +237,11 @@ class DualScoreFeatureComparator(BaseComparator):
     Returns similarity score (higher = more similar). Range: [0, 1]
     """
 
-    def __init__(self):
+    def __init__(self, debug_callback: Optional[Callable] = None):
         """Initialize comparator with ModelFeatureExtractor."""
         self.extractor = ModelFeatureExtractor()
         self.epsilon = 1e-10
+        self.debug_callback = debug_callback
 
         # Define feature group indices based on ModelFeatureExtractor.feature_names
         # Structural: indices 0-7 (model_n_transitions to model_n_xor_split)
@@ -290,7 +302,18 @@ class DualScoreFeatureComparator(BaseComparator):
         combined_dissimilarity = 0.5 * structural_dist + 0.5 * degree_dist
 
         # Convert dissimilarity to similarity
-        return 1.0 - combined_dissimilarity
+        structural_similarity = 1.0 - structural_dist
+        degree_similarity = 1.0 - degree_dist
+        combined_feature_similarity = 1.0 - combined_dissimilarity
+
+        if self.debug_callback:
+            self.debug_callback({
+                'structural_similarity': structural_similarity,
+                'degree_similarity': degree_similarity,
+                'combined_feature_similarity': combined_feature_similarity
+            })
+
+        return combined_feature_similarity
 
 
 class CombinedComparator(BaseComparator):
@@ -310,6 +333,7 @@ class CombinedComparator(BaseComparator):
         self,
         edge_comparator: PathBasedTransitionEdgeComparator,
         feature_comparator: DualScoreFeatureComparator,
+        debug_callback: Optional[Callable] = None
     ):
         """
         Initialize combined comparator.
@@ -317,11 +341,13 @@ class CombinedComparator(BaseComparator):
         Args:
             edge_comparator: PathBasedTransitionEdgeComparator instance
             feature_comparator: DualScoreFeatureComparator instance
+            debug_callback: Optional callback function for debugging scores
         """
         self.edge_comparator = edge_comparator
         self.feature_comparator = feature_comparator
         self.edge_weight = 0.5
         self.feature_weight = 0.5
+        self.debug_callback = debug_callback
 
     def compare(
         self,
@@ -349,5 +375,12 @@ class CombinedComparator(BaseComparator):
             self.edge_weight * edge_similarity +
             self.feature_weight * feature_similarity
         )
+
+        if self.debug_callback:
+            self.debug_callback({
+                'edge_similarity': edge_similarity,
+                'feature_similarity': feature_similarity,
+                'combined_similarity': combined_similarity
+            })
 
         return combined_similarity
