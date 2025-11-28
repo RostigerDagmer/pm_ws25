@@ -32,6 +32,9 @@ from pm4py.objects.log.obj import EventLog, Trace
 from pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.objects.petri_net.importer import importer as pnml_importer
 from pm4py.objects.petri_net.exporter import exporter as pnml_exporter
+import traceback
+
+from util.rng import RNG
 
 logging.getLogger(None)
 logging.basicConfig(level=logging.INFO)
@@ -130,23 +133,32 @@ class Sampler(ABC):
     ):
         self.n_subsets = n_subsets
         self.name = name or self.__class__.__name__
+        if seed is None:
+            seed = 1
+            logging.warning(
+                "Sampler initialized without seed... choosing default 1; you may get non-reproducible results."
+            )
         self.seed = seed
-        torch.manual_seed(self.seed or 42)
         self._cache = {}  # (id(log)) -> dict of computed features
 
     @abstractmethod
-    def sample_once(self, log: EventLog, subset_idx: int):
+    def sample_once(self, log: EventLog, subset_idx: int, rng: random.Random):
         raise NotImplementedError
 
     def __call__(self, log: EventLog):
         subsets = []
+        torch.manual_seed(self.seed)
         for i in range(self.n_subsets):
             if self.seed is not None:
                 # derive deterministic 32-bit seed from (sampler_name, seed, subset_idx)
                 key = f"{self.name}:{self.seed}:{i}".encode()
                 seed_int = int(hashlib.sha1(key).hexdigest(), 16) % (2**32)
-                random.seed(seed_int)
-            subsets.append(self.sample_once(log, i))
+                rng = random.Random(seed_int)
+                # seed torch as well for any torch-based sampling (this assumes single-threaded sampling and will break if global RNG is modified asynchronously)
+                torch.manual_seed(seed_int)
+            subsets.append(self.sample_once(log, i, rng))
+        # reset torch seed
+        torch.manual_seed(self.seed)
         return subsets
 
     def get_cached(
@@ -183,6 +195,7 @@ class VariantRandomDistributionSampler(Sampler):
         reconstruct_frequency: bool = True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
         **kwargs,
     ):
+        print("kwargs:", kwargs)
         super().__init__(n_subsets=n_subsets, **kwargs)
         self.max_len_subset = max_len_subset
         self.min_len_subset = min_len_subset
@@ -190,7 +203,7 @@ class VariantRandomDistributionSampler(Sampler):
         self.freq_distribution = freq_distribution
         self.reconstruct_frequency = reconstruct_frequency
 
-    def sample_once(self, log: EventLog, subset_idx: int):
+    def sample_once(self, log: EventLog, subset_idx: int, rng: random.Random):
         def compute_variants(l: EventLog):
             variants: dict[str, Trace] = {
                 ";".join(e["concept:name"] for e in t): t for t in l
@@ -252,15 +265,14 @@ class ProcessModelDataset(Dataset):
 
     def __init__(
         self,
+        rng: RNG,
         log_dataset: BaseEventLogDataset,
         discovery_methods: Union[
             dict[str, Callable[[Any], tuple[PetriNet, Marking, Marking]]],
             "DISCOVERY_METHODS",
         ],
         param_grid: Union[dict[str, list[float | int | bool]], "PARAM_GRID"],
-        sampler_specs: Union[
-            dict[str, Callable[[Any], list[TraceSubset]]], "SAMPLER_SPECS"
-        ],
+        sampler_specs: dict[str, Callable[[Any], list[TraceSubset]]],
         max_models=None,
         cached=False,
         cache_dir=None,
@@ -283,16 +295,14 @@ class ProcessModelDataset(Dataset):
             discovery_methods = discovery_methods.value
         if hasattr(param_grid, "value"):
             param_grid = param_grid.value
-        if hasattr(sampler_specs, "value"):
-            sampler_specs = sampler_specs.value
 
         self.discovery_methods: dict[
             str, Callable[[Any], tuple[PetriNet, Marking, Marking]]
         ] = discovery_methods
         self.param_grid: dict[str, list[float | int | bool]] = param_grid
-        self.sampler_specs = sampler_specs or {
-            "full": FullSampler(n_subsets=1)
-        }
+        if sampler_specs is None:
+            raise ValueError("sampler_specs must be provided.")
+        self.sampler_specs = sampler_specs
         self.max_models = max_models
         self.cached = cached
         self.num_workers = num_workers or os.cpu_count()
@@ -375,6 +385,7 @@ class ProcessModelDataset(Dataset):
                     f.result()
                     logging.debug("Cached model %s", key)
                 except Exception as e:
+                    traceback.print_exc()
                     logging.error("Failed to cache %s: %s", key, e, cfg)
 
         logging.info(
@@ -547,7 +558,7 @@ class DISCOVERY_METHODS(Enum):
         "ilp": discover_petri_net_ilp,
     }
 
-    GURANTEED_SOUND = {
+    GUARANTEED_SOUND = {
         "inductive": discover_petri_net_inductive,
         "ilp": discover_petri_net_ilp,
     }
@@ -588,27 +599,6 @@ class PARAM_GRID(Enum):
     }
 
 
-class SAMPLER_SPECS(Enum):
-    STANDARD = {
-        "variant_random": VariantRandomDistributionSampler(
-            n_subsets=1000,  # number of subsets: defines how often the log is sampled... basically
-            max_len_subset=100,
-            min_len_subset=10,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
-            len_distribution=torch.distributions.Exponential(
-                torch.tensor([1.0 / 100.0])
-            ),  # subset length distribution: defines the distribution of lengths across samples
-            freq_distribution=torch.distributions.Normal(
-                10.0, 5.0
-            ),  # (variant) freq_distribution: defines the reordering of traces/variants on every sampling call, by defining the sampling behavior over index(variant) -> frequency.
-            # realistically this would more likely be an exponential... but harder to parametrize... e.g.:
-            # freq_distribution=torch.distributions.Exponential(
-            #     torch.tensor([1.0 / 20.0])
-            # )
-            reconstruct_frequency=True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
-        )
-    }
-
-
 if __name__ == "__main__":
     from dataloaders.xes_log import XESEventLogDataset
     from dataloaders.unique_net import UniqueProcessModelDataset
@@ -616,10 +606,8 @@ if __name__ == "__main__":
     from pm4py.vis import view_petri_net
 
     path = "data/63a8435a-077d-4ece-97cd-2c76d394d99c/BPIC15_2.xes"
-    # path = "data/6a0a26d2-82d0-4018-b1cd-89afb0e8627f/DomesticDeclarations.xes"
-    # path = "data/3301445f-95e8-4ff0-98a4-901f1f204972/BPI%20Challenge%202018.xes"
-    # path = "data/d9769f3d-0ab0-4fb8-803b-0d1120ffcf54/Hospital_log.xes"
-
+    rng = RNG()
+    rng.initialize(42)
     log_dataset = XESEventLogDataset(path, attribute="concept:name")
 
     '''
@@ -629,6 +617,7 @@ if __name__ == "__main__":
 
     # Create base dataset with caching enabled
     pm_dataset = ProcessModelDataset(
+        rng=rng,
         log_dataset=log_dataset,
         discovery_methods={"inductive": discover_petri_net_inductive},
         param_grid={
@@ -651,6 +640,7 @@ if __name__ == "__main__":
                 #     torch.tensor([1.0 / 20.0])
                 # )
                 reconstruct_frequency=True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
+                seed=rng.get_seed(),
             )
         },
         cached=True,

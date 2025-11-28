@@ -35,7 +35,7 @@ from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
 from pm4py.util import typing
 from sklearn.ensemble import GradientBoostingClassifier
 
-SEED = 42
+from util.rng import RNG
 
 
 class Aligner(ABC):
@@ -84,7 +84,7 @@ class AlignerSpec(Enum):
         PM4pyAligner(Variants.VERSION_REQUIRED_ACTIVITIES),
         PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR),
         PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR_ILP),
-        #PM4pyAligner(Variants.VERSION_INCREMENTAL_A_STAR),
+        # PM4pyAligner(Variants.VERSION_INCREMENTAL_A_STAR),
     ]
 
 
@@ -242,6 +242,7 @@ class RunDataset(Dataset):
 
     def __init__(
         self,
+        rng: RNG,
         base_path: Path,
         process_model_dataset: Union[ProcessModelDataset, UniqueProcessModelDataset],
         aligners: Sequence[Aligner],
@@ -253,7 +254,7 @@ class RunDataset(Dataset):
         self.base_path = base_path
         self.pm_dataset = process_model_dataset
         self.trace_sampler = trace_sampler(
-            self.pm_dataset, seed=SEED, slice=slice
+            self.pm_dataset, seed=rng.get_seed(), slice=slice
         )
         self.aligners = aligners
         self.n_runs = n_runs
@@ -487,14 +488,15 @@ def get_stats(stats: list[PerfCounter]) -> dict[str, float]:
 if __name__ == "__main__":
     import torch
     from dataloaders.net import VariantRandomDistributionSampler
-    from dataloaders.csv_log import CSVEventLogDataset
     from dataloaders.xes_log import XESEventLogDataset
     from pm4py.discovery import discover_petri_net_inductive
     import matplotlib.pyplot as plt
     import pandas as pd
 
+    rng = RNG()
+    rng.initialize(42)
+
     # CONFIGURATION
-    PLOT = False
     N_RUNS = 5  # set number of runs here
     path = "data/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/Hospital%20Billing%20-%20Event%20Log.xes"
 
@@ -509,30 +511,8 @@ if __name__ == "__main__":
         mean, std
     )  # defines the reordering of traces by defining the sampling distribution over index(index)
 
-    if PLOT:
-        # plot length distribution
-        lengths = torch.arange(0, 500)
-        probs = torch.exp(-len_distribution.rate * lengths)
-        plt.plot(lengths.numpy(), probs.numpy())
-        plt.title("Exponential Length Distribution (λ=1/100)")
-        plt.xlabel("Trace Length")
-        plt.ylabel("Probability Density")
-        plt.grid()
-        plt.show()
-
-        # plot frequency distribution
-        x = torch.linspace(-10, 30, 100)
-        coeff = 1.0 / (std * torch.sqrt(torch.tensor(2.0 * 3.141592653589793)))
-        exponent = -0.5 * ((x - mean) / std) ** 2
-        probs = coeff * torch.exp(exponent)
-        plt.plot(x.numpy(), probs.numpy())
-        plt.title("Normal Frequency Distribution (μ=10, σ=5)")
-        plt.xlabel("Trace Frequency")
-        plt.ylabel("Probability Density")
-        plt.grid()
-        plt.show()
-
     pm_dataset = ProcessModelDataset(
+        rng=rng,
         log_dataset=log_dataset,
         discovery_methods={"inductive": discover_petri_net_inductive},
         param_grid={
@@ -554,6 +534,7 @@ if __name__ == "__main__":
     unique_pm_dataset = UniqueProcessModelDataset(pm_dataset)
 
     run_dataset = RunDataset(
+        rng,
         Path('./data/runs'),
         unique_pm_dataset,
         AlignerSpec.A_STAR.value,
@@ -648,7 +629,7 @@ if __name__ == "__main__":
         n_estimators=100,
         learning_rate=0.1,
         max_depth=3,
-        random_state=SEED,
+        random_state=rng.get_seed(),
     )
     clf.fit(X, y)
     print("Classifier trained.")

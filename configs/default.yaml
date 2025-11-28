@@ -1,0 +1,30 @@
+seed: 1
+discovery:
+  methods: ["inductive"] # either a DISCOVERY_METHOD variant or a list of any in the set { "inductive","heuristic", "alpha", "alpha_plus", "ilp" }
+  params: # method-specific lists of parameters (only eligible will be applied to a method)
+    noise_threshold: [0.0, 0.1, 0.2, 0.3]
+    disable_fallthroughs: true
+
+  sampler: # Parameters for the VariantRandomDistributionSampler
+    name: variant1
+    n_subsets: 50 # number of subsets to sample -> number of models that discovery can produce (per unique set of discovery parameters)
+    min_len_subset: 30 # minimum length of each subset
+    max_len_subset: 150 # maximum length of each subset
+
+    len_distribution: # distribution prior for the length of each subset
+      type: torch.distributions.Exponential
+      args:
+        rate: 0.01
+
+    freq_distribution: # distribution prior for the frequency of each variant within a subset
+      type: torch.distributions.Normal
+      args:
+        loc: 10.0
+        scale: 4.0
+
+alignment:
+  runs: 5 # number of alignment runs per model x trace combination
+  workers: 0 # number of parallel workers (0 = all threads)
+  variants: A_STAR # either a AlignerSpec variant or a list of pm4py.algo.conformance.alignments.variants.Variants variants
+  sampler:
+    type: SimplePerturbedTraceSampler # class name of the trace sampler used during alignment runs
