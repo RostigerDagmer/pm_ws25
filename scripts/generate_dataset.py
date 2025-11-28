@@ -2,10 +2,7 @@ import argparse
 import yaml
 from pathlib import Path
 from configs.schema import PipelineConfig
-from dataloaders.net import (
-    ProcessModelDataset,
-    VariantRandomDistributionSampler,
-)
+from dataloaders.net import ProcessModelDataset
 from dataloaders.util import build_dataset
 from dataloaders.runs import RunDataset
 from util.rng import RNG

@@ -9,7 +9,6 @@ comparison pipeline.
 from typing import Optional, Generator
 from pathlib import Path
 import logging
-import pickle
 import numpy as np
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -19,7 +18,7 @@ from dataloaders.net import ProcessModelDataset, SerializedView
 from deduplication.deduplicator import (
     PetriNetDeduplicator,
     DeduplicationConfig,
-    PetriNetItem
+    PetriNetItem,
 )
 from deduplication.utils import duplicate_map_to_groups
 from pm4py.visualization.petri_net import visualizer as pn_visualizer
@@ -91,7 +90,9 @@ class UniqueProcessModelDataset(Dataset):
         # Compute cache key and path
         cache_key = self._compute_cache_key()
         self.cache_file = Path(
-            os.path.join(str(self._dedup_cache_dir), f"unique_dedup_{cache_key}.pkl")
+            os.path.join(
+                str(self._dedup_cache_dir), f"unique_dedup_{cache_key}.pkl"
+            )
         )
 
         # Load from cache or deduplicate
@@ -116,7 +117,7 @@ class UniqueProcessModelDataset(Dataset):
             'dedup_config': {
                 'label_threshold': self.dedup_config.label_similarity_threshold,
                 'combined_threshold': self.dedup_config.combined_similarity_threshold,
-            }
+            },
         }
         full_hash = hashlib.sha1(
             json.dumps(components, sort_keys=True).encode()
@@ -182,7 +183,7 @@ class UniqueProcessModelDataset(Dataset):
         report_path = Path(
             os.path.join(
                 str(self.base_dataset.cache_dir.parent),
-                "deduplication_report.json"
+                "deduplication_report.json",
             )
         )
         with open(report_path, 'w') as f:
@@ -202,16 +203,18 @@ class UniqueProcessModelDataset(Dataset):
         """
         items = []
         for idx, item in enumerate(self.base_dataset):
-            items.append(PetriNetItem(
-                net=item.pm,
-                im=item.im,
-                fm=item.fm,
-                idx=idx,
-                metadata={
-                    'variant': item.variant,
-                    'params': item.parameters
-                }
-            ))
+            items.append(
+                PetriNetItem(
+                    net=item.pm,
+                    im=item.im,
+                    fm=item.fm,
+                    idx=idx,
+                    metadata={
+                        'variant': item.variant,
+                        'params': item.parameters,
+                    },
+                )
+            )
         return items
 
     def __len__(self):
@@ -223,7 +226,9 @@ class UniqueProcessModelDataset(Dataset):
         Maps to the corresponding index in the base dataset.
         """
         if idx < 0 or idx >= len(self.unique_indices):
-            raise IndexError(f"Index {idx} out of range for dataset of size {len(self)}")
+            raise IndexError(
+                f"Index {idx} out of range for dataset of size {len(self)}"
+            )
         base_idx = self.unique_indices[idx]
         return self.base_dataset[base_idx]
 
@@ -284,7 +289,7 @@ class UniqueProcessModelDataset(Dataset):
         self,
         output_dir: Optional[str] = None,
         bgcolor: str = "white",
-        format: str = "png"
+        format: str = "png",
     ):
         """
         Save visualizations of duplicate groups.
@@ -307,8 +312,7 @@ class UniqueProcessModelDataset(Dataset):
             dataset_folder = str(self.base_dataset.cache_dir.parent)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_dir = os.path.join(
-                dataset_folder,
-                f"duplicate_visualizations_{timestamp}"
+                dataset_folder, f"duplicate_visualizations_{timestamp}"
             )
 
         os.makedirs(output_dir, exist_ok=True)
@@ -322,22 +326,22 @@ class UniqueProcessModelDataset(Dataset):
         )
 
         # Process each group
-        for group_idx, group in enumerate(tqdm(groups, desc="Visualizing groups")):
+        for group_idx, group in enumerate(
+            tqdm(groups, desc="Visualizing groups")
+        ):
             representative_idx = group[0]
             duplicate_indices = group[1:]
 
             # Create folder for this group
             group_dir = os.path.join(
-                output_dir,
-                f"group_{group_idx:04d}_repr_{representative_idx}"
+                output_dir, f"group_{group_idx:04d}_repr_{representative_idx}"
             )
             os.makedirs(group_dir, exist_ok=True)
 
             # Visualize representative net
             repr_item = self.base_dataset[representative_idx]
             repr_path = os.path.join(
-                group_dir,
-                f"representative_{representative_idx}.{format}"
+                group_dir, f"representative_{representative_idx}.{format}"
             )
             self._save_single_visualization(
                 repr_item.pm,
@@ -345,15 +349,14 @@ class UniqueProcessModelDataset(Dataset):
                 repr_item.fm,
                 repr_path,
                 title=f"Representative {representative_idx}",
-                bgcolor=bgcolor
+                bgcolor=bgcolor,
             )
 
             # Visualize all duplicates
             for dup_idx in duplicate_indices:
                 dup_item = self.base_dataset[dup_idx]
                 dup_path = os.path.join(
-                    group_dir,
-                    f"duplicate_{dup_idx}.{format}"
+                    group_dir, f"duplicate_{dup_idx}.{format}"
                 )
                 self._save_single_visualization(
                     dup_item.pm,
@@ -361,7 +364,7 @@ class UniqueProcessModelDataset(Dataset):
                     dup_item.fm,
                     dup_path,
                     title=f"Duplicate {dup_idx}",
-                    bgcolor=bgcolor
+                    bgcolor=bgcolor,
                 )
 
         logging.info(
@@ -372,7 +375,7 @@ class UniqueProcessModelDataset(Dataset):
         self,
         output_dir: Optional[str] = None,
         bgcolor: str = "white",
-        format: str = "png"
+        format: str = "png",
     ):
         """
         Save visualizations of all unique nets.
@@ -392,8 +395,7 @@ class UniqueProcessModelDataset(Dataset):
             dataset_folder = str(self.base_dataset.cache_dir.parent)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_dir = os.path.join(
-                dataset_folder,
-                f"unique_visualizations_{timestamp}"
+                dataset_folder, f"unique_visualizations_{timestamp}"
             )
 
         os.makedirs(output_dir, exist_ok=True)
@@ -404,11 +406,12 @@ class UniqueProcessModelDataset(Dataset):
         )
 
         # Process each unique net
-        for idx, base_idx in enumerate(tqdm(self.unique_indices, desc="Visualizing unique nets")):
+        for idx, base_idx in enumerate(
+            tqdm(self.unique_indices, desc="Visualizing unique nets")
+        ):
             item = self.base_dataset[base_idx]
             file_path = os.path.join(
-                output_dir,
-                f"unique_{idx:04d}_base_{base_idx}.{format}"
+                output_dir, f"unique_{idx:04d}_base_{base_idx}.{format}"
             )
             self._save_single_visualization(
                 item.pm,
@@ -416,7 +419,7 @@ class UniqueProcessModelDataset(Dataset):
                 item.fm,
                 file_path,
                 title=f"Unique {idx} (Base Index {base_idx})",
-                bgcolor=bgcolor
+                bgcolor=bgcolor,
             )
 
         logging.info(
@@ -430,7 +433,7 @@ class UniqueProcessModelDataset(Dataset):
         fm,
         file_path: str,
         title: str = None,
-        bgcolor: str = "white"
+        bgcolor: str = "white",
     ):
         """
         Save a single Petri net visualization.
@@ -446,29 +449,24 @@ class UniqueProcessModelDataset(Dataset):
         # Extract format from file extension
         file_format = os.path.splitext(file_path)[1][1:]  # Remove leading dot
 
-        parameters = {
-            "format": file_format,
-            "bgcolor": bgcolor
-        }
+        parameters = {"format": file_format, "bgcolor": bgcolor}
         if title:
             parameters["graph_title"] = title
 
-        gviz = pn_visualizer.apply(
-            net, im, fm,
-            parameters=parameters
-        )
+        gviz = pn_visualizer.apply(net, im, fm, parameters=parameters)
         pn_visualizer.save(gviz, file_path)
-
 
 
 if __name__ == "__main__":
     from dataloaders.xes_log import XESEventLogDataset
-    from dataloaders.unique_net import UniqueProcessModelDataset
     from deduplication.deduplicator import DeduplicationConfig
     from pm4py.discovery import discover_petri_net_inductive
-    from net import VariantRandomDistributionSampler
+    from dataloaders.net import VariantRandomDistributionSampler
+    from util.rng import RNG
     import torch
 
+    rng = RNG()
+    rng.initialize(42)
 
     path = "data/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/Hospital%20Billing%20-%20Event%20Log.xes"
     # path = "data/6a0a26d2-82d0-4018-b1cd-89afb0e8627f/DomesticDeclarations.xes"
@@ -479,6 +477,7 @@ if __name__ == "__main__":
 
     # Create base dataset with caching enabled
     pm_dataset = ProcessModelDataset(
+        rng=rng,
         log_dataset=log_dataset,
         discovery_methods={"inductive": discover_petri_net_inductive},
         param_grid={
@@ -497,6 +496,7 @@ if __name__ == "__main__":
                     10.0, 5.0
                 ),  # (variant) freq_distribution: defines the reordering of traces/variants on every sampling call, by defining the sampling behavior over index(variant) -> frequency.
                 reconstruct_frequency=True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
+                seed=rng.get_seed(),
             )
         },
         max_models=400,
