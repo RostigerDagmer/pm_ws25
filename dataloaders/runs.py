@@ -17,7 +17,9 @@ from itertools import product
 import numpy as np
 
 from tqdm import tqdm
+from dataloaders.synthetic import SyntheticProcessModelDataset
 from experiments.simulation.noise import inject_noise_trace
+from experiments.simulation.simulate import simulate_batch
 from features.extractors import CompositeFeatureExtractor
 from pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.objects.log.obj import EventLog, Trace
@@ -179,6 +181,13 @@ class TraceSampler(ABC):
         for i in self.range:
             yield self.__getitem__(i)
 
+    def iter_for_model(
+        self, model: ProcessModelDataset.SerializedView.ItemType
+    ) -> Iterator[Trace]:
+        # ignore model by default
+        for i in self.range:
+            yield self.__getitem__(i)
+
     def hash(self) -> str:
         base = {
             "name": str(self.__class__),
@@ -202,6 +211,125 @@ class SimplePerturbedTraceSampler(TraceSampler):
     def __getitem__(self, index: int) -> Trace:
         trace: Trace = self.log[index]
         return inject_noise_trace(trace=trace, seed=self.seed)
+
+
+@dataclass
+class NoiseParams:
+    p_insert: float = 0.1
+    p_delete: float = 0.1
+    p_swap: float = 0.05
+
+
+class SyntheticTraceSampler(TraceSampler):
+    def __init__(
+        self,
+        pm_dataset: SyntheticProcessModelDataset,
+        seed: int,
+        slice: Optional[range] = None,
+        batch_size: int = 128,
+        steps: int = 100,
+        noise: NoiseParams = NoiseParams(),
+        device: str = "cuda",
+    ):
+        self.pm_dataset = pm_dataset
+        self.seed = seed
+        self.slice = slice
+        self.batch_size = batch_size
+        self.steps = steps
+        self.noise = noise
+        self.device = device
+
+        # global "per model" trace count; you can also make this per-model configurable
+        self._traces_per_model = (
+            slice.stop - slice.start if slice is not None else batch_size
+        )
+
+    def __len__(self) -> int:
+        # total number of traces if we wanted global length,
+        # but RunDataset doesn't actually use len(trace_sampler) anymore
+        return self._traces_per_model
+
+    def __iter__(self):
+        # only used in real-log mode; for synthetic we expect iter_for_model
+        raise RuntimeError(
+            "SyntheticTraceSampler must be used via iter_for_model(model)"
+        )
+
+    def hash(self) -> str:
+        base = {
+            "seed": self.seed,
+            "batch_size": self.batch_size,
+            "steps": self.steps,
+            "noise": self.noise.hash(),
+        }
+        return hashlib.sha1(
+            json.dumps(base, sort_keys=True).encode()
+        ).hexdigest()
+
+    def iter_for_model(
+        self, model: SyntheticProcessModelDataset.SerializedView.ItemType
+    ) -> Iterator[Trace]:
+        deser = model.deserialize()  # -> ItemType(stnet, params)
+        stnet = deser.stnet
+        N = stnet.to_tensor()
+
+        pre = N["pre"].to(self.device)
+        post = N["post"].to(self.device)
+        M0 = N["M0"].to(self.device)
+        Mf = N["Mf"].to(self.device)
+        labels = N["labels"]  # list[str]
+
+        # for determinism: derive a per-model seed
+        model_seed = int(model.hash(), 16) ^ self.seed
+
+        # generate traces in batches but expose as individual Trace objects
+        remaining = self._traces_per_model
+        trace_index = 0
+
+        while remaining > 0:
+            bsz = min(self.batch_size, remaining)
+
+            seq_batch = simulate_batch(
+                (pre, post),
+                M0,
+                Mf,
+                labels,
+                steps=self.steps,
+                batch_size=bsz,
+                compact=True,
+                generator=torch.Generator(device=self.device).manual_seed(
+                    model_seed + trace_index
+                ),
+            )  # shape [B, steps'] with integer label ids
+
+            for row in seq_batch:  # row: tensor of label IDs
+                # map back to label strings; assume -1 padding, >=0 real labels
+                events = []
+                for lab_id in row.tolist():
+                    if lab_id < 0:
+                        break
+                    label = labels[lab_id]
+                    ev = {"concept:name": label}
+                    events.append(ev)
+
+                trace = Trace(events, attributes={})  # fill attrs as needed
+
+                # noise injection on the synthetic trace
+                noisy_trace = inject_noise_trace(
+                    trace,
+                    p_insert=self.noise.p_insert,
+                    p_delete=self.noise.p_delete,
+                    p_swap=self.noise.p_swap,
+                    labels=labels,
+                    activity_key="concept:name",
+                    seed=model_seed + trace_index,  # deterministic per-trace
+                )
+
+                yield noisy_trace
+                trace_index += 1
+                remaining -= 1
+                if remaining <= 0:
+                    break
 
 
 class RunDataset(Dataset):
@@ -287,36 +415,40 @@ class RunDataset(Dataset):
                 a for a in AlignerSpec.ALL.value if a.name == aligner
             )
 
-            # MULTI-RUN BENCHMARK LOGIC
-            stats = []
-            last_item = None
+        # MULTI-RUN BENCHMARK LOGIC
+        stats = []
+        last_item = None
 
-            # Loop n times to collect statistics
-            for _ in range(n_runs):
-                with PerfCounter() as pc:
-                    item = aligner(
-                        deser_model.pm, deser_model.im, deser_model.fm, trace
-                    )
-                stats.append(pc.dict())
-                last_item = item
+        # Loop n times to collect statistics
+        for _ in range(n_runs):
+            with PerfCounter() as pc:
+                item = aligner(
+                    deser_model.pm, deser_model.im, deser_model.fm, trace
+                )
+            stats.append(pc.dict())
+            last_item = item
 
-            # Calculate aggregates
-            return RunDataset.SerializedItemType(
-                hash,
-                model,
-                trace,
-                last_item,
-                stats,
-                aligner.name,
-                RunDataset._hash_comb(trace, deser_model),
-            )
+        # Calculate aggregates
+        return RunDataset.SerializedItemType(
+            hash,
+            model,
+            trace,
+            last_item,
+            stats,
+            aligner.name,
+            RunDataset._hash_comb(trace, deser_model),
+        )
 
     def _init_cache(self):
         self._tryload()
-        for trace in tqdm(self.trace_sampler, total=len(self.trace_sampler)):
-            for model in tqdm(
-                self.pm_dataset.serialized, total=len(self.pm_dataset)
-            ):
+        total = (
+            len(self.trace_sampler)
+            * len(self.pm_dataset.serialized)
+            * len(self.aligners)
+        )
+        aligned = tqdm(total=total, desc="Aligned")
+        for model in self.pm_dataset.serialized:
+            for trace in self.trace_sampler.iter_for_model(model):
                 for aligner in self.aligners:
                     h = self._hash_item(
                         model, trace, aligner
@@ -326,6 +458,7 @@ class RunDataset(Dataset):
                     self.items[h] = RunDataset._process_item(
                         h, model, trace, aligner, self.n_runs
                     )
+                    aligned.update(1)
 
         self.index = list(self.items.keys())
         os.makedirs(self.base_path, exist_ok=True)
@@ -355,33 +488,33 @@ class RunDataset(Dataset):
             preparing = tqdm(total=total, desc="Preparing")
             aligned = tqdm(total=0, desc="Aligned")  # dynamic total
 
-            for m, t, a in product(
-                self.pm_dataset.serialized, self.trace_sampler, self.aligners
-            ):
-                item_id = RunDataset._hash_item(m, t, a)
-                if item_id in existing_items:
-                    preparing.update(1)
-                    continue
+            for m in self.pm_dataset.serialized:
+                for t in self.trace_sampler.iter_for_model(m):
+                    for a in self.aligners:
+                        item_id = RunDataset._hash_item(m, t, a)
+                        if item_id in existing_items:
+                            preparing.update(1)
+                            continue
 
-                fut = pool.submit(
-                    RunDataset._process_item,
-                    item_id,
-                    m,
-                    t,
-                    a.name,
-                    self.n_runs,  # pass n_runs to worker
-                )
-                futures.add(fut)
-                aligned.total += 1  # update total dynamically
-                preparing.update(1)
+                        fut = pool.submit(
+                            RunDataset._process_item,
+                            item_id,
+                            m,
+                            t,
+                            a.name,
+                            self.n_runs,  # pass n_runs to worker
+                        )
+                        futures.add(fut)
+                        aligned.total += 1  # update total dynamically
+                        preparing.update(1)
 
-                # **consume any futures that are ready immediately**
-                done = {f for f in futures if f.done()}
-                for d in done:
-                    item = d.result()
-                    new_items[item.item_id] = item
-                    futures.remove(d)
-                    aligned.update(1)
+                        # **consume any futures that are ready immediately**
+                        done = {f for f in futures if f.done()}
+                        for d in done:
+                            item = d.result()
+                            new_items[item.item_id] = item
+                            futures.remove(d)
+                            aligned.update(1)
 
             # after producer loop: drain remaining futures
             for fut in as_completed(futures):

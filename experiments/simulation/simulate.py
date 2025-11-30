@@ -67,18 +67,17 @@ def simulate_batch(
     steps: int = 100,
     batch_size: int = 128,
     compact: bool = True,
+    generator: Optional[torch.Generator] = None,
 ):
     pre, post = net_tensors
     n_trans, n_places = pre.shape
     device = pre.device
 
     labels_t = torch.tensor(list(range(len(labels))), device=device)
-    print(f"labels_t: {labels_t}")
 
     silent_mask = torch.tensor(
         [label == "" for label in labels], dtype=torch.bool, device=device
     )
-    print(f"silent_mask: {silent_mask}")
 
     # broadcast initial marking
     M = M0.expand(batch_size, n_places).clone()
@@ -99,7 +98,9 @@ def simulate_batch(
         probs = torch.nn.functional.normalize(probs, dim=1)
         # sample one transition per batch row
         # torch.multinomial expects non-negative rows that sum to 1
-        t_idx = torch.multinomial(probs, 1).squeeze(1)  # [B]
+        t_idx = torch.multinomial(probs, 1, generator=generator).squeeze(
+            1
+        )  # [B]
 
         # build delta = post - pre
         delta = post[t_idx] - pre[t_idx]

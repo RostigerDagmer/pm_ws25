@@ -3,12 +3,13 @@ import random
 from pm4py.vis import view_petri_net
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.objects.petri_net.utils import petri_utils
-from typing import TypeAlias
+from typing import TypeAlias, Union
 from enum import Enum
 from experiments.simulation.structured_net import StructuredNet
 import logging
 import uuid
 import torch
+from dataclasses import dataclass
 
 logging.getLogger(None)
 logging.basicConfig(level=logging.DEBUG)
@@ -117,35 +118,61 @@ def random_block_structured(
 
 def sample_net(dist_params, depth=0, max_depth=None):
     # depth termination
-    stop = torch.rand(1) < dist_params["p_stop"](depth)
+    dists = {
+        k: make_distribution(v, depth=depth) for k, v in dist_params.items()
+    }
+    stop = torch.rand(1) < dists["p_stop"].sample().item()
     if stop or (max_depth and depth >= max_depth):
-        seq_len = dist_params["seq_len"]().item()
+        seq_len = int(dists["seq_len"].sample().item())
         if seq_len == 0:
             return StructuredNet.tau()
         labels = [f"{uuid.uuid4().hex}" for i in range(seq_len)]
         return seq("seq", labels)
 
-    op = dist_params["op"]().item()
+    op = dists["op"].sample().item()
     left = sample_net(dist_params, depth + 1)
     right = sample_net(dist_params, depth + 1)
 
     return Composition(op).compose(left, right)
 
 
+@dataclass(frozen=True)
+class CategoricalSpec:
+    probs: list[float]
+
+
+@dataclass(frozen=True)
+class PoissonSpec:
+    rate: float
+
+
+@dataclass(frozen=True)
+class BernoulliDepthLinearSpec:
+    base: float
+    slope: float
+
+
+DistParam = Union[CategoricalSpec, PoissonSpec, BernoulliDepthLinearSpec]
+
+
+def make_distribution(spec: DistParam, *, depth=None):
+    if isinstance(spec, CategoricalSpec):
+        return torch.distributions.Categorical(torch.tensor(spec.probs))
+    if isinstance(spec, PoissonSpec):
+        return torch.distributions.Poisson(spec.rate)
+    if isinstance(spec, BernoulliDepthLinearSpec):
+        p = spec.base + spec.slope * depth
+        return torch.distributions.Bernoulli(p)
+    raise TypeError(spec)
+
+
 if __name__ == "__main__":
     dist_params = {
-        "op": lambda: torch.distributions.Categorical(
-            torch.tensor([0.3, 0.3, 0.3, 0.1])
-        ).sample(),
-        "seq_len": lambda: torch.distributions.Poisson(4).sample().int(),
-        "p_stop": lambda d: torch.distributions.Bernoulli(
-            0.2 + 0.1 * d
-        ).sample(),  # deeper → likelier to stop
+        "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
+        "seq_len": PoissonSpec(4),
+        "p_stop": BernoulliDepthLinearSpec(base=0.1, slope=0.1),
     }
-    # stnet = random_block_structured(
-    #     num_blocks=3, xor_prob=0.3, and_prob=0.3, loop_prob=0.3, p_depth=0.05, max_depth=3
-    # )
-    stnet = sample_net(dist_params)
+    stnet = sample_net(dist_params, max_depth=5)
     view_petri_net(stnet.net, stnet.im, stnet.fm)
 
 
