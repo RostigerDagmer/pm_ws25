@@ -433,7 +433,7 @@ class RunDataset(
                     item_id,
                     m,
                     t,
-                    a.name,
+                    a,
                     self.n_runs,  # pass n_runs to worker
                 )
                 futures.add(fut)
