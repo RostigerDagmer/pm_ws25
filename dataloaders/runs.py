@@ -1,6 +1,7 @@
 from collections.abc import Sequence
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from enum import Enum
+from io import BufferedWriter
 import logging
 import marshal
 import multiprocessing
@@ -25,13 +26,17 @@ import cProfile
 import pstats
 from dataclasses import dataclass
 
-from dataloaders.net import ProcessModelDataset, SerializedView
+from dataloaders.net import ProcessModelDataset
+from dataloaders.serializable import (
+    Deserializable,
+    Serializable,
+    WithSerializedView,
+)
 from dataloaders.unique_net import UniqueProcessModelDataset
 from pm4py.algo.conformance.alignments.petri_net.algorithm import (
     Variants,
     apply,
 )
-from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
 from pm4py.util import typing
 from sklearn.ensemble import GradientBoostingClassifier
 
@@ -55,9 +60,13 @@ class Aligner(ABC):
 
 
 class PM4pyAligner(Aligner):
-    def __init__(self, variant: Variants):
-        super().__init__(name=str(variant))
-        self.variant = variant
+    def __init__(self, variant_name: str):
+        super().__init__(name=variant_name)
+        self.variant_name = variant_name
+
+    @property
+    def variant(self) -> Variants:
+        return Variants[self.variant_name]
 
     def __call__(self, pm: PetriNet, im: Marking, fm: Marking, trace: Trace):
         return apply(
@@ -66,29 +75,29 @@ class PM4pyAligner(Aligner):
             im,
             fm,
             None,
-            variant=self.variant,
+            variant=self.variant,  # Enum member; its .value is the module
         )
 
     def hash(self) -> str:
-        base = {"variant": str(self.variant.value)}
+        base = {"variant": f"{self.variant_name}"}
         return hashlib.sha1(
             json.dumps(base, sort_keys=True).encode()
         ).hexdigest()
 
 
 class AlignerSpec(Enum):
-    ALL = list(map(lambda v: PM4pyAligner(v), Variants))
+    ALL = list(map(lambda v: PM4pyAligner(v.name), Variants))
     A_STAR = [
-        PM4pyAligner(Variants.VERSION_DIJKSTRA_NO_HEURISTICS),
-        PM4pyAligner(Variants.VERSION_REMAINING_TRACE),
-        PM4pyAligner(Variants.VERSION_REQUIRED_ACTIVITIES),
-        PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR),
-        PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR_ILP),
+        PM4pyAligner("VERSION_DIJKSTRA_NO_HEURISTICS"),
+        PM4pyAligner("VERSION_REMAINING_TRACE"),
+        PM4pyAligner("VERSION_REQUIRED_ACTIVITIES"),
+        PM4pyAligner("VERSION_STATE_EQUATION_A_STAR"),
+        PM4pyAligner("VERSION_STATE_EQUATION_A_STAR_ILP"),
         # PM4pyAligner(Variants.VERSION_INCREMENTAL_A_STAR),
     ]
 
 
-class PerfCounter:
+class PerfCounter(Serializable[dict[str, Any]]):
     def __init__(self):
         self._profiler = cProfile.Profile()
         self.duration: float | None = None
@@ -135,14 +144,17 @@ class PerfCounter:
             "lp_time": self.lp_time,
         }
 
-    def dict(self) -> dict[str, Any]:
+    def _dict(self) -> dict[str, Any]:
         return {
             "duration": self.duration,
             "stats": marshal.dumps(self.stats.stats) if self.stats else None,
         }
 
+    def serialize(self) -> dict[str, Any]:
+        return self._dict()
+
     @staticmethod
-    def from_dict(d) -> "PerfCounter":
+    def from_dict(d: dict[str, Any]) -> "PerfCounter":
         if isinstance(d, PerfCounter):
             logging.warning(
                 "PerfCounter.from_dict called on PerfCounter instance"
@@ -186,7 +198,7 @@ class TraceSampler(ABC):
         base = {
             "name": str(self.__class__),
             "ds": str(self.source_path),
-            "range": (self.range.start, self.range.stop, self.range.step),
+            "seed": self.seed,
         }
         return hashlib.sha1(
             json.dumps(base, sort_keys=True).encode()
@@ -207,49 +219,67 @@ class SimplePerturbedTraceSampler(TraceSampler):
         return inject_noise_trace(trace=trace, seed=self.seed)
 
 
-class RunDataset(Dataset):
+@dataclass
+class ItemType(Serializable["SerializedItemType"]):
+    item_id: str
+    model: ProcessModelDataset.ItemType
+    trace: Trace
+    item: Union[typing.AlignmentResult, typing.ListAlignments]
+    perf: list[PerfCounter]
+    algo: str
+    comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
 
-    @dataclass
-    class ItemType:
-        item_id: str
-        model: ProcessModelDataset.ItemType
-        trace: Trace
-        item: Union[typing.AlignmentResult, typing.ListAlignments]
-        perf: list[PerfCounter]
-        algo: str
-        comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
+    def serialize(self) -> "SerializedItemType":
+        return SerializedItemType(
+            self.item_id,
+            self.model.serialize(),
+            self.trace,
+            self.item,
+            [p.serialize() for p in self.perf],
+            self.algo,
+            self.comb_id,
+        )
 
-    @dataclass
-    class SerializedItemType:
-        item_id: str
-        model: SerializedView.ItemType
-        trace: Trace
-        item: Union[typing.AlignmentResult, typing.ListAlignments]
-        perf: list[dict[str, Any]]
-        algo: str
-        comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
 
-        def deserialize(self) -> "RunDataset.ItemType":
-            return RunDataset.ItemType(
-                self.item_id,
-                self.model.deserialize(),
-                self.trace,
-                self.item,
-                [PerfCounter.from_dict(p) for p in self.perf],
-                self.algo,
-                self.comb_id,
-            )
+@dataclass
+class SerializedItemType(Deserializable[ItemType]):
+    item_id: str
+    model: ProcessModelDataset.SerializedItemType
+    trace: Trace
+    item: Union[typing.AlignmentResult, typing.ListAlignments]
+    perf: list[dict[str, Any]]
+    algo: str
+    comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
+
+    def deserialize(self) -> ItemType:
+        return ItemType(
+            self.item_id,
+            self.model.deserialize(),
+            self.trace,
+            self.item,
+            [PerfCounter.from_dict(p) for p in self.perf],
+            self.algo,
+            self.comb_id,
+        )
+
+
+class RunDataset(
+    Dataset[ItemType], WithSerializedView[ItemType, SerializedItemType]
+):
 
     def __init__(
         self,
         rng: RNG,
         base_path: Path,
-        process_model_dataset: Union[ProcessModelDataset, UniqueProcessModelDataset],
+        process_model_dataset: Union[
+            ProcessModelDataset, UniqueProcessModelDataset
+        ],
         aligners: Sequence[Aligner],
         trace_sampler: TraceSampler.__class__,
         n_runs: int = 1,  # Number of runs per trace/model pair
         n_workers: int = 0,
         slice: Optional[range] = None,
+        write_batch_size: int = 100,
     ):
         self.base_path = base_path
         self.pm_dataset = process_model_dataset
@@ -261,60 +291,76 @@ class RunDataset(Dataset):
         self.items: dict[str, "RunDataset.SerializedItemType"] = {}
         self.index: list[str] = []
         self.n_workers = n_workers
+        self.write_batch_size = write_batch_size
         if n_workers != 1:
             self._init_cache_mp()
         else:
             self._init_cache()
 
+    def __iter__(self) -> Iterator[ItemType]:
+        for i in range(len(self)):
+            yield self[i]
+
+    @staticmethod
+    def _flush_batch(
+        f: BufferedWriter, batch: dict[str, "RunDataset.SerializedItemType"]
+    ):
+        pickle.dump(batch, f, protocol=pickle.HIGHEST_PROTOCOL)
+        f.flush()
+        os.fsync(f.fileno())
+
     def _tryload(self):
         path = self.save_path()
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                self.items = pickle.load(f)
-                self.index = list(self.items.keys())
+        if not os.path.exists(path):
+            return
+        self.items = {}
+
+        with open(path, "rb") as f:
+            while True:
+                try:
+                    chunk = pickle.load(f)  # each chunk = dict of N items
+                    self.items.update(chunk)
+                except EOFError:
+                    break
+
+        self.index = list(self.items.keys())
 
     def save_path(self):
-        return self.base_path / Path(f"{self._hash_config()}.pkl")
+        return self.base_path / Path(f"{self.hash()}.pkl")
 
     @staticmethod
     def _process_item(
         hash: str,
-        model: SerializedView.ItemType,
+        model: ProcessModelDataset.SerializedItemType,
         trace: Trace,
-        aligner: Aligner | str,
+        aligner: Aligner,
         n_runs: int = 1,
-    ) -> "RunDataset.SerializedItemType":
+    ) -> SerializedItemType:
 
         deser_model = model.deserialize()
-        if isinstance(aligner, str):
-            # reconstruct aligner from name (in the mp case)
-            aligner = next(
-                a for a in AlignerSpec.ALL.value if a.name == aligner
-            )
+        # MULTI-RUN BENCHMARK LOGIC
+        stats: list[dict[str, Any]] = []
+        last_item = None
 
-            # MULTI-RUN BENCHMARK LOGIC
-            stats = []
-            last_item = None
+        # Loop n times to collect statistics
+        for _ in range(n_runs):
+            with PerfCounter() as pc:
+                item = aligner(
+                    deser_model.pm, deser_model.im, deser_model.fm, trace
+                )
+            stats.append(pc.serialize())
+            last_item = item
 
-            # Loop n times to collect statistics
-            for _ in range(n_runs):
-                with PerfCounter() as pc:
-                    item = aligner(
-                        deser_model.pm, deser_model.im, deser_model.fm, trace
-                    )
-                stats.append(pc.dict())
-                last_item = item
-
-            # Calculate aggregates
-            return RunDataset.SerializedItemType(
-                hash,
-                model,
-                trace,
-                last_item,
-                stats,
-                aligner.name,
-                RunDataset._hash_comb(trace, deser_model),
-            )
+        # Calculate aggregates
+        return SerializedItemType(
+            hash,
+            model,
+            trace,
+            last_item,
+            stats,
+            aligner.name,
+            RunDataset._hash_comb(trace, deser_model),
+        )
 
     def _init_cache(self):
         self._tryload()
@@ -342,6 +388,8 @@ class RunDataset(Dataset):
 
     def _init_cache_mp(self):
         self._tryload()
+        logging.info("Initializing run dataset cache (multiprocessing)...")
+        logging.info("Current number of items: %d", len(self.items))
         total = (
             len(self.trace_sampler)
             * len(self.pm_dataset.serialized)
@@ -358,11 +406,19 @@ class RunDataset(Dataset):
         )
 
         existing_items = self.items
-        new_items = {}
-        with ProcessPoolExecutor(max_workers=num_workers) as pool:
-            futures = set()
+        new_items: dict[str, RunDataset.SerializedItemType] = {}
+        batch: dict[str, RunDataset.SerializedItemType] = {}
+        path = self.save_path()
+        os.makedirs(path.parent, exist_ok=True)
+
+        with (
+            ProcessPoolExecutor(max_workers=num_workers) as pool,
+            open(path, "ab") as f,
+        ):
+            futures: set[Future[RunDataset.SerializedItemType]] = set()
             preparing = tqdm(total=total, desc="Preparing")
             aligned = tqdm(total=0, desc="Aligned")  # dynamic total
+            written = tqdm(total=0, desc="Written")  # dynamic total
 
             for m, t, a in product(
                 self.pm_dataset.serialized, self.trace_sampler, self.aligners
@@ -382,37 +438,49 @@ class RunDataset(Dataset):
                 )
                 futures.add(fut)
                 aligned.total += 1  # update total dynamically
+                written.total += 1  # update total dynamically
                 preparing.update(1)
 
                 # **consume any futures that are ready immediately**
-                done = {f for f in futures if f.done()}
+                done = {fut for fut in futures if fut.done()}
                 for d in done:
                     item = d.result()
                     new_items[item.item_id] = item
+                    batch[item.item_id] = item
                     futures.remove(d)
                     aligned.update(1)
 
+                    if len(batch) >= self.write_batch_size:
+                        RunDataset._flush_batch(f, batch)
+                        written.update(len(batch))
+                        batch.clear()
+
             # after producer loop: drain remaining futures
             for fut in as_completed(futures):
-                item: RunDataset.ItemType = fut.result()
+                item: RunDataset.SerializedItemType = fut.result()
                 new_items[item.item_id] = item
+                batch[item.item_id] = item
                 aligned.update(1)
 
+                if len(batch) >= self.write_batch_size:
+                    RunDataset._flush_batch(f, batch)
+                    written.update(len(batch))
+                    batch.clear()
+
+            # final flush
+            if batch:
+                RunDataset._flush_batch(f, batch)
         # finalize
         self.items.update(new_items)
         self.index = list(self.items.keys())
 
-        path = self.save_path()
-        os.makedirs(path.parent, exist_ok=True)
-
-        with open(path, "wb") as f:
-            pickle.dump(self.items, f)
-
-    def _hash_config(self):
+    def hash(self):
         base: dict[str, str | list[str] | int] = {
             "model_ds_hash": self.pm_dataset.hash(),
             "trace_sampler_hash": self.trace_sampler.hash(),
-            "aligner_hash": [a.hash() for a in self.aligners],
+            "aligner_hash": [
+                a.hash() for a in sorted(self.aligners, key=lambda x: x.name)
+            ],
             "n_runs": self.n_runs,  # Hash must include n_runs to invalidate cache if changed
         }
         return hashlib.sha1(
@@ -429,7 +497,7 @@ class RunDataset(Dataset):
 
     @staticmethod
     def _hash_item(
-        model: SerializedView.ItemType,
+        model: ProcessModelDataset.SerializedItemType,
         trace: Trace,
         aligner: Aligner,
     ) -> str:
@@ -452,11 +520,12 @@ class RunDataset(Dataset):
             json.dumps(item, sort_keys=True).encode()
         ).hexdigest()
 
+    def _get_serialized(self, idx: int) -> "RunDataset.SerializedItemType":
+        key = self.index[idx]
+        return self.items[key]
+
     def __getitem__(self, index: int) -> "RunDataset.ItemType":
-        key = self.index[index]
-        # deserialize
-        item = self.items[key].deserialize()
-        return item
+        return self._get_serialized(index).deserialize()
 
 
 def get_stats(stats: list[PerfCounter]) -> dict[str, float]:
@@ -490,6 +559,7 @@ if __name__ == "__main__":
     from dataloaders.net import VariantRandomDistributionSampler
     from dataloaders.xes_log import XESEventLogDataset
     from pm4py.discovery import discover_petri_net_inductive
+    from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
     import matplotlib.pyplot as plt
     import pandas as pd
 

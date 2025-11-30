@@ -7,7 +7,7 @@ from dataloaders.xes_log import XESEventLogDataset
 from collections.abc import Sequence
 
 
-def _normalize_log_input(subset):
+def _normalize_log_input(subset) -> pd.DataFrame | EventLog | Trace:
     """
     Normalize 'subset' to a pm4py-compatible pandas DataFrame.
     Supports:

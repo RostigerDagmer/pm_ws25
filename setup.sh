@@ -49,7 +49,7 @@ python -m pip install --upgrade pip setuptools wheel
 
 echo "=== [3/6] Installing PM4Py dependencies ==="
 if [ -f "pm4py/setup.py" ]; then
-  pip install -e ./pm4py
+  pip install -e ./pm4py --config-settings editable_mode=strict
 else
   echo "⚠️  No PM4Py source found. Did you forget to clone --recursive or initialize submodules afterwards?"
 fi

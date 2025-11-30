@@ -14,7 +14,8 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from datetime import datetime
 
-from dataloaders.net import ProcessModelDataset, SerializedView
+from dataloaders.net import ProcessModelDataset
+from dataloaders.serializable import WithSerializedView
 from deduplication.deduplicator import (
     PetriNetDeduplicator,
     DeduplicationConfig,
@@ -31,7 +32,12 @@ import os
 logging.basicConfig(level=logging.INFO)
 
 
-class UniqueProcessModelDataset(Dataset):
+class UniqueProcessModelDataset(
+    Dataset[ProcessModelDataset.ItemType],
+    WithSerializedView[
+        ProcessModelDataset.ItemType, ProcessModelDataset.SerializedItemType
+    ],
+):
     """
     Dataset wrapper that deduplicates a ProcessModelDataset.
 
@@ -237,7 +243,9 @@ class UniqueProcessModelDataset(Dataset):
         for base_idx in self.unique_indices:
             yield self.base_dataset[base_idx]
 
-    def _get_serialized(self, idx: int) -> SerializedView.ItemType:
+    def _get_serialized(
+        self, idx: int
+    ) -> ProcessModelDataset.SerializedItemType:
         """
         Get serialized item for unique dataset.
         Maps unique index to base dataset index.
@@ -247,12 +255,7 @@ class UniqueProcessModelDataset(Dataset):
                 f"Index {idx} out of range for dataset of size {len(self)}"
             )
         base_idx = self.unique_indices[idx]
-        return self.base_dataset._get_serialized(base_idx)
-
-    @property
-    def serialized(self):
-        """Access serialized view of unique items."""
-        return SerializedView(self, self._get_serialized)
+        return self.base_dataset.serialized[base_idx]
 
     @property
     def log(self):
