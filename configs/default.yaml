@@ -21,10 +21,29 @@ discovery:
       args:
         loc: 10.0
         scale: 4.0
+  
+deduplication:
+  config:
+    # Stage 1: Label-based prefilter (similarity, higher = more similar)
+    label_similarity_threshold: 0.95
+
+    # Stage 2: Combined edge+feature comparison (similarity, higher = more similar)
+    combined_similarity_threshold: 0.95
+
+    # Enable/disable stages
+    enable_stage1: True
+    enable_stage2: True
+
+    verbose: True
+  force_recompute: False # whether to force recomputation of deduplication even if results exist
 
 alignment:
   runs: 5 # number of alignment runs per model x trace combination
   workers: 0 # number of parallel workers (0 = all threads)
+  write_batch_size: 100 # number of alignments to buffer before writing to disk
+  slice: # optional slice of traces to align (for testing/debugging)
+    from: 0
+    to: 50
   variants: A_STAR # either a AlignerSpec variant or a list of pm4py.algo.conformance.alignments.variants.Variants variants
   sampler:
     type: SimplePerturbedTraceSampler # class name of the trace sampler used during alignment runs

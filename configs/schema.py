@@ -1,4 +1,4 @@
-from pydantic import BaseModel, validator, Field
+from pydantic import BaseModel, field_validator, Field, ValidationInfo
 from typing import Dict, Any, Optional, Union, List, Sequence
 from dataloaders.net import DISCOVERY_METHODS
 import importlib
@@ -7,6 +7,7 @@ from dataloaders.runs import AlignerSpec, Aligner, PM4pyAligner, TraceSampler
 from dataloaders.net import VariantRandomDistributionSampler
 from pm4py.algo.conformance.alignments.petri_net.algorithm import Variants
 from util.rng import RNG
+from deduplication.deduplicator import DeduplicationConfig
 
 
 class DistributionConfig(BaseModel):
@@ -32,9 +33,12 @@ class SamplerConfig(BaseModel):
     len_distribution: DistributionConfig
     freq_distribution: DistributionConfig
 
-    @validator("max_len_subset")
-    def len_check(cls, v, values):
-        if "min_len_subset" in values and v < values["min_len_subset"]:
+    @field_validator("max_len_subset")
+    def len_check(cls, v, values: ValidationInfo):
+        if (
+            "min_len_subset" in values.data
+            and v < values.data["min_len_subset"]
+        ):
             raise ValueError("max_len_subset must be >= min_len_subset")
         return v
 
@@ -58,7 +62,7 @@ class DiscoveryConfig(BaseModel):
     params: Dict[str, Any]
     sampler: SamplerConfig
 
-    @validator("methods")
+    @field_validator("methods")
     def validate_methods(cls, v):
         # Preset name?
         if isinstance(v, str) and v in DISCOVERY_METHODS.__members__:
@@ -101,14 +105,27 @@ class TraceSamplerConfig(BaseModel):
         return cls
 
 
+class SliceType(BaseModel):
+    from_: int = Field(alias="from", ge=0)
+    to: int = Field(gt=0)
+
+    @field_validator("to")
+    def check_to(cls, v, values: ValidationInfo):
+        if "from_" in values.data and v <= values.data["from_"]:
+            raise ValueError("'to' must be greater than 'from'")
+        return v
+
+
 class AlignmentConfig(BaseModel):
     runs: int = Field(gt=0)
     workers: int = Field(ge=0)
+    write_batch_size: int = Field(gt=0)
+    slice: Optional[SliceType] = None
     variants: Union[str, list[str]]
     sampler: TraceSamplerConfig
 
-    @validator("variants", pre=True)
-    def validate_variants(cls, v):
+    @field_validator("variants")
+    def validate_variants(cls, v: Any):
         if not isinstance(v, (list, str)):
             raise ValueError("Alignment variants must be a list or string")
         if isinstance(v, str):
@@ -129,8 +146,20 @@ class AlignmentConfig(BaseModel):
         return [PM4pyAligner(Variants[variant]) for variant in self.variants]
 
 
+class DedupeConfig(BaseModel):
+    config: DeduplicationConfig = DeduplicationConfig()
+    force_recompute: bool = False
+
+    @field_validator("config")
+    def validate_config(cls, v: dict[str, Any] | DeduplicationConfig):
+        if isinstance(v, dict):
+            return DeduplicationConfig(**v)
+        return v
+
+
 class PipelineConfig(BaseModel):
     seed: int = 1
     log_path: Optional[str] = None
     discovery: DiscoveryConfig
+    deduplication: Optional[DedupeConfig] = None
     alignment: AlignmentConfig

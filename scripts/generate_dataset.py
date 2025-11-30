@@ -3,6 +3,7 @@ import yaml
 from pathlib import Path
 from configs.schema import PipelineConfig
 from dataloaders.net import ProcessModelDataset
+from dataloaders.unique_net import UniqueProcessModelDataset
 from dataloaders.util import build_dataset
 from dataloaders.runs import RunDataset
 from util.rng import RNG
@@ -26,6 +27,13 @@ def build_pipeline(cfg: PipelineConfig, rng: RNG) -> RunDataset:
         num_workers=cfg.discovery.workers or cfg.alignment.workers,
     )
 
+    if cfg.deduplication:
+        pm_dataset = UniqueProcessModelDataset(
+            base_dataset=pm_dataset,
+            dedup_config=cfg.deduplication.config,
+            force_recompute=cfg.deduplication.force_recompute,
+        )
+
     return RunDataset(
         rng=rng,
         base_path=Path("data/runs"),
@@ -34,7 +42,12 @@ def build_pipeline(cfg: PipelineConfig, rng: RNG) -> RunDataset:
         trace_sampler=cfg.alignment.sampler.build(),
         n_runs=cfg.alignment.runs,
         n_workers=cfg.alignment.workers,
-        slice=range(0, 50),
+        slice=(
+            range(cfg.alignment.slice.from_, cfg.alignment.slice.to)
+            if cfg.alignment.slice
+            else None
+        ),
+        write_batch_size=cfg.alignment.write_batch_size,
     )
 
 
