@@ -5,3 +5,4 @@ pulp-cli
 jupyterlab
 aiohttp
 torch
+pydantic

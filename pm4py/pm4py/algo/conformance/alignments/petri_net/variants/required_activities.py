@@ -24,9 +24,10 @@ Remaining Log Moves Heuristic Variant
 import heapq
 import sys
 import time
+from collections import defaultdict, deque, Counter
 from copy import copy
 from enum import Enum
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, Set
 
 from pm4py.objects.log import obj as log_implementation
 from pm4py.objects.log.obj import Trace
@@ -47,6 +48,58 @@ from pm4py.util.constants import PARAMETER_CONSTANT_ACTIVITY_KEY
 from pm4py.util.xes_constants import DEFAULT_NAME_KEY
 
 
+def _precompute_required_model_labels(sync_net, final_marking) -> Dict[Any, Set[str]]:
+    """Backward collection of visible model labels reachable from each place.
+
+    For each place in the synchronous product net, compute a (conservative)
+    set of visible model activity labels that may be required to reach the
+    final marking from that place.
+    """
+    place_to_required: Dict[Any, Set[str]] = defaultdict(set)
+
+    # For backward traversal, we need: place -> incoming transitions.
+    incoming_transitions: Dict[Any, Set[Any]] = defaultdict(set)
+    for t in sync_net.transitions:
+        for arc in t.out_arcs:
+            incoming_transitions[arc.target].add(t)
+
+    queue = deque(final_marking.keys())
+    visited_places: Set[Any] = set(final_marking.keys())
+
+    while queue:
+        place = queue.popleft()
+        for t in incoming_transitions.get(place, ()):  # transitions producing 'place'
+            # identify the model-side label
+            if isinstance(t.label, tuple) and len(t.label) == 2:
+                model_label = t.label[1]
+            else:
+                model_label = t.label
+
+            # Add label if visible
+            if model_label is not None:
+                place_to_required[place].add(model_label)
+
+            # Propagate required labels back to all preset places
+            for arc in t.in_arcs:
+                p_in = arc.source
+                if place_to_required[place] - place_to_required[p_in]:
+                    place_to_required[p_in] |= place_to_required[place]
+                    if p_in not in visited_places:
+                        visited_places.add(p_in)
+                        queue.append(p_in)
+
+    return place_to_required
+
+
+class RequiredActivitiesMode(Enum):
+    """Select which required-activities heuristic design to use."""
+
+    SIMPLE = "simple"  # current minimal implementation
+    LABEL_REACHABILITY = "label_reachability"  # depth-based
+    BITSET = "bitset"  # pattern-based approximation
+    STRUCTURAL_SHORTEST_PATH = "structural_shortest_path"  # place-level shortest path
+
+
 class Parameters(Enum):
     PARAM_TRACE_COST_FUNCTION = "trace_cost_function"
     PARAM_MODEL_COST_FUNCTION = "model_cost_function"
@@ -57,6 +110,8 @@ class Parameters(Enum):
     TRACE_NET_COST_AWARE_CONSTR_FUNCTION = "trace_net_cost_aware_constr_function"
     PARAM_MAX_ALIGN_TIME_TRACE = "max_align_time_trace"
     ACTIVITY_KEY = PARAMETER_CONSTANT_ACTIVITY_KEY
+    # which heuristic flavour to use inside this variant
+    REQUIRED_ACTIVITIES_MODE = "required_activities_mode"
 
 PARAM_TRACE_COST_FUNCTION = Parameters.PARAM_TRACE_COST_FUNCTION.value
 PARAM_MODEL_COST_FUNCTION = Parameters.PARAM_MODEL_COST_FUNCTION.value
@@ -114,6 +169,7 @@ def apply(trace: Trace, petri_net: PetriNet, initial_marking: Marking, final_mar
     trace_net_cost_aware_constr_function = exec_utils.get_param_value(Parameters.TRACE_NET_COST_AWARE_CONSTR_FUNCTION,
                                                                       parameters, construct_trace_net_cost_aware)
 
+
     if trace_cost_function is None:
         trace_cost_function = list(
             map(lambda e: utils.STD_MODEL_LOG_MOVE_COST, trace)
@@ -147,6 +203,8 @@ def apply(trace: Trace, petri_net: PetriNet, initial_marking: Marking, final_mar
             trace, trace_cost_function, activity_key=activity_key
         )
 
+    trace_labels = [e[activity_key] for e in trace]
+
     alignment = apply_trace_net(
         petri_net,
         initial_marking,
@@ -154,6 +212,7 @@ def apply(trace: Trace, petri_net: PetriNet, initial_marking: Marking, final_mar
         trace_net,
         trace_im,
         trace_fm,
+        trace_labels,
         parameters,
     )
     return alignment
@@ -302,6 +361,7 @@ def apply_trace_net(
     trace_net,
     trace_im,
     trace_fm,
+    trace_labels,
     parameters=None,
 ):
     """
@@ -309,6 +369,7 @@ def apply_trace_net(
 
         Parameters
         ----------
+        trace_labels
         trace: :class:`list` input trace, assumed to be a list of events (i.e. the code will use the activity key
         to get the attributes)
         petri_net: :class:`pm4py.objects.petri.net.PetriNet` the Petri net to use in the alignment
@@ -330,6 +391,7 @@ def apply_trace_net(
 
     if parameters is None:
         parameters = {}
+
 
     ret_tuple_as_trans_desc = exec_utils.get_param_value(
         Parameters.PARAM_ALIGNMENT_RESULT_IS_SYNC_PROD_AWARE, parameters, False
@@ -400,8 +462,6 @@ def apply_trace_net(
         Parameters.PARAM_MAX_ALIGN_TIME_TRACE, parameters, sys.maxsize
     )
 
-    # trace length for remaining\-trace heuristic
-    trace_len = len(trace_cost_function) if trace_cost_function is not None else 0
 
     return apply_sync_prod(
         sync_prod,
@@ -409,9 +469,9 @@ def apply_trace_net(
         sync_final_marking,
         cost_function,
         utils.SKIP,
+        trace_labels,
         ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
         max_align_time_trace=max_align_time_trace,
-        trace_len=trace_len,
         log_costs=log_costs,
     )
 
@@ -422,10 +482,11 @@ def apply_sync_prod(
     final_marking,
     cost_function,
     skip,
+    trace_labels,
     ret_tuple_as_trans_desc=False,
     max_align_time_trace=sys.maxsize,
-    trace_len=0,
     log_costs=None,
+    parameters=None,
 ):
     return __search(
         sync_prod,
@@ -435,55 +496,226 @@ def apply_sync_prod(
         skip,
         ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
         max_align_time_trace=max_align_time_trace,
-        trace_len=trace_len,
+        trace_labels=trace_labels,
         log_costs=log_costs,
+        parameters=parameters,
     )
 
-def _compute_place_remaining_dist(
-    sync_net,
-    trace_len: int,
-    log_costs: Optional[list] = None,
-) -> Dict[Any, float]:
-    """
-    Precompute, for each place in the sync net, the heuristic estimate of the
-    remaining alignment cost (remaining trace events * heuristic_weight).
-    """
-    # use unit cost 1 if no log costs, otherwise min log cost
-    if log_costs:
-        heuristic_weight = min(log_costs)
-    else:
-        heuristic_weight = 1
 
-    place_to_remaining_dist: Dict[Any, float] = {}
+# --- Heuristic strategy helpers ------------------------------------------------
 
-    place_to_trace_index = utils.__build_place_to_trace_index(
-        sync_net,
-        trace_len=trace_len,
-        infer_source_sink=True,
-    )
 
-    # for each place, compute remaining distance (heuristic)
-    for place, idx in place_to_trace_index.items():
-        remaining = max(0, trace_len - idx)
-        dist = remaining * heuristic_weight
-        place_to_remaining_dist[place] = dist
-
-    return place_to_remaining_dist
-
-def _heuristic_from_marking(
+def _heuristic_simple_required_activities(
     marking: Marking,
-    place_to_remaining_dist: Dict[Any, float],
+    trace_labels: list,
+    trace_len: int,
+    place_to_trace_index: Dict[Any, int],
+    place_to_required_labels: Dict[Any, Set[str]],
+    heuristic_weight: float,
 ) -> float:
+    """Current minimal required-activities heuristic.
+
+    This is the original simple design: compare the set of model-required labels
+    for the current marking with the multiset of remaining trace labels and
+    derive a lower bound on non-sync moves.
     """
-    Compute the heuristic value for a given marking as the maximum
-    remaining distance over all places in the marking.
-    """
-    h_vals = [
-        place_to_remaining_dist[p]
+    if trace_len == 0 or not trace_labels:
+        return 0.0
+
+    # 1) Infer current trace index from the marking
+    idx_candidates = [
+        place_to_trace_index[p]
         for p in marking
-        if p in place_to_remaining_dist
+        if p in place_to_trace_index
     ]
-    return max(h_vals) if h_vals else 0.0
+    if idx_candidates:
+        trace_idx = max(idx_candidates)
+    else:
+        # Safe fallback: assume we are at start (worst case: many events remain)
+        trace_idx = 0
+
+    if trace_idx >= trace_len:
+        return 0.0
+
+    # 2) Remaining trace labels
+    remaining_trace = trace_labels[trace_idx:trace_len]
+    if not remaining_trace:
+        return 0.0
+
+    remaining_counts = Counter(remaining_trace)
+    remaining_label_set = set(remaining_counts.keys())
+
+    # 3) Aggregate required model-side labels from all places in the marking
+    required_labels: Set[str] = set()
+    for p in marking:
+        labels = place_to_required_labels.get(p)
+        if labels:
+            required_labels |= labels
+
+    if not required_labels and not remaining_label_set:
+        return 0.0
+
+    # 4) Lower bound on model-only moves: any required label not present
+    # in the remaining trace
+    lb_model = sum(1 for a in required_labels if a not in remaining_label_set)
+
+    # 5) Lower bound on log-only moves: any remaining trace event whose
+    # label is not required by the model
+    lb_log = 0
+    for lbl, cnt in remaining_counts.items():
+        if lbl not in required_labels:
+            lb_log += cnt
+
+    # 6) Use the maximum of the per-side lower bounds and scale by weight
+    lb_moves = max(lb_model, lb_log)
+    return float(lb_moves)
+
+
+def _precompute_label_depths(sync_net, final_marking) -> Dict[Any, Dict[str, int]]:
+    """Backward label-reachability with depth per place/label."""
+    incoming_transitions: Dict[Any, Set[Any]] = defaultdict(set)
+    for t in sync_net.transitions:
+        for arc in t.out_arcs:
+            incoming_transitions[arc.target].add(t)
+
+    place_label_depth: Dict[Any, Dict[str, int]] = defaultdict(dict)
+    queue = deque(final_marking.keys())
+    visited: Set[Any] = set(final_marking.keys())
+
+    # Depth here is the number of visible model steps remaining until final
+    while queue:
+        place = queue.popleft()
+        for t in incoming_transitions.get(place, ()):  # transitions producing 'place'
+            # identify model-side label
+            if isinstance(t.label, tuple) and len(t.label) == 2:
+                model_label = t.label[1]
+            else:
+                model_label = t.label
+
+            # depth contributed by this transition
+            add_cost = 1 if model_label is not None else 0
+
+            # For successors, take their label depths and add cost
+            succ_depths = place_label_depth.get(place, {})
+
+            for arc in t.in_arcs:
+                p_in = arc.source
+                by_label = place_label_depth[p_in]
+
+                # propagate all successor labels
+                for lbl, d in succ_depths.items():
+                    nd = d + add_cost
+                    if lbl not in by_label or nd < by_label[lbl]:
+                        by_label[lbl] = nd
+
+                # mark this label itself reachable in one step if visible
+                if model_label is not None:
+                    if model_label not in by_label or add_cost < by_label[model_label]:
+                        by_label[model_label] = add_cost
+
+                if p_in not in visited:
+                    visited.add(p_in)
+                    queue.append(p_in)
+
+    return place_label_depth
+
+
+def _precompute_bitset_structures(
+    sync_net,
+    final_marking,
+    trace_labels: list,
+) -> (Dict[Any, int], Dict[int, int]):
+    """Precompute bitsets for required labels per place and per trace suffix."""
+    # 1) Build a label universe from model and trace
+    label_to_bit: Dict[str, int] = {}
+
+    def _ensure_bit(lbl: Optional[str]) -> None:
+        if lbl is None:
+            return
+        if lbl not in label_to_bit:
+            label_to_bit[lbl] = len(label_to_bit)
+
+    # collect from model (sync net transitions)
+    for t in sync_net.transitions:
+        if isinstance(t.label, tuple) and len(t.label) == 2:
+            _ensure_bit(t.label[1])
+        else:
+            _ensure_bit(t.label)
+
+    # collect from trace
+    for lbl in trace_labels:
+        _ensure_bit(lbl)
+
+    # 2) Precompute required label sets per place (like _precompute_required_model_labels)
+    place_to_required: Dict[Any, Set[str]] = _precompute_required_model_labels(sync_net, final_marking)
+
+    place_req_mask: Dict[Any, int] = {}
+    for p, labels in place_to_required.items():
+        mask = 0
+        for lbl in labels:
+            bit = label_to_bit.get(lbl)
+            if bit is not None:
+                mask |= 1 << bit
+        place_req_mask[p] = mask
+
+    # 3) Precompute suffix masks TraceSuffix(i)
+    suffix_masks: Dict[int, int] = {}
+    current = 0
+    for i in range(len(trace_labels) - 1, -1, -1):
+        lbl = trace_labels[i]
+        bit = label_to_bit.get(lbl)
+        if bit is not None:
+            current |= 1 << bit
+        suffix_masks[i] = current
+    # and for i == len(trace_labels) (empty suffix)
+    suffix_masks[len(trace_labels)] = 0
+
+    return place_req_mask, suffix_masks
+
+
+def _precompute_structural_shortest_path(
+    sync_net,
+    final_marking,
+    cost_function: Dict[Any, float],
+) -> Dict[Any, float]:
+    """Backward structural shortest-path on places.
+
+    Approximate minimal non-sync cost from each place to final marking by
+    iterating Bellman-Ford style relaxations over transitions.
+    """
+    # initialize distances: 0 for places in final marking, inf otherwise
+    dist_place: Dict[Any, float] = {}
+    for p in sync_net.places:
+        dist_place[p] = float("inf")
+    for p in final_marking.keys():
+        dist_place[p] = 0.0
+
+    # Build adjacency: for each transition, we need its preset and postset
+    transitions = list(sync_net.transitions)
+
+    # perform a bounded number of relaxation rounds (|places| * |transitions| is safe upper bound)
+    max_iters = len(sync_net.places) * max(1, len(transitions))
+    for _ in range(max_iters):
+        improved = False
+        for t in transitions:
+            # cost of this transition (we consider full cost_function; this
+            # remains admissible, just more conservative)
+            c_t = cost_function.get(t, 0.0)
+            # best distance among postset places
+            succ_vals = [dist_place.get(arc.target, float("inf")) for arc in t.out_arcs]
+            if not succ_vals:
+                continue
+            d_out = max(succ_vals)
+            new_val = c_t + d_out
+            for arc in t.in_arcs:
+                p_in = arc.source
+                if new_val < dist_place[p_in]:
+                    dist_place[p_in] = new_val
+                    improved = True
+        if not improved:
+            break
+
+    return dist_place
 
 
 def __search(
@@ -494,24 +726,86 @@ def __search(
     skip,
     ret_tuple_as_trans_desc=False,
     max_align_time_trace=sys.maxsize,
-    trace_len=0,
+    trace_labels=None,
     log_costs=None,
+    parameters=None,
 ):
     start_time = time.time()
 
     decorate_transitions_prepostset(sync_net)
     decorate_places_preset_trans(sync_net)
 
-    place_to_remaining_dist = _compute_place_remaining_dist(
-        sync_net=sync_net,
+    if trace_labels is None:
+        trace_labels = []
+    trace_len = len(trace_labels)
+
+    # decide which heuristic flavour to use
+    mode_val = exec_utils.get_param_value(
+        Parameters.REQUIRED_ACTIVITIES_MODE, parameters or {}, RequiredActivitiesMode.SIMPLE.value
+    )
+    try:
+        mode = RequiredActivitiesMode(mode_val)
+    except ValueError:
+        # fallback to SIMPLE if unknown
+        mode = RequiredActivitiesMode.SIMPLE
+
+    # per-move weight (for non-sync moves) based on log costs
+    if log_costs:
+        heuristic_weight = min(log_costs)
+    else:
+        heuristic_weight = 1.0
+
+    # shared place -> trace index mapping
+    place_to_trace_index = utils.__build_place_to_trace_index(
+        sync_net,
         trace_len=trace_len,
-        log_costs=log_costs,
+        infer_source_sink=True,
     )
 
-    def get_heuristic(marking: Marking) -> float:
-        return _heuristic_from_marking(marking, place_to_remaining_dist)
+    # strategy-specific precomputations
+    place_to_required_labels: Dict[Any, Set[str]] = {}
+    place_label_depth: Dict[Any, Dict[str, int]] = {}
+    place_req_mask: Dict[Any, int] = {}
+    suffix_masks: Dict[int, int] = {}
+    dist_place: Dict[Any, float] = {}
 
-    # A* algorithm, identical to Dijkstra but with f = g + h
+    if mode in {
+        RequiredActivitiesMode.SIMPLE,
+        RequiredActivitiesMode.BITSET,
+    }:
+        place_to_required_labels = _precompute_required_model_labels(sync_net, fin)
+
+    if mode == RequiredActivitiesMode.LABEL_REACHABILITY:
+        place_label_depth = _precompute_label_depths(sync_net, fin)
+
+    if mode == RequiredActivitiesMode.BITSET:
+        place_req_mask, suffix_masks = _precompute_bitset_structures(
+            sync_net,
+            fin,
+            trace_labels,
+        )
+
+    if mode == RequiredActivitiesMode.STRUCTURAL_SHORTEST_PATH:
+        dist_place = _precompute_structural_shortest_path(
+            sync_net,
+            fin,
+            cost_function,
+        )
+
+    def get_heuristic(marking: Marking) -> float:
+        if mode == RequiredActivitiesMode.SIMPLE:
+            return _heuristic_simple_required_activities(
+                marking,
+                trace_labels,
+                trace_len,
+                place_to_trace_index,
+                place_to_required_labels,
+                heuristic_weight,
+            )
+        # fallback
+        return 0.0
+
+    # A* algorithm
     closed = set()
 
     h0 = get_heuristic(ini)

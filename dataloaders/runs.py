@@ -1,6 +1,7 @@
 from collections.abc import Sequence
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from enum import Enum
+from io import BufferedWriter
 import logging
 import marshal
 import multiprocessing
@@ -17,9 +18,7 @@ from itertools import product
 import numpy as np
 
 from tqdm import tqdm
-from dataloaders.synthetic import SyntheticProcessModelDataset
 from experiments.simulation.noise import inject_noise_trace
-from experiments.simulation.simulate import simulate_batch
 from features.extractors import CompositeFeatureExtractor
 from pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.objects.log.obj import EventLog, Trace
@@ -28,15 +27,20 @@ import pstats
 from dataclasses import dataclass
 
 from dataloaders.net import ProcessModelDataset
+from dataloaders.serializable import (
+    Deserializable,
+    Serializable,
+    WithSerializedView,
+)
+from dataloaders.unique_net import UniqueProcessModelDataset
 from pm4py.algo.conformance.alignments.petri_net.algorithm import (
     Variants,
     apply,
 )
-from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
 from pm4py.util import typing
 from sklearn.ensemble import GradientBoostingClassifier
 
-SEED = 42
+from util.rng import RNG
 
 
 class Aligner(ABC):
@@ -56,9 +60,13 @@ class Aligner(ABC):
 
 
 class PM4pyAligner(Aligner):
-    def __init__(self, variant: Variants):
-        super().__init__(name=str(variant))
-        self.variant = variant
+    def __init__(self, variant_name: str):
+        super().__init__(name=variant_name)
+        self.variant_name = variant_name
+
+    @property
+    def variant(self) -> Variants:
+        return Variants[self.variant_name]
 
     def __call__(self, pm: PetriNet, im: Marking, fm: Marking, trace: Trace):
         return apply(
@@ -67,27 +75,29 @@ class PM4pyAligner(Aligner):
             im,
             fm,
             None,
-            variant=self.variant,
+            variant=self.variant,  # Enum member; its .value is the module
         )
 
     def hash(self) -> str:
-        base = {"variant": str(self.variant.value)}
+        base = {"variant": f"{self.variant_name}"}
         return hashlib.sha1(
             json.dumps(base, sort_keys=True).encode()
         ).hexdigest()
 
 
 class AlignerSpec(Enum):
-    ALL = list(map(lambda v: PM4pyAligner(v), Variants))
+    ALL = list(map(lambda v: PM4pyAligner(v.name), Variants))
     A_STAR = [
-        PM4pyAligner(Variants.VERSION_DIJKSTRA_NO_HEURISTICS),
-        PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR),
-        PM4pyAligner(Variants.VERSION_STATE_EQUATION_A_STAR_ILP),
-        PM4pyAligner(Variants.VERSION_INCREMENTAL_A_STAR),
+        PM4pyAligner("VERSION_DIJKSTRA_NO_HEURISTICS"),
+        PM4pyAligner("VERSION_REMAINING_TRACE"),
+        PM4pyAligner("VERSION_REQUIRED_ACTIVITIES"),
+        PM4pyAligner("VERSION_STATE_EQUATION_A_STAR"),
+        PM4pyAligner("VERSION_STATE_EQUATION_A_STAR_ILP"),
+        # PM4pyAligner(Variants.VERSION_INCREMENTAL_A_STAR),
     ]
 
 
-class PerfCounter:
+class PerfCounter(Serializable[dict[str, Any]]):
     def __init__(self):
         self._profiler = cProfile.Profile()
         self.duration: float | None = None
@@ -134,14 +144,17 @@ class PerfCounter:
             "lp_time": self.lp_time,
         }
 
-    def dict(self) -> dict[str, Any]:
+    def _dict(self) -> dict[str, Any]:
         return {
             "duration": self.duration,
             "stats": marshal.dumps(self.stats.stats) if self.stats else None,
         }
 
+    def serialize(self) -> dict[str, Any]:
+        return self._dict()
+
     @staticmethod
-    def from_dict(d) -> "PerfCounter":
+    def from_dict(d: dict[str, Any]) -> "PerfCounter":
         if isinstance(d, PerfCounter):
             logging.warning(
                 "PerfCounter.from_dict called on PerfCounter instance"
@@ -160,7 +173,7 @@ class TraceSampler(ABC):
 
     def __init__(
         self,
-        ds: ProcessModelDataset,
+        ds: Union[ProcessModelDataset, UniqueProcessModelDataset],
         seed: Optional[int] = None,
         slice: Optional[range] = None,
     ):
@@ -181,18 +194,11 @@ class TraceSampler(ABC):
         for i in self.range:
             yield self.__getitem__(i)
 
-    def iter_for_model(
-        self, model: ProcessModelDataset.SerializedView.ItemType
-    ) -> Iterator[Trace]:
-        # ignore model by default
-        for i in self.range:
-            yield self.__getitem__(i)
-
     def hash(self) -> str:
         base = {
             "name": str(self.__class__),
             "ds": str(self.source_path),
-            "range": (self.range.start, self.range.stop, self.range.step),
+            "seed": self.seed,
         }
         return hashlib.sha1(
             json.dumps(base, sort_keys=True).encode()
@@ -214,209 +220,126 @@ class SimplePerturbedTraceSampler(TraceSampler):
 
 
 @dataclass
-class NoiseParams:
-    p_insert: float = 0.1
-    p_delete: float = 0.1
-    p_swap: float = 0.05
+class ItemType(Serializable["SerializedItemType"]):
+    item_id: str
+    model: ProcessModelDataset.ItemType
+    trace: Trace
+    item: Union[typing.AlignmentResult, typing.ListAlignments]
+    perf: list[PerfCounter]
+    algo: str
+    comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
 
-
-class SyntheticTraceSampler(TraceSampler):
-    def __init__(
-        self,
-        pm_dataset: SyntheticProcessModelDataset,
-        seed: int,
-        slice: Optional[range] = None,
-        batch_size: int = 128,
-        steps: int = 100,
-        noise: NoiseParams = NoiseParams(),
-        device: str = "cuda",
-    ):
-        self.pm_dataset = pm_dataset
-        self.seed = seed
-        self.slice = slice
-        self.batch_size = batch_size
-        self.steps = steps
-        self.noise = noise
-        self.device = device
-
-        # global "per model" trace count; you can also make this per-model configurable
-        self._traces_per_model = (
-            slice.stop - slice.start if slice is not None else batch_size
+    def serialize(self) -> "SerializedItemType":
+        return SerializedItemType(
+            self.item_id,
+            self.model.serialize(),
+            self.trace,
+            self.item,
+            [p.serialize() for p in self.perf],
+            self.algo,
+            self.comb_id,
         )
 
-    def __len__(self) -> int:
-        # total number of traces if we wanted global length,
-        # but RunDataset doesn't actually use len(trace_sampler) anymore
-        return self._traces_per_model
 
-    def __iter__(self):
-        # only used in real-log mode; for synthetic we expect iter_for_model
-        raise RuntimeError(
-            "SyntheticTraceSampler must be used via iter_for_model(model)"
+@dataclass
+class SerializedItemType(Deserializable[ItemType]):
+    item_id: str
+    model: ProcessModelDataset.SerializedItemType
+    trace: Trace
+    item: Union[typing.AlignmentResult, typing.ListAlignments]
+    perf: list[dict[str, Any]]
+    algo: str
+    comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
+
+    def deserialize(self) -> ItemType:
+        return ItemType(
+            self.item_id,
+            self.model.deserialize(),
+            self.trace,
+            self.item,
+            [PerfCounter.from_dict(p) for p in self.perf],
+            self.algo,
+            self.comb_id,
         )
 
-    def hash(self) -> str:
-        base = {
-            "seed": self.seed,
-            "batch_size": self.batch_size,
-            "steps": self.steps,
-            "noise": self.noise.hash(),
-        }
-        return hashlib.sha1(
-            json.dumps(base, sort_keys=True).encode()
-        ).hexdigest()
 
-    def iter_for_model(
-        self, model: SyntheticProcessModelDataset.SerializedView.ItemType
-    ) -> Iterator[Trace]:
-        deser = model.deserialize()  # -> ItemType(stnet, params)
-        stnet = deser.stnet
-        N = stnet.to_tensor()
-
-        pre = N["pre"].to(self.device)
-        post = N["post"].to(self.device)
-        M0 = N["M0"].to(self.device)
-        Mf = N["Mf"].to(self.device)
-        labels = N["labels"]  # list[str]
-
-        # for determinism: derive a per-model seed
-        model_seed = int(model.hash(), 16) ^ self.seed
-
-        # generate traces in batches but expose as individual Trace objects
-        remaining = self._traces_per_model
-        trace_index = 0
-
-        while remaining > 0:
-            bsz = min(self.batch_size, remaining)
-
-            seq_batch = simulate_batch(
-                (pre, post),
-                M0,
-                Mf,
-                labels,
-                steps=self.steps,
-                batch_size=bsz,
-                compact=True,
-                generator=torch.Generator(device=self.device).manual_seed(
-                    model_seed + trace_index
-                ),
-            )  # shape [B, steps'] with integer label ids
-
-            for row in seq_batch:  # row: tensor of label IDs
-                # map back to label strings; assume -1 padding, >=0 real labels
-                events = []
-                for lab_id in row.tolist():
-                    if lab_id < 0:
-                        break
-                    label = labels[lab_id]
-                    ev = {"concept:name": label}
-                    events.append(ev)
-
-                trace = Trace(events, attributes={})  # fill attrs as needed
-
-                # noise injection on the synthetic trace
-                noisy_trace = inject_noise_trace(
-                    trace,
-                    p_insert=self.noise.p_insert,
-                    p_delete=self.noise.p_delete,
-                    p_swap=self.noise.p_swap,
-                    labels=labels,
-                    activity_key="concept:name",
-                    seed=model_seed + trace_index,  # deterministic per-trace
-                )
-
-                yield noisy_trace
-                trace_index += 1
-                remaining -= 1
-                if remaining <= 0:
-                    break
-
-
-class RunDataset(Dataset):
-
-    @dataclass
-    class ItemType:
-        item_id: str
-        model: ProcessModelDataset.ItemType
-        trace: Trace
-        item: Union[typing.AlignmentResult, typing.ListAlignments]
-        perf: list[PerfCounter]
-        algo: str
-        comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
-
-    @dataclass
-    class SerializedItemType:
-        item_id: str
-        model: ProcessModelDataset.SerializedView.ItemType
-        trace: Trace
-        item: Union[typing.AlignmentResult, typing.ListAlignments]
-        perf: list[dict[str, Any]]
-        algo: str
-        comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
-
-        def deserialize(self) -> "RunDataset.ItemType":
-            return RunDataset.ItemType(
-                self.item_id,
-                self.model.deserialize(),
-                self.trace,
-                self.item,
-                [PerfCounter.from_dict(p) for p in self.perf],
-                self.algo,
-                self.comb_id,
-            )
+class RunDataset(
+    Dataset[ItemType], WithSerializedView[ItemType, SerializedItemType]
+):
 
     def __init__(
         self,
+        rng: RNG,
         base_path: Path,
-        process_model_dataset: ProcessModelDataset,
+        process_model_dataset: Union[
+            ProcessModelDataset, UniqueProcessModelDataset
+        ],
         aligners: Sequence[Aligner],
         trace_sampler: TraceSampler.__class__,
         n_runs: int = 1,  # Number of runs per trace/model pair
-        multiprocessing: bool = True,
+        n_workers: int = 0,
         slice: Optional[range] = None,
+        write_batch_size: int = 100,
     ):
         self.base_path = base_path
         self.pm_dataset = process_model_dataset
         self.trace_sampler = trace_sampler(
-            self.pm_dataset, seed=SEED, slice=slice
+            self.pm_dataset, seed=rng.get_seed(), slice=slice
         )
         self.aligners = aligners
         self.n_runs = n_runs
         self.items: dict[str, "RunDataset.SerializedItemType"] = {}
         self.index: list[str] = []
-        if multiprocessing:
+        self.n_workers = n_workers
+        self.write_batch_size = write_batch_size
+        if n_workers != 1:
             self._init_cache_mp()
         else:
             self._init_cache()
 
+    def __iter__(self) -> Iterator[ItemType]:
+        for i in range(len(self)):
+            yield self[i]
+
+    @staticmethod
+    def _flush_batch(
+        f: BufferedWriter, batch: dict[str, "RunDataset.SerializedItemType"]
+    ):
+        pickle.dump(batch, f, protocol=pickle.HIGHEST_PROTOCOL)
+        f.flush()
+        os.fsync(f.fileno())
+
     def _tryload(self):
         path = self.save_path()
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                self.items = pickle.load(f)
-                self.index = list(self.items.keys())
+        if not os.path.exists(path):
+            return
+        self.items = {}
+
+        with open(path, "rb") as f:
+            while True:
+                try:
+                    chunk = pickle.load(f)  # each chunk = dict of N items
+                    self.items.update(chunk)
+                except EOFError:
+                    break
+
+        self.index = list(self.items.keys())
 
     def save_path(self):
-        return self.base_path / Path(f"{self._hash_config()}.pkl")
+        return self.base_path / Path(f"{self.hash()}.pkl")
 
     @staticmethod
     def _process_item(
         hash: str,
-        model: ProcessModelDataset.SerializedView.ItemType,
+        model: ProcessModelDataset.SerializedItemType,
         trace: Trace,
-        aligner: Aligner | str,
+        aligner: Aligner,
         n_runs: int = 1,
-    ) -> "RunDataset.SerializedItemType":
+    ) -> SerializedItemType:
 
         deser_model = model.deserialize()
-        if isinstance(aligner, str):
-            # reconstruct aligner from name (in the mp case)
-            aligner = next(
-                a for a in AlignerSpec.ALL.value if a.name == aligner
-            )
-
         # MULTI-RUN BENCHMARK LOGIC
-        stats = []
+        stats: list[dict[str, Any]] = []
         last_item = None
 
         # Loop n times to collect statistics
@@ -425,11 +348,11 @@ class RunDataset(Dataset):
                 item = aligner(
                     deser_model.pm, deser_model.im, deser_model.fm, trace
                 )
-            stats.append(pc.dict())
+            stats.append(pc.serialize())
             last_item = item
 
         # Calculate aggregates
-        return RunDataset.SerializedItemType(
+        return SerializedItemType(
             hash,
             model,
             trace,
@@ -470,73 +393,99 @@ class RunDataset(Dataset):
 
     def _init_cache_mp(self):
         self._tryload()
+        logging.info("Initializing run dataset cache (multiprocessing)...")
+        logging.info("Current number of items: %d", len(self.items))
         total = (
             len(self.trace_sampler)
             * len(self.pm_dataset.serialized)
             * len(self.aligners)
         )
 
-        num_workers = multiprocessing.cpu_count()
+        num_workers = (
+            self.n_workers
+            if self.n_workers > 0
+            else multiprocessing.cpu_count()
+        )
         logging.info(
             f"Populating run dataset cache using {num_workers} workers..."
         )
 
         existing_items = self.items
-        new_items = {}
-        with ProcessPoolExecutor(max_workers=num_workers) as pool:
-            futures = set()
+        new_items: dict[str, RunDataset.SerializedItemType] = {}
+        batch: dict[str, RunDataset.SerializedItemType] = {}
+        path = self.save_path()
+        os.makedirs(path.parent, exist_ok=True)
+
+        with (
+            ProcessPoolExecutor(max_workers=num_workers) as pool,
+            open(path, "ab") as f,
+        ):
+            futures: set[Future[RunDataset.SerializedItemType]] = set()
             preparing = tqdm(total=total, desc="Preparing")
             aligned = tqdm(total=0, desc="Aligned")  # dynamic total
+            written = tqdm(total=0, desc="Written")  # dynamic total
 
-            for m in self.pm_dataset.serialized:
-                for t in self.trace_sampler.iter_for_model(m):
-                    for a in self.aligners:
-                        item_id = RunDataset._hash_item(m, t, a)
-                        if item_id in existing_items:
-                            preparing.update(1)
-                            continue
+            for m, t, a in product(
+                self.pm_dataset.serialized, self.trace_sampler, self.aligners
+            ):
+                item_id = RunDataset._hash_item(m, t, a)
+                if item_id in existing_items:
+                    preparing.update(1)
+                    continue
 
-                        fut = pool.submit(
-                            RunDataset._process_item,
-                            item_id,
-                            m,
-                            t,
-                            a.name,
-                            self.n_runs,  # pass n_runs to worker
-                        )
-                        futures.add(fut)
-                        aligned.total += 1  # update total dynamically
-                        preparing.update(1)
+                fut = pool.submit(
+                    RunDataset._process_item,
+                    item_id,
+                    m,
+                    t,
+                    a,
+                    self.n_runs,  # pass n_runs to worker
+                )
+                futures.add(fut)
+                aligned.total += 1  # update total dynamically
+                written.total += 1  # update total dynamically
+                preparing.update(1)
 
-                        # **consume any futures that are ready immediately**
-                        done = {f for f in futures if f.done()}
-                        for d in done:
-                            item = d.result()
-                            new_items[item.item_id] = item
-                            futures.remove(d)
-                            aligned.update(1)
+                # **consume any futures that are ready immediately**
+                done = {fut for fut in futures if fut.done()}
+                for d in done:
+                    item = d.result()
+                    new_items[item.item_id] = item
+                    batch[item.item_id] = item
+                    futures.remove(d)
+                    aligned.update(1)
+
+                    if len(batch) >= self.write_batch_size:
+                        RunDataset._flush_batch(f, batch)
+                        written.update(len(batch))
+                        batch.clear()
 
             # after producer loop: drain remaining futures
             for fut in as_completed(futures):
-                item: RunDataset.ItemType = fut.result()
+                item: RunDataset.SerializedItemType = fut.result()
                 new_items[item.item_id] = item
+                batch[item.item_id] = item
                 aligned.update(1)
 
+                if len(batch) >= self.write_batch_size:
+                    RunDataset._flush_batch(f, batch)
+                    written.update(len(batch))
+                    batch.clear()
+
+            # final flush
+            if batch:
+                RunDataset._flush_batch(f, batch)
         # finalize
         self.items.update(new_items)
         self.index = list(self.items.keys())
 
-        path = self.save_path()
-        os.makedirs(path.parent, exist_ok=True)
-
-        with open(path, "wb") as f:
-            pickle.dump(self.items, f)
-
-    def _hash_config(self):
+    def hash(self):
         base: dict[str, str | list[str] | int] = {
             "model_ds_hash": self.pm_dataset.hash(),
             "trace_sampler_hash": self.trace_sampler.hash(),
-            "aligner_hash": [a.hash() for a in self.aligners],
+            "aligner_hash": [
+                a.hash() for a in sorted(self.aligners, key=lambda x: x.name)
+            ],
             "n_runs": self.n_runs,  # Hash must include n_runs to invalidate cache if changed
         }
         return hashlib.sha1(
@@ -553,7 +502,7 @@ class RunDataset(Dataset):
 
     @staticmethod
     def _hash_item(
-        model: ProcessModelDataset.SerializedView.ItemType,
+        model: ProcessModelDataset.SerializedItemType,
         trace: Trace,
         aligner: Aligner,
     ) -> str:
@@ -576,11 +525,12 @@ class RunDataset(Dataset):
             json.dumps(item, sort_keys=True).encode()
         ).hexdigest()
 
+    def _get_serialized(self, idx: int) -> "RunDataset.SerializedItemType":
+        key = self.index[idx]
+        return self.items[key]
+
     def __getitem__(self, index: int) -> "RunDataset.ItemType":
-        key = self.index[index]
-        # deserialize
-        item = self.items[key].deserialize()
-        return item
+        return self._get_serialized(index).deserialize()
 
 
 def get_stats(stats: list[PerfCounter]) -> dict[str, float]:
@@ -612,14 +562,16 @@ def get_stats(stats: list[PerfCounter]) -> dict[str, float]:
 if __name__ == "__main__":
     import torch
     from dataloaders.net import VariantRandomDistributionSampler
-    from dataloaders.csv_log import CSVEventLogDataset
     from dataloaders.xes_log import XESEventLogDataset
     from pm4py.discovery import discover_petri_net_inductive
+    from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
     import matplotlib.pyplot as plt
     import pandas as pd
 
+    rng = RNG()
+    rng.initialize(42)
+
     # CONFIGURATION
-    PLOT = False
     N_RUNS = 5  # set number of runs here
     path = "data/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/Hospital%20Billing%20-%20Event%20Log.xes"
 
@@ -634,30 +586,8 @@ if __name__ == "__main__":
         mean, std
     )  # defines the reordering of traces by defining the sampling distribution over index(index)
 
-    if PLOT:
-        # plot length distribution
-        lengths = torch.arange(0, 500)
-        probs = torch.exp(-len_distribution.rate * lengths)
-        plt.plot(lengths.numpy(), probs.numpy())
-        plt.title("Exponential Length Distribution (λ=1/100)")
-        plt.xlabel("Trace Length")
-        plt.ylabel("Probability Density")
-        plt.grid()
-        plt.show()
-
-        # plot frequency distribution
-        x = torch.linspace(-10, 30, 100)
-        coeff = 1.0 / (std * torch.sqrt(torch.tensor(2.0 * 3.141592653589793)))
-        exponent = -0.5 * ((x - mean) / std) ** 2
-        probs = coeff * torch.exp(exponent)
-        plt.plot(x.numpy(), probs.numpy())
-        plt.title("Normal Frequency Distribution (μ=10, σ=5)")
-        plt.xlabel("Trace Frequency")
-        plt.ylabel("Probability Density")
-        plt.grid()
-        plt.show()
-
     pm_dataset = ProcessModelDataset(
+        rng=rng,
         log_dataset=log_dataset,
         discovery_methods={"inductive": discover_petri_net_inductive},
         param_grid={
@@ -676,13 +606,16 @@ if __name__ == "__main__":
         cached=True,
     )
 
+    unique_pm_dataset = UniqueProcessModelDataset(pm_dataset)
+
     run_dataset = RunDataset(
+        rng,
         Path('./data/runs'),
-        pm_dataset,
+        unique_pm_dataset,
         AlignerSpec.A_STAR.value,
         SimplePerturbedTraceSampler,
         n_runs=N_RUNS,
-        multiprocessing=True,
+        n_workers=4,
         slice=range(0, 50),  # <- for testing
     )
 
@@ -771,7 +704,7 @@ if __name__ == "__main__":
         n_estimators=100,
         learning_rate=0.1,
         max_depth=3,
-        random_state=SEED,
+        random_state=rng.get_seed(),
     )
     clf.fit(X, y)
     print("Classifier trained.")

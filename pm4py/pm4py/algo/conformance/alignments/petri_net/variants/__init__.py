@@ -27,4 +27,5 @@ from pm4py.algo.conformance.alignments.petri_net.variants import (
     discounted_a_star,
     incremental_a_star,
     remaining_trace,
+    required_activities,
 )

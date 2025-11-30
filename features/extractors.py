@@ -14,36 +14,77 @@ from pm4py.objects.petri_net.utils.networkx_graph import create_networkx_directe
 class BaseFeatureExtractor(ABC):
     """
     Abstract base class for feature extraction from Petri nets and traces.
-    
+
     Provides common interface for extracting features as numpy arrays or dicts,
     with automatic conversion between the two representations.
+
+    Includes optional caching mechanism to avoid re-extracting features
+    from the same Petri net multiple times.
     """
-    
+
+    def __init__(self, use_cache: bool = True):
+        """
+        Initialize feature extractor.
+
+        Args:
+            use_cache: Whether to cache extracted features
+        """
+        self.use_cache = use_cache
+        self._feature_cache = {} if use_cache else None
+
     @property
     @abstractmethod
     def feature_names(self) -> List[str]:
         """Returns ordered list of feature names."""
         pass
-    
     @abstractmethod
     def _extract_features_internal(self, *args, **kwargs) -> Dict[str, float]:
         """Internal feature extraction method. Must return a flat dict."""
         pass
-    
+
+    @abstractmethod
+    def _compute_cache_key(self, *args, **kwargs):
+        """
+        Compute cache key from arguments.
+
+        Subclasses must implement this to define how to generate unique
+        cache keys for their specific inputs.
+
+        Returns:
+            Hashable cache key (typically int from id(), or tuple of ids)
+        """
+        raise NotImplementedError("Subclasses must implement _compute_cache_key")
+
     def extract(self, *args, return_as_dict: bool = False, **kwargs) -> Union[np.ndarray, Dict[str, float]]:
         """
         Extract features from input.
-        
+
         Args:
             return_as_dict: If True, return dict. Otherwise return numpy array.
-            
+
         Returns:
             Feature vector as numpy array or dict.
         """
+        # Check cache if enabled
+        if self.use_cache:
+            cache_key = self._compute_cache_key(*args, **kwargs)
+            if cache_key is not None and cache_key in self._feature_cache:
+                cached_dict = self._feature_cache[cache_key]
+                if return_as_dict:
+                    return cached_dict
+                return self.dict_to_vector(cached_dict)
+
+        # Extract features
         feature_dict = self._extract_features_internal(*args, **kwargs)
         assert set(feature_dict.keys()) == set(self.feature_names), \
             f"Extracted features do not match expected feature names. " \
             f"Expected: {self.feature_names}, but got: {feature_dict.keys()}"
+
+        # Cache if enabled
+        if self.use_cache:
+            cache_key = self._compute_cache_key(*args, **kwargs)
+            if cache_key is not None:
+                self._feature_cache[cache_key] = feature_dict
 
         if return_as_dict:
             return feature_dict
@@ -61,14 +102,17 @@ class BaseFeatureExtractor(ABC):
 class ModelFeatureExtractor(BaseFeatureExtractor):
     """
     Extracts structural features from Petri nets.
-    
     Features include:
     - Basic counts (transitions, places, arcs)
     - Transition types (invisible, unique, duplicate)
     - Split patterns (AND, XOR)
     - Degree statistics per transition/place type
     """
-    
+
+    def _compute_cache_key(self, net: PetriNet, im: Marking, fm: Marking):
+        """Use hash of the Petri net as cache key."""
+        return hash(net)
+
     @property
     def feature_names(self) -> List[str]:
         return [
@@ -165,12 +209,15 @@ class ModelFeatureExtractor(BaseFeatureExtractor):
 class TraceFeatureExtractor(BaseFeatureExtractor):
     """
     Extracts features from trace Petri nets.
-    
     Features include:
     - Trace length (number of activities/events); e.g. A -> A -> B -> B has length 4
     - Activity repetition statistics; e.g. for A -> A -> B -> B: [2, 2] -> mean=2, std=0
     """
-    
+
+    def _compute_cache_key(self, trace_net: PetriNet, trace_im: Marking, trace_fm: Marking):
+        """Use hash of the trace net as cache key."""
+        return hash(trace_net)
+
     @property
     def feature_names(self) -> List[str]:
         return [
@@ -207,15 +254,28 @@ class TraceFeatureExtractor(BaseFeatureExtractor):
 class CompositeFeatureExtractor(BaseFeatureExtractor):
     """
     Extracts features from both model and trace, including interaction features.
-    
+
     Combines features from ModelFeatureExtractor and TraceFeatureExtractor,
     then adds interaction features that relate model and trace characteristics.
     """
-    
-    def __init__(self):
-        self.model_extractor = ModelFeatureExtractor()
-        self.trace_extractor = TraceFeatureExtractor()
-    
+
+    def __init__(self, use_cache: bool = True):
+        super().__init__(use_cache=use_cache)
+        self.model_extractor = ModelFeatureExtractor(use_cache=use_cache)
+        self.trace_extractor = TraceFeatureExtractor(use_cache=use_cache)
+
+    def _compute_cache_key(
+        self,
+        petri_net: PetriNet,
+        petri_net_im: Marking,
+        petri_net_fm: Marking,
+        trace_net: PetriNet,
+        trace_net_im: Marking,
+        trace_net_fm: Marking
+    ):
+        """Use tuple of both net hashes as cache key."""
+        return (hash(petri_net), hash(trace_net))
+
     @property
     def feature_names(self) -> List[str]:
         return (

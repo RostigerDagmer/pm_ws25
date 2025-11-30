@@ -1,5 +1,4 @@
-7.11.2025
-TODOs for next 2 week:
+TODOs for next week:
 
   - general: 
       - setup and prepare paper writing (not urgent)
@@ -16,7 +15,7 @@ TODOs for next 2 week:
     - methods to extract different features from a process model and a trace (partialy done)
     - more?
    
-  - generating/evaluating process models (IMPORTANT)
+    - generating/evaluating process models (IMPORTANT)
       - Note: the created (dsitributed) variants should be saved somewhere, after discovering/generating the pms
       - because we will have to use those exact variants for the training
       - process model duplicate filtering (similarity check) - Michael
@@ -31,3 +30,12 @@ TODOs for next 2 week:
       - find a trust worthy number of iterations for alignment computation from a trace and a pm
       - Fix incremental A*
       - add ILP variant of incremental A*
+   
+
+26.11.2025
+
+Friday Presentation:
+  - quickly show 2 new heuristics (no math) just idea
+  - discuss deduplication
+  - compatison plots (with new heuristic)
+  - evaluation process 

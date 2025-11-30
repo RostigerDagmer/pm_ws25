@@ -9,3 +9,6 @@ data
 *.pkl
 *.err
 *.out
+*.json
+CLAUDE.md
+outputs/
