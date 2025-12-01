@@ -14,6 +14,10 @@ class Deserializable(Protocol[T]):
     def deserialize(self) -> T: ...
 
 
+class Hashable(Protocol):
+    def hash(self) -> str: ...
+
+
 class WithSerializedView(Generic[T, S], Iterable[T]):
     type ItemType = T
     type SerializedItemType = S

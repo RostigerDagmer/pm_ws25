@@ -1,3 +1,6 @@
+from util.distributions import DistParam
+from dataloaders.unique_net import UniqueProcessModelDataset
+from dataloaders.net import ProcessModelDataset
 from pydantic import BaseModel, field_validator, Field, ValidationInfo
 from typing import Dict, Any, Optional, Union, List, Sequence
 from dataloaders.net import DISCOVERY_METHODS
@@ -14,13 +17,15 @@ class DistributionConfig(BaseModel):
     type: str
     args: Dict[str, Any]
 
-    def build(self) -> dist.Distribution:
-        module, cls_name = self.type.rsplit(".", 1)
-        mod = importlib.import_module(module)
-        cls = getattr(mod, cls_name)
-
-        if not issubclass(cls, dist.Distribution):
-            raise TypeError(f"{self.type} is not a torch.distribution class")
+    def build(self) -> DistParam:
+        cls_name = (
+            f"{self.type}Spec" if not self.type.endswith("Spec") else self.type
+        )
+        mod = importlib.import_module("util.distributions")
+        try:
+            cls = getattr(mod, cls_name)
+        except AttributeError:
+            raise ValueError(f"Unknown distribution type: {self.type}")
 
         return cls(**self.args)
 
@@ -42,16 +47,16 @@ class SamplerConfig(BaseModel):
             raise ValueError("max_len_subset must be >= min_len_subset")
         return v
 
-    def build(self, rng: RNG) -> VariantRandomDistributionSampler:
+    def build(self) -> VariantRandomDistributionSampler:
         len_dist = self.len_distribution.build()
         freq_dist = self.freq_distribution.build()
         sampler = VariantRandomDistributionSampler(
+            seed=RNG.get_seed(),
             n_subsets=self.n_subsets,
             min_len_subset=self.min_len_subset,
             max_len_subset=self.max_len_subset,
             len_distribution=len_dist,
             freq_distribution=freq_dist,
-            seed=rng.get_seed(),
         )
         return sampler
 
@@ -90,21 +95,6 @@ class DiscoveryConfig(BaseModel):
         return result
 
 
-class TraceSamplerConfig(BaseModel):
-    type: str
-
-    def build(self) -> TraceSampler.__class__:
-        class_name = self.type.rsplit('.', 1)
-        if len(class_name) < 2:
-            module_name = "dataloaders.runs"
-            class_name = class_name[0]
-        else:
-            module_name, class_name = class_name
-        module = importlib.import_module(module_name)
-        cls = getattr(module, class_name)
-        return cls
-
-
 class SliceType(BaseModel):
     from_: int = Field(alias="from", ge=0)
     to: int = Field(gt=0)
@@ -116,11 +106,39 @@ class SliceType(BaseModel):
         return v
 
 
+class TraceSamplerConfig(BaseModel):
+    type: str
+    slice: Optional[SliceType] = None
+    args: Dict[str, Any] = Field(default_factory=dict)
+
+    def build(
+        self,
+        ds: Union[ProcessModelDataset, UniqueProcessModelDataset],
+    ) -> TraceSampler:
+        class_name = self.type.rsplit('.', 1)
+        if len(class_name) < 2:
+            module_name = "dataloaders.runs"
+            class_name = class_name[0]
+        else:
+            module_name, class_name = class_name
+        module = importlib.import_module(module_name)
+        cls = getattr(module, class_name)
+        return (
+            cls(
+                seed=RNG.get_seed(),
+                ds=ds,
+                slice=range(self.slice.from_, self.slice.to),
+                **self.args,
+            )
+            if self.slice
+            else cls(seed=RNG.get_seed(), ds=ds, **self.args)
+        )
+
+
 class AlignmentConfig(BaseModel):
     runs: int = Field(gt=0)
     workers: int = Field(ge=0)
     write_batch_size: int = Field(gt=0)
-    slice: Optional[SliceType] = None
     variants: Union[str, list[str]]
     sampler: TraceSamplerConfig
 

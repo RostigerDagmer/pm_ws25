@@ -9,7 +9,7 @@ def inject_noise(
     p_insert: float = 0.05,
     p_delete: float = 0.05,
     p_swap: float = 0.02,
-    labels: Optional[str] = None,
+    labels: Optional[list[str]] = None,
     activity_key: str = "concept:name",
     seed: Optional[int] = None,
 ) -> EventLog:
@@ -34,7 +34,7 @@ def inject_noise_trace(
     p_insert: float = 0.05,
     p_delete: float = 0.05,
     p_swap: float = 0.02,
-    labels: Optional[str] = None,
+    labels: Optional[list[str]] = None,
     activity_key: str = "concept:name",
     seed: Optional[int] = None,
 ) -> Trace:

@@ -12,15 +12,15 @@ discovery:
     max_len_subset: 150 # maximum length of each subset
 
     len_distribution: # distribution prior for the length of each subset
-      type: torch.distributions.Exponential
+      type: Exponential
       args:
         rate: 0.01
 
     freq_distribution: # distribution prior for the frequency of each variant within a subset
-      type: torch.distributions.Normal
+      type: Normal
       args:
-        loc: 10.0
-        scale: 4.0
+        mean: 10.0
+        std: 4.0
   
 deduplication:
   config:
@@ -41,9 +41,11 @@ alignment:
   runs: 5 # number of alignment runs per model x trace combination
   workers: 0 # number of parallel workers (0 = all threads)
   write_batch_size: 100 # number of alignments to buffer before writing to disk
-  slice: # optional slice of traces to align (for testing/debugging)
-    from: 0
-    to: 50
   variants: A_STAR # either a AlignerSpec variant or a list of pm4py.algo.conformance.alignments.variants.Variants variants
   sampler:
-    type: SimplePerturbedTraceSampler # class name of the trace sampler used during alignment runs
+    type: SubsetAwarePerturbedTraceSampler # class name of the trace sampler used during alignment runs
+    slice: # optional slice of traces to align (for testing/debugging)
+      from: 0
+      to: 20
+    args:
+      pick_random: true

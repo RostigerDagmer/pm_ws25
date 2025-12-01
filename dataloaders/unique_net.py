@@ -468,8 +468,7 @@ if __name__ == "__main__":
     from util.rng import RNG
     import torch
 
-    rng = RNG()
-    rng.initialize(42)
+    RNG.initialize(42)
 
     path = "data/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/Hospital%20Billing%20-%20Event%20Log.xes"
     # path = "data/6a0a26d2-82d0-4018-b1cd-89afb0e8627f/DomesticDeclarations.xes"
@@ -480,7 +479,6 @@ if __name__ == "__main__":
 
     # Create base dataset with caching enabled
     pm_dataset = ProcessModelDataset(
-        rng=rng,
         log_dataset=log_dataset,
         discovery_methods={"inductive": discover_petri_net_inductive},
         param_grid={
@@ -489,6 +487,7 @@ if __name__ == "__main__":
         },
         sampler_specs={
             "variant_random": VariantRandomDistributionSampler(
+                seed=RNG.get_seed(),
                 n_subsets=1000,  # number of subsets: defines how often the log is sampled... basically
                 max_len_subset=100,
                 min_len_subset=10,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
@@ -499,7 +498,6 @@ if __name__ == "__main__":
                     10.0, 5.0
                 ),  # (variant) freq_distribution: defines the reordering of traces/variants on every sampling call, by defining the sampling behavior over index(variant) -> frequency.
                 reconstruct_frequency=True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
-                seed=rng.get_seed(),
             )
         },
         max_models=400,

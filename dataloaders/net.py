@@ -1,3 +1,6 @@
+from util.distributions import deserialize
+from dataclasses import asdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, Generator, Optional, Any, Union
 import torch
@@ -13,8 +16,8 @@ from pm4py.discovery import (
 )
 from itertools import product
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import pickle
+
 import hashlib
 import json
 import inspect
@@ -40,9 +43,12 @@ from pm4py.objects.petri_net.exporter import exporter as pnml_exporter
 import traceback
 
 from util.rng import RNG
-
-logging.getLogger(None)
-logging.basicConfig(level=logging.INFO)
+from util.distributions import (
+    make_distribution,
+    ExponentialSpec,
+    NormalSpec,
+    DistParam,
+)
 
 
 class TraceSubset(Sequence[Trace]):
@@ -72,37 +78,23 @@ class TraceSubset(Sequence[Trace]):
 class Sampler(ABC):
     def __init__(
         self,
+        seed: int,
         n_subsets: int = 1,
         name: Optional[str] = None,
-        seed: Optional[int] = None,
     ):
         self.n_subsets = n_subsets
-        self.name = name or self.__class__.__name__
-        if seed is None:
-            seed = 1
-            logging.warning(
-                "Sampler initialized without seed... choosing default 1; you may get non-reproducible results."
-            )
+        self.name = name or str(self.__class__.__name__)
         self.seed = seed
         self._cache = {}  # (id(log)) -> dict of computed features
 
     @abstractmethod
-    def sample_once(self, log: EventLog, subset_idx: int, rng: random.Random):
+    def sample_once(self, log: EventLog, subset_idx: int) -> TraceSubset:
         raise NotImplementedError
 
     def __call__(self, log: EventLog):
         subsets = []
-        torch.manual_seed(self.seed)
         for i in range(self.n_subsets):
-            # derive deterministic 32-bit seed from (sampler_name, seed, subset_idx)
-            key = f"{self.name}:{self.seed}:{i}".encode()
-            seed_int = int(hashlib.sha1(key).hexdigest(), 16) % (2**32)
-            rng = random.Random(seed_int)
-            # seed torch as well for any torch-based sampling (this assumes single-threaded sampling and will break if global RNG is modified asynchronously)
-            torch.manual_seed(seed_int)
-            subsets.append(self.sample_once(log, i, rng))
-        # reset torch seed
-        torch.manual_seed(self.seed)
+            subsets.append(self.sample_once(log, i))
         return subsets
 
     def get_cached(
@@ -117,36 +109,97 @@ class Sampler(ABC):
             cache[key] = compute_fn(log)
         return cache[key]
 
+    def serialize(self):
+        return {
+            "name": self.name,
+            "seed": self.seed,
+            "n_subsets": self.n_subsets,
+        }
+
+    @abstractmethod
+    def deserialize(data):
+        raise NotImplementedError
+
+    def hash(self):
+        return hashlib.sha1(
+            json.dumps(self.serialize(), sort_keys=True).encode()
+        ).hexdigest()
+
 
 class FullSampler(Sampler):
-    def sample_once(self, log: EventLog, subset_idx: int):
+    def __init__(self, seed: int, n_subsets: int = 1, **kwargs):
+        super().__init__(seed=seed, n_subsets=n_subsets, **kwargs)
+
+    def sample_once(self, log: EventLog, subset_idx: int) -> TraceSubset:
         # keep indices=None for full log
         return TraceSubset(log, indices=None)
+
+    @staticmethod
+    def deserialize(data):
+        return FullSampler(seed=data["seed"], n_subsets=data["n_subsets"])
 
 
 class VariantRandomDistributionSampler(Sampler):
     def __init__(
         self,
+        seed: int,
         n_subsets: int = 1000,  # defines how often the log is sampled... basically
         max_len_subset: int = 100,  # limits the possible length of each sample
         min_len_subset: int = 10,
-        len_distribution: torch.distributions.Distribution = torch.distributions.Exponential(
+        len_distribution: DistParam = ExponentialSpec(
             torch.tensor([1.0 / 100.0])
         ),  # defines the distribution of lengths across samples
-        freq_distribution: torch.distributions.Distribution = torch.distributions.Normal(
+        freq_distribution: DistParam = NormalSpec(
             10.0, 5.0
         ),  # defines the reordering of traces by defining the sampling distribution over index(index) -> p(frequency).
         reconstruct_frequency: bool = True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
         **kwargs,
     ):
-        super().__init__(n_subsets=n_subsets, **kwargs)
+        super().__init__(seed=seed, n_subsets=n_subsets, **kwargs)
         self.max_len_subset = max_len_subset
         self.min_len_subset = min_len_subset
-        self.len_distribution = len_distribution
-        self.freq_distribution = freq_distribution
+        self.len_spec = len_distribution
+        self.freq_spec = freq_distribution
+        self.len_distribution = make_distribution(len_distribution)
+        self.freq_distribution = make_distribution(freq_distribution)
         self.reconstruct_frequency = reconstruct_frequency
 
-    def sample_once(self, log: EventLog, subset_idx: int, rng: random.Random):
+    def serialize(self):
+        return {
+            "name": self.name,
+            "seed": self.seed,
+            "n_subsets": self.n_subsets,
+            "max_len_subset": self.max_len_subset,
+            "min_len_subset": self.min_len_subset,
+            "len_spec": {
+                "type": str(self.len_spec.__class__.__name__),
+                "args": asdict(self.len_spec),
+            },
+            "freq_spec": {
+                "type": str(self.freq_spec.__class__.__name__),
+                "args": asdict(self.freq_spec),
+            },
+            "reconstruct_frequency": self.reconstruct_frequency,
+        }
+
+    @staticmethod
+    def deserialize(data):
+        return VariantRandomDistributionSampler(
+            seed=data["seed"],
+            n_subsets=data["n_subsets"],
+            max_len_subset=data["max_len_subset"],
+            min_len_subset=data["min_len_subset"],
+            len_distribution=deserialize(data["len_spec"]),
+            freq_distribution=deserialize(data["freq_spec"]),
+            reconstruct_frequency=data["reconstruct_frequency"],
+        )
+
+    def hash(self):
+        return hashlib.sha1(
+            json.dumps(self.serialize(), sort_keys=True).encode()
+        ).hexdigest()
+
+    def sample_once(self, log: EventLog, subset_idx: int):
         def compute_variants(l: EventLog):
             variants: dict[str, Trace] = {
                 ";".join(e["concept:name"] for e in t): t for t in l
@@ -155,8 +208,15 @@ class VariantRandomDistributionSampler(Sampler):
 
         cached = self.get_cached(log, "variants", compute_variants)
         variants = list(cached["vars"].values())
-        len_set = int(self.len_distribution.sample((1,))[0].item())
-        rand_freq = self.freq_distribution.sample((len(variants),))
+        len_set = int(
+            self.len_distribution.sample(
+                generator=torch.Generator().manual_seed(self.seed + subset_idx)
+            )[0].item()
+        )
+        rand_freq = self.freq_distribution.sample(
+            (len(variants),),
+            generator=torch.Generator().manual_seed(self.seed + subset_idx),
+        )
 
         # normal returns shape (), exponential returns shape (1,)
         if rand_freq.dim() > 1:
@@ -183,6 +243,16 @@ class VariantRandomDistributionSampler(Sampler):
         return TraceSubset(subset, indices=idx)
 
 
+def deserialize_sampler(data) -> Sampler:
+    match data["name"]:
+        case "FullSampler":
+            return FullSampler.deserialize(data)
+        case "VariantRandomDistributionSampler":
+            return VariantRandomDistributionSampler.deserialize(data)
+        case _:
+            raise ValueError(f"Unknown sampler type: {data['name']}")
+
+
 @dataclass
 class ItemType(Serializable["SerializedItemType"]):
     pm: PetriNet
@@ -190,7 +260,7 @@ class ItemType(Serializable["SerializedItemType"]):
     fm: Marking
     variant: str
     parameters: list[float | int | bool]
-    sampler: str
+    sampler: dict[str, Any]
     subset_idx: int
     trace_indices: list[int] | None
 
@@ -215,7 +285,7 @@ class SerializedItemType(Deserializable[ItemType]):
     pm: bytes  # serialized PNML
     variant: str
     parameters: list[float | int | bool]
-    sampler: str
+    sampler: dict[str, Any]
     subset_idx: int
     trace_indices: list[int] | None
 
@@ -245,83 +315,20 @@ class ProcessModelDataset(
     process discovery algorithms and parameter configurations.
     """
 
-    @dataclass
-    class ItemType:
-        pm: PetriNet
-        im: Marking
-        fm: Marking
-        variant: str
-        parameters: list[float | int | bool]
-        sampler: str
-        subset_idx: int
-        trace_indices: list[int] | None
-
-        def hash(self) -> str:
-            d = {str(k): str(v) for k, v in self.__dict__.items() if k != "pm"}
-            return hashlib.sha1(
-                json.dumps(d, sort_keys=True).encode()
-            ).hexdigest()
-
-    class SerializedView:
-        @dataclass
-        class ItemType:
-            pm: str
-            variant: str
-            parameters: list[float | int | bool]
-            sampler: str
-            subset_idx: int
-            trace_indices: list[int] | None
-
-            def hash(self) -> str:
-                d = {
-                    str(k): str(v)
-                    for k, v in self.__dict__.items()
-                    if k != "pm"
-                }
-                return hashlib.sha1(
-                    json.dumps(d, sort_keys=True).encode()
-                ).hexdigest()
-
-            def deserialize(self) -> "ProcessModelDataset.ItemType":
-                pm, im, fm = pnml_importer.deserialize(self.pm.decode('utf-8'))
-                return ProcessModelDataset.ItemType(
-                    pm=pm,
-                    im=im,
-                    fm=fm,
-                    variant=self.variant,
-                    parameters=self.parameters,
-                    sampler=self.sampler,
-                    subset_idx=self.subset_idx,
-                    trace_indices=self.trace_indices,
-                )
-
-        def __init__(self, ds: "ProcessModelDataset"):
-            self.ds = ds
-
-        def __len__(self):
-            return len(self.ds)
-
-        def __getitem__(self, idx: int) -> ItemType:
-            return self.ds.__get_serialized__(idx)
-
-        def __iter__(self) -> Generator[ItemType, None, None]:
-            for i in range(len(self.ds)):
-                yield self.ds.__get_serialized__(i)
-
     def __init__(
         self,
-        rng: RNG,
         log_dataset: BaseEventLogDataset,
         discovery_methods: Union[
             dict[str, Callable[[Any], tuple[PetriNet, Marking, Marking]]],
             "DISCOVERY_METHODS",
         ],
         param_grid: Union[dict[str, list[float | int | bool]], "PARAM_GRID"],
-        sampler_specs: dict[str, Callable[[Any], list[TraceSubset]]],
+        sampler_specs: dict[str, Sampler],
         max_models=None,
         cached=False,
         cache_dir=None,
         num_workers=None,
+        timeout: float = 60.0,
         **kwargs,
     ):
         """
@@ -352,6 +359,7 @@ class ProcessModelDataset(
         self.max_models = max_models
         self.cached = cached
         self.num_workers = num_workers or os.cpu_count()
+        self.timeout = timeout
         if cached:
             self.cache_dir = (
                 Path(cache_dir)
@@ -370,7 +378,9 @@ class ProcessModelDataset(
         base = {
             "methods": list(self.discovery_methods.keys()),
             "param_grid": self.param_grid,
-            "sampler_specs": list(self.sampler_specs.keys()),
+            "sampler_specs": {
+                k: v.hash() for k, v in self.sampler_specs.items()
+            },
         }
         return hashlib.sha1(
             json.dumps(base, sort_keys=True).encode()
@@ -385,14 +395,14 @@ class ProcessModelDataset(
         self,
         method_name: str,
         params: dict[str, Any],
-        sampler_name: str,
+        sampler_serialized: dict[str, Any],
         subset_idx: int,
         subset: TraceSubset,
     ) -> str:
         base = {
             "method": method_name,
             "params": params,
-            "sampler": sampler_name,
+            "sampler": sampler_serialized,
             "subset_idx": subset_idx,
             "indices": getattr(subset, "indices", None),
         }
@@ -404,18 +414,39 @@ class ProcessModelDataset(
         return self.cache_dir / f"{key}.pkl"
 
     # --- caching logic ---
+    @staticmethod
+    def _worker_target(queue, args):
+        try:
+            cfg, save_path = args
+            ProcessModelDataset._discover_and_save(cfg, save_path)
+            queue.put(("success", save_path))
+        except Exception as e:
+            traceback.print_exc()
+            queue.put(("error", (save_path, str(e))))
+
     def _populate_cache_parallel(self):
         logging.info("Populating process model cache...")
         with ProcessPoolExecutor(max_workers=self.num_workers) as pool:
             futures = {}
             for cfg in self.configurations:
-                method_name, fn, params, sampler_name, subset_idx, subset = cfg
+                (
+                    method_name,
+                    fn,
+                    params,
+                    sampler_serialized,
+                    subset_idx,
+                    subset,
+                ) = cfg
                 key = self._config_hash(
-                    method_name, params, sampler_name, subset_idx, subset
+                    method_name, params, sampler_serialized, subset_idx, subset
                 )
                 path = self._cache_path(key)
                 if not path.exists():
-                    futures[pool.submit(self._discover_and_save, cfg, key)] = (
+                    futures[
+                        pool.submit(
+                            ProcessModelDataset._discover_and_save, cfg, path
+                        )
+                    ] = (
                         key,
                         cfg,
                     )
@@ -446,6 +477,10 @@ class ProcessModelDataset(
         precomputed_subsets = {
             s_name: sampler(self.log)
             for s_name, sampler in self.sampler_specs.items()
+        }
+
+        precomputed_samplers = {
+            s_name: sampler for s_name, sampler in self.sampler_specs.items()
         }
 
         for method_name, fn in self.discovery_methods.items():
@@ -494,9 +529,10 @@ class ProcessModelDataset(
                 params_key = tuple(sorted(params.items()))
                 for sampler_name, subsets in precomputed_subsets.items():
                     for subset_idx, subset in enumerate(subsets):
+                        sampler = precomputed_samplers[sampler_name]
                         key = (
                             method_name,
-                            sampler_name,
+                            sampler.hash(),
                             subset_idx,
                             params_key,
                         )
@@ -509,7 +545,7 @@ class ProcessModelDataset(
                                 method_name,
                                 fn,
                                 params,
-                                sampler_name,
+                                sampler.serialize(),
                                 subset_idx,
                                 subset,
                             )
@@ -523,8 +559,8 @@ class ProcessModelDataset(
         )
         return configs
 
+    @staticmethod
     def _safe_discover(
-        self,
         fn: Callable[..., tuple[PetriNet, Marking, Marking]],
         log: EventLog | Trace | pd.DataFrame,
         params: dict[str, Any],
@@ -537,8 +573,8 @@ class ProcessModelDataset(
         filtered = {k: v for k, v in params.items() if k in valid_keys}
         return fn(log, **filtered)
 
+    @staticmethod
     def _discover_and_save(
-        self,
         cfg: tuple[
             str,
             Callable[..., tuple[PetriNet, Marking, Marking]],
@@ -547,59 +583,50 @@ class ProcessModelDataset(
             int,
             EventLog | Trace | pd.DataFrame,
         ],
-        key: str,
-    ):
-        method_name, fn, params, sampler_name, subset_idx, subset = cfg
+        save_path: Path,
+        return_item: bool = False,
+    ) -> SerializedItemType | None:
+        method_name, fn, params, sampler, subset_idx, subset = cfg
         subset = _normalize_log_input(subset)
-        net, im, fm = self._safe_discover(fn, subset, params)
+        net, im, fm = ProcessModelDataset._safe_discover(fn, subset, params)
 
-        serialized = pnml_exporter.serialize(net, im, fm)
-
-        data = {
-            "pm": serialized,
-            "variant": method_name,
-            "parameters": params,
-            "sampler": sampler_name,
-            "subset_idx": subset_idx,
-            "trace_indices": getattr(subset, "indices", None),
-        }
-        with open(self._cache_path(key), "wb") as f:
-            pickle.dump(data, f)
+        item = ItemType(
+            pm=net,
+            im=im,
+            fm=fm,
+            variant=method_name,
+            parameters=params,
+            sampler=sampler,
+            subset_idx=subset_idx,
+            trace_indices=getattr(subset, "indices", None),
+        )
+        with open(save_path, "wb") as f:
+            pickle.dump(item.serialize(), f)
+        if return_item:
+            return item.serialize()
+        return None
 
     def __len__(self):
         return len(self.configurations)
 
     # --- skips deserialization for faster access ---
     def _get_serialized(self, idx: int) -> SerializedItemType:
-        method_name, fn, params, sampler_name, subset_idx, subset = (
+        method_name, fn, params, sampler, subset_idx, subset = (
             self.configurations[idx]
         )
         key = self._config_hash(
-            method_name, params, sampler_name, subset_idx, subset
+            method_name, params, sampler, subset_idx, subset
         )
         path = self._cache_path(key)
 
         if self.cached and path.exists():
             with open(path, "rb") as f:
                 data = pickle.load(f)
-                return SerializedItemType(**data)
+                return data
 
-        subset = _normalize_log_input(subset)
-        net, im, fm = self._safe_discover(fn, subset, params)
-        serialized = pnml_exporter.serialize(net, im, fm)
-
-        data = {
-            "pm": serialized,
-            "variant": method_name,
-            "parameters": params,
-            "sampler": sampler_name,
-            "subset_idx": subset_idx,
-            "trace_indices": getattr(subset, "indices", None),
-        }
-        if self.cached:
-            with open(path, "wb") as f:
-                pickle.dump(data, f)
-        return SerializedItemType(**data)
+        return self._discover_and_save(
+            self.configurations[idx], path, return_item=True
+        )
 
     def __getitem__(self, idx: int) -> ItemType:
         serialized_item = self._get_serialized(idx)
@@ -663,8 +690,7 @@ if __name__ == "__main__":
     from pm4py.vis import view_petri_net
 
     path = "data/63a8435a-077d-4ece-97cd-2c76d394d99c/BPIC15_2.xes"
-    rng = RNG()
-    rng.initialize(42)
+    RNG.initialize(42)
     log_dataset = XESEventLogDataset(path, attribute="concept:name")
 
     '''
@@ -674,7 +700,6 @@ if __name__ == "__main__":
 
     # Create base dataset with caching enabled
     pm_dataset = ProcessModelDataset(
-        rng=rng,
         log_dataset=log_dataset,
         discovery_methods={"inductive": discover_petri_net_inductive},
         param_grid={
@@ -683,21 +708,21 @@ if __name__ == "__main__":
         },
         sampler_specs={
             "variant_random": VariantRandomDistributionSampler(
+                seed=RNG.get_seed(),
                 n_subsets=1000,  # number of subsets: defines how often the log is sampled... basically
                 max_len_subset=100,
                 min_len_subset=10,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
-                len_distribution=torch.distributions.Exponential(
-                    torch.tensor([1.0 / 100.0])
+                len_distribution=ExponentialSpec(
+                    1.0 / 100.0
                 ),  # subset length distribution: defines the distribution of lengths across samples
-                freq_distribution=torch.distributions.Normal(
+                freq_distribution=NormalSpec(
                     10.0, 5.0
                 ),  # (variant) freq_distribution: defines the reordering of traces/variants on every sampling call, by defining the sampling behavior over index(variant) -> frequency.
                 # realistically this would more likely be an exponential... but harder to parametrize... e.g.:
-                # freq_distribution=torch.distributions.Exponential(
+                # freq_distribution=ExponentialSpec(
                 #     torch.tensor([1.0 / 20.0])
                 # )
                 reconstruct_frequency=True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
-                seed=rng.get_seed(),
             )
         },
         cached=True,
@@ -709,5 +734,9 @@ if __name__ == "__main__":
             item.im,
             item.fm,
         )
-        if i >= 10:
+        if i >= 2:
             break
+
+    for item in pm_dataset.serialized:
+        print(item)
+        break

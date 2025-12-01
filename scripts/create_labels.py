@@ -132,12 +132,11 @@ if __name__ == "__main__":
         cfg.seed = args.seed
 
     cfg.log_path = args.path
-    rng = RNG()
-    rng.initialize(cfg.seed)
+    RNG.initialize(cfg.seed)
 
     logging.info(cfg)
 
-    run_dataset = build_pipeline(cfg, rng)
+    run_dataset = build_pipeline(cfg)
 
     df = pd.DataFrame(columns=DF_SCHEMA)
 
@@ -175,8 +174,7 @@ if __name__ == "__main__":
         raise ValueError(f"Split ratios must sum to 1.0 (got {total_ratio})")
 
     unique_ids = labels["combination_id"].unique()
-    rng.initialize(cfg.seed)
-    random.shuffle(unique_ids)  # assuming RNG exposes list-like shuffle
+    random.shuffle(unique_ids)
 
     n = len(unique_ids)
     n_train = int(n * args.train)

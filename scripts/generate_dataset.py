@@ -12,16 +12,15 @@ import logging
 logging.basicConfig(level=logging.INFO)
 
 
-def build_pipeline(cfg: PipelineConfig, rng: RNG) -> RunDataset:
+def build_pipeline(cfg: PipelineConfig) -> RunDataset:
     log_dataset = build_dataset(cfg.log_path)
 
     pm_dataset = ProcessModelDataset(
-        rng=rng,
         log_dataset=log_dataset,
         discovery_methods=cfg.discovery.resolve(),
         param_grid=cfg.discovery.params,
         sampler_specs={
-            cfg.discovery.sampler.name: cfg.discovery.sampler.build(rng)
+            cfg.discovery.sampler.name: cfg.discovery.sampler.build()
         },
         cached=True,
         num_workers=cfg.discovery.workers or cfg.alignment.workers,
@@ -35,18 +34,12 @@ def build_pipeline(cfg: PipelineConfig, rng: RNG) -> RunDataset:
         )
 
     return RunDataset(
-        rng=rng,
         base_path=Path("data/runs"),
         process_model_dataset=pm_dataset,
         aligners=cfg.alignment.resolve(),
-        trace_sampler=cfg.alignment.sampler.build(),
+        trace_sampler=cfg.alignment.sampler.build(ds=pm_dataset),
         n_runs=cfg.alignment.runs,
         n_workers=cfg.alignment.workers,
-        slice=(
-            range(cfg.alignment.slice.from_, cfg.alignment.slice.to)
-            if cfg.alignment.slice
-            else None
-        ),
         write_batch_size=cfg.alignment.write_batch_size,
     )
 

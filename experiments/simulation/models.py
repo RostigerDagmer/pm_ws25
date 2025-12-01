@@ -3,16 +3,11 @@ import random
 from pm4py.vis import view_petri_net
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.objects.petri_net.utils import petri_utils
-from typing import TypeAlias, Union
 from enum import Enum
 from experiments.simulation.structured_net import StructuredNet
 import logging
 import uuid
-import torch
-from dataclasses import dataclass
-
-logging.getLogger(None)
-logging.basicConfig(level=logging.DEBUG)
+from util.distributions import make_distribution
 
 
 def seq(name, labels):
@@ -116,61 +111,70 @@ def random_block_structured(
     return prod
 
 
-def sample_net(dist_params, depth=0, max_depth=None):
+def sample_net(
+    dist_params, depth=0, min_depth=None, max_depth=None, generator=None
+) -> StructuredNet:
     # depth termination
     dists = {
         k: make_distribution(v, depth=depth) for k, v in dist_params.items()
     }
-    stop = torch.rand(1) < dists["p_stop"].sample().item()
+    stop = bool(dists["p_stop"].sample(generator=generator).item()) and (
+        min_depth is None or depth >= min_depth
+    )
     if stop or (max_depth and depth >= max_depth):
-        seq_len = int(dists["seq_len"].sample().item())
+        seq_len = int(dists["seq_len"].sample(generator=generator).item())
         if seq_len == 0:
             return StructuredNet.tau()
         labels = [f"{uuid.uuid4().hex}" for i in range(seq_len)]
         return seq("seq", labels)
 
-    op = dists["op"].sample().item()
-    left = sample_net(dist_params, depth + 1)
-    right = sample_net(dist_params, depth + 1)
+    op = dists["op"].sample(generator=generator).item()
+    comp = Composition(op)
 
-    return Composition(op).compose(left, right)
+    if comp in [Composition.XOR, Composition.AND]:
+        width = int(dists["width"].sample(generator=generator).item())
+        width = max(2, width)  # Ensure at least binary
+        subnets = [
+            sample_net(
+                dist_params,
+                depth + 1,
+                min_depth,
+                max_depth,
+                generator=generator,
+            )
+            for _ in range(width)
+        ]
 
+        if comp == Composition.XOR:
+            return StructuredNet.n_xor(subnets)
+        else:  # AND
+            return StructuredNet.n_and(subnets)
 
-@dataclass(frozen=True)
-class CategoricalSpec:
-    probs: list[float]
+    # Binary ops (LOOP, SEQ)
+    left = sample_net(
+        dist_params, depth + 1, min_depth, max_depth, generator=generator
+    )
+    right = sample_net(
+        dist_params, depth + 1, min_depth, max_depth, generator=generator
+    )
 
-
-@dataclass(frozen=True)
-class PoissonSpec:
-    rate: float
-
-
-@dataclass(frozen=True)
-class BernoulliDepthLinearSpec:
-    base: float
-    slope: float
-
-
-DistParam = Union[CategoricalSpec, PoissonSpec, BernoulliDepthLinearSpec]
-
-
-def make_distribution(spec: DistParam, *, depth=None):
-    if isinstance(spec, CategoricalSpec):
-        return torch.distributions.Categorical(torch.tensor(spec.probs))
-    if isinstance(spec, PoissonSpec):
-        return torch.distributions.Poisson(spec.rate)
-    if isinstance(spec, BernoulliDepthLinearSpec):
-        p = spec.base + spec.slope * depth
-        return torch.distributions.Bernoulli(p)
-    raise TypeError(spec)
+    return comp.compose(left, right)
 
 
 if __name__ == "__main__":
+    from util.distributions import (
+        BernoulliDepthLinearSpec,
+        CategoricalSpec,
+        PoissonSpec,
+    )
+
+    logging.basicConfig(level=logging.DEBUG)
+
     dist_params = {
         "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
         "seq_len": PoissonSpec(4),
-        "p_stop": BernoulliDepthLinearSpec(base=0.1, slope=0.1),
+        "p_stop": BernoulliDepthLinearSpec(base=0.15, slope=0.1),
+        "width": PoissonSpec(3),
     }
     stnet = sample_net(dist_params, max_depth=5)
     view_petri_net(stnet.net, stnet.im, stnet.fm)

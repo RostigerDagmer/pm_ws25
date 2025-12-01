@@ -1,14 +1,21 @@
-from typing import Any, Generator, Optional, Union
+import os
+from typing import Any, Iterator
+from torch.utils.data import Dataset
 from dataloaders.base import BaseEventLogDataset
-from dataloaders.net import ProcessModelDataset
-from experiments.simulation import models, driver, simulate
-from experiments.simulation.structured_net import StructuredNet
-from pm4py.objects.log.obj import EventLog, Trace
-from experiments.simulation.models import DistParam
-from dataclasses import dataclass
+from dataloaders.serializable import (
+    Serializable,
+    Deserializable,
+    WithSerializedView,
+)
+from experiments.simulation import models, simulate
+from experiments.simulation.structured_net import StructuredNet, TensorNet
+from pm4py.objects.log.obj import Trace, EventLog
+from util.distributions import DistParam
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import torch
+from util.rng import RNG
 
 
 class SyntheticEventLogDataset(BaseEventLogDataset):
@@ -38,18 +45,17 @@ class SyntheticEventLogDataset(BaseEventLogDataset):
             (self.n_traces + self.batch_size - 1) // self.batch_size
         ):
             batch = simulate.simulate_batch(
-                (self.N['pre'], self.N['post']),
-                self.N['M0'],
-                self.N['Mf'],
-                self.N['labels'],
+                (self.N.pre, self.N.post),
+                self.N.M0,
+                self.N.Mf,
+                self.N.labels,
                 steps=self.max_trace_length,
                 batch_size=self.batch_size,
                 compact=True,
             )
-            simulate.apply_labels(batch, self.N['labels'])
-            log.extend(batch)
+            log.extend(simulate.apply_labels(batch, self.N.labels))
 
-        self.log = log
+        self.log = EventLog(log)
 
     def _load_log(self, source_path, **kwargs):
         return None
@@ -58,131 +64,126 @@ class SyntheticEventLogDataset(BaseEventLogDataset):
         return self.log[idx]
 
 
-class EmptyEventLogDataset(BaseEventLogDataset):
+@dataclass
+class ItemType(Serializable["SerializedItemType"]):
+    stnet: StructuredNet  # wraps .net, .im, .fm
+    params: dict[str, Any | DistParam]  # whatever you used to generate it
+
+    # unify with discovered models
+    @property
+    def pm(self):
+        return self.stnet.net
+
+    @property
+    def im(self):
+        return self.stnet.im
+
+    @property
+    def fm(self):
+        return self.stnet.fm
+
+    def hash(self) -> str:
+        serializable_params = self._dict()
+        return hashlib.sha1(
+            json.dumps(serializable_params, sort_keys=True).encode()
+        ).hexdigest()
+
+    def _dict(self) -> dict[str, Any]:
+        return {
+            **self.params,
+            "dist_params": {
+                k: (v.__dict__ if hasattr(v, "__dict__") else v)
+                for k, v in self.params.get("dist_params", {}).items()
+            },
+        }
+
+    def serialize(self) -> "SerializedItemType":
+        return SerializedItemType(self._dict(), self.stnet.to_tensor())
+
+
+@dataclass
+class SerializedItemType(Deserializable[ItemType]):
+    params: dict
+    net: TensorNet
+
+    def hash(self) -> str:
+        serializable_params = {
+            **self.params,
+            "dist_params": {
+                k: (v.__dict__ if hasattr(v, "__dict__") else v)
+                for k, v in self.params.get("dist_params", {}).items()
+            },
+        }
+        return hashlib.sha1(
+            json.dumps(serializable_params, sort_keys=True).encode()
+        ).hexdigest()
+
+    def deserialize(self) -> ItemType:
+        stnet = StructuredNet.from_tensor(self.net)
+        return ItemType(
+            stnet=stnet,
+            params=self.params,
+        )
+
+
+class SyntheticProcessModelDataset(
+    Dataset[ItemType], WithSerializedView[ItemType, SerializedItemType]
+):
+
     def __init__(
         self,
-        **kwargs,
+        param_grid: list[tuple[dict, int]],
+        max_models=None,
+        cached=False,
+        cache_dir=None,
+        num_workers=0,
     ):
-        """
-        Args:
-            **kwargs: Passed to BaseEventLogDataset.
-        """
-        super().__init__(source_path=None, **kwargs)
-
-    def _load_log(self, source_path, **kwargs):
-        return simulate.EventLog()
-
-    def __len__(self) -> int:
-        return 0
-
-    def __getitem__(self, idx: int) -> simulate.Trace:
-        return None
-
-
-class SyntheticProcessModelDataset(ProcessModelDataset):
-    @dataclass
-    class ItemType:
-        stnet: StructuredNet  # wraps .net, .im, .fm
-        params: dict[str, Any | DistParam]  # whatever you used to generate it
-
-        # unify with discovered models
-        @property
-        def pm(self):
-            return self.stnet.net
-
-        @property
-        def im(self):
-            return self.stnet.im
-
-        @property
-        def fm(self):
-            return self.stnet.fm
-
-        def hash(self) -> str:
-            serializable_params = {
-                **self.params,
-                "dist_params": {
-                    k: (v.__dict__ if hasattr(v, "__dict__") else v)
-                    for k, v in self.params.get("dist_params", {}).items()
-                },
-            }
-            return hashlib.sha1(
-                json.dumps(serializable_params, sort_keys=True).encode()
-            ).hexdigest()
-
-    class SerializedView:
-        @dataclass
-        class ItemType:
-            params: dict  # enough to re-sample or reconstruct
-
-            def hash(self) -> str:
-                serializable_params = {
-                    **self.params,
-                    "dist_params": {
-                        k: (v.__dict__ if hasattr(v, "__dict__") else v)
-                        for k, v in self.params.get("dist_params", {}).items()
-                    },
-                }
-                return hashlib.sha1(
-                    json.dumps(serializable_params, sort_keys=True).encode()
-                ).hexdigest()
-
-            def deserialize(self) -> "SyntheticProcessModelDataset.ItemType":
-                # inspect function arguments of sample_net
-                args = models.sample_net.__code__.co_varnames
-                stnet = models.sample_net(
-                    **{k: v for k, v in self.params.items() if k in args}
-                )  # deterministic
-                return SyntheticProcessModelDataset.ItemType(
-                    stnet=stnet,
-                    params=self.params,
-                )
-
-        def __init__(self, ds: "ProcessModelDataset"):
-            self.ds = ds
-
-        def __len__(self):
-            return len(self.ds)
-
-        def __getitem__(self, idx: int) -> ItemType:
-            return self.ds.__get_serialized__(idx)
-
-        def __iter__(self) -> Generator[ItemType, None, None]:
-            for i in range(len(self.ds)):
-                yield self.ds.__get_serialized__(i)
-
-    def __init__(self, param_grid: list[tuple[dict, int]]):
-        super().__init__(
-            log_dataset=EmptyEventLogDataset(),
-            discovery_methods={},
-            param_grid={},
-            sampler_specs={},
-            max_models=None,
-            cached=False,
-            cache_dir=None,
-            num_workers=None,
-        )
+        self.param_grid = param_grid
         self.configurations = [
             {**p, "index": i}
             for params, reps in param_grid
             for i, p in enumerate([params] * reps)
         ]
-        self.serialized: list[
-            SyntheticProcessModelDataset.SerializedView.ItemType
-        ] = [
-            SyntheticProcessModelDataset.SerializedView.ItemType(p)
-            for p in self.configurations
-        ]
+        self.max_models = max_models
+        self.cached = cached
+        self.cache_dir = cache_dir
+        self.log = None
+        self.num_workers = (
+            num_workers if num_workers > 0 else os.cpu_count() or 1
+        )
 
-    def __get_serialized__(
-        self, idx: int
-    ) -> ProcessModelDataset.SerializedView.ItemType:
-        return self.serialized[idx]
+    def __len__(self):
+        return len(self.configurations)
+
+    def __iter__(self) -> Iterator[ItemType]:
+        for i in range(len(self)):
+            yield self[i]
+
+    def _get_serialized(self, idx: int) -> SerializedItemType:
+        return self[idx].serialize()
+
+    def __getitem__(self, idx: int) -> ItemType:
+        cfg = {
+            k: v for k, v in self.configurations[idx].items() if k != 'index'
+        }
+        # combine seed from rng and index
+        config_hash = hashlib.sha1(
+            json.dumps(
+                self.configurations[idx], sort_keys=True, default=asdict
+            ).encode()
+        ).hexdigest()
+        sample_seed = (RNG.get_seed() + int(config_hash, 16)) % 2**32
+        model = models.sample_net(
+            generator=torch.Generator().manual_seed(sample_seed), **cfg
+        )
+        return ItemType(model, self.configurations[idx])
 
     def hash(self) -> str:
         # global hash of all params
         return hashlib.sha1(
-            json.dumps(self.configurations, sort_keys=True).encode()
+            json.dumps(
+                self.configurations, sort_keys=True, default=asdict
+            ).encode()
         ).hexdigest()
 
 
@@ -194,11 +195,15 @@ if __name__ == "__main__":
         BernoulliDepthLinearSpec,
     )
 
+    rng = RNG()
+    rng.initialize(42)
+
     dist_params = {
         "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
         "seq_len": PoissonSpec(4),
         "p_stop": BernoulliDepthLinearSpec(base=0.2, slope=0.1),
     }
+
     stnet = models.sample_net(dist_params)
     dataset = SyntheticEventLogDataset(
         model=stnet,
@@ -209,6 +214,7 @@ if __name__ == "__main__":
         print(trace)
 
     model_dataset = SyntheticProcessModelDataset(
+        rng=rng,
         param_grid=[
             (
                 {
@@ -262,7 +268,7 @@ if __name__ == "__main__":
                 },
                 3,
             ),
-        ]
+        ],
     )
 
     for item in model_dataset:

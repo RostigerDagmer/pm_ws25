@@ -13,6 +13,10 @@ class RNG:
     @staticmethod
     def initialize(seed: int = 1) -> None:
         """Set global RNG seed for reproducibility."""
+        if RNG._seed is not None:
+            msg = "RNG is already initialized. Multiple initializations are not allowed."
+            raise RuntimeError(msg)
+
         RNG._seed = seed
 
         random.seed(seed)

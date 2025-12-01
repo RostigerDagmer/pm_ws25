@@ -22,7 +22,7 @@ The entire token game is essentially two lines of vector math.
 # %%
 import torch
 from typing import Optional
-from pm4py.objects.log.obj import EventLog, Trace
+from pm4py.objects.log.obj import EventLog, Trace, Event
 
 
 def simulate(
@@ -94,7 +94,7 @@ def simulate_batch(
         enabled = (M.unsqueeze(1) >= pre).all(dim=2)  # [B, T]
 
         # zero out probs where not enabled
-        probs = enabled.float() * weights  # [B, T]
+        probs = (enabled.float() * weights).clamp(min=1e-8)  # [B, T]
         probs = torch.nn.functional.normalize(probs, dim=1)
         # sample one transition per batch row
         # torch.multinomial expects non-negative rows that sum to 1
@@ -131,11 +131,17 @@ def simulate_batch(
 
 
 def apply_labels(log: torch.Tensor, labels: list[str]) -> EventLog:
-    def apply_label(tok: torch.Tensor) -> str:
-        tok = tok.item()
-        if tok >= 0:
-            return labels[tok]
-        else:
-            return "τ"
-
-    return EventLog([Trace(list(map(apply_label, trace))) for trace in log])
+    """
+    Converts a tensor of token indices into an EventLog of Traces of Events.
+    Filters out silent transitions (indices < 0).
+    """
+    ret = EventLog()
+    for trace_tensor in log:
+        events = []
+        for tok in trace_tensor:
+            tok_idx = tok.item()
+            if tok_idx >= 0:
+                # Create an Event object (dict-like)
+                events.append(Event({"concept:name": labels[tok_idx]}))
+        ret.append(Trace(events))
+    return ret
