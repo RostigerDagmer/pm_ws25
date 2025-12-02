@@ -65,7 +65,7 @@ class DiscoveryConfig(BaseModel):
     workers: Optional[int] = None
     methods: Union[str, List[str]]
     params: Dict[str, Any]
-    sampler: SamplerConfig
+    samplers: list[SamplerConfig]
 
     @field_validator("methods")
     def validate_methods(cls, v):

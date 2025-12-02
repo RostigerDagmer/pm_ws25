@@ -20,7 +20,7 @@ def build_pipeline(cfg: PipelineConfig) -> RunDataset:
         discovery_methods=cfg.discovery.resolve(),
         param_grid=cfg.discovery.params,
         sampler_specs={
-            cfg.discovery.sampler.name: cfg.discovery.sampler.build()
+            sampler.name: sampler.build() for sampler in cfg.discovery.samplers
         },
         cached=True,
         num_workers=cfg.discovery.workers or cfg.alignment.workers,
