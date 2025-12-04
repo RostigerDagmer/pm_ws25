@@ -6,3 +6,5 @@ jupyterlab
 aiohttp
 torch
 pydantic
+xgboost
+scikit-learn

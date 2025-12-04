@@ -15,7 +15,7 @@ from pathlib import Path
 import pickle
 import time
 from torch.utils.data import Dataset
-from typing import Any, Iterator, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 import os
 import hashlib
 import json
@@ -753,6 +753,38 @@ class RunDataset(
 
     def __getitem__(self, index: int) -> "RunDataset.ItemType":
         return self._get_serialized(index).deserialize()
+
+    def iter_by_combination(self) -> Iterator[Tuple[
+        "ProcessModelDataset.ItemType",
+        Trace,
+        Dict[str, Tuple[str, Union[typing.AlignmentResult, typing.ListAlignments], List[PerfCounter]]]
+    ]]:
+        """
+        Iterate over RunDataset grouped by combination_id.
+
+        Yields for each (Model, Trace) combination:
+            - model: ProcessModelDataset.ItemType
+            - trace: Trace object
+            - results_dict: Dict[algo_name -> (algo, item, perf)]
+        """
+        combinations = {}
+        for item_id in self.index:
+            item = self[self.index.index(item_id)]
+
+            comb_id = item.comb_id
+            if comb_id not in combinations:
+                combinations[comb_id] = {
+                    'model': item.model,
+                    'trace': item.trace,
+                    'results': {}
+                }
+
+            combinations[comb_id]['results'][item.algo] = (
+                item.algo, item.item, item.perf
+            )
+
+        for comb_id, data in combinations.items():
+            yield (data['model'], data['trace'], data['results'])
 
 
 def get_stats(stats: list[PerfCounter]) -> dict[str, float]:
