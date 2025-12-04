@@ -19,6 +19,7 @@ visit <https://www.gnu.org/licenses/>.
 Website: https://processintelligence.solutions
 Contact: info@processintelligence.solutions
 '''
+
 from copy import copy
 
 from pm4py.algo.conformance.alignments.petri_net import variants
@@ -38,7 +39,7 @@ from pm4py.util.constants import (
 )
 import importlib.util
 from typing import Optional, Dict, Any, Union
-from pm4py.objects.log.obj import EventLog, EventStream, Trace
+from pm4py.objects.log.obj import EventLog, EventStream
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.util import typing, constants, pandas_utils
 import pandas as pd
@@ -51,6 +52,9 @@ class Variants(Enum):
     VERSION_DIJKSTRA_LESS_MEMORY = variants.dijkstra_less_memory
     VERSION_DISCOUNTED_A_STAR = variants.discounted_a_star
     VERSION_INCREMENTAL_A_STAR = variants.incremental_a_star
+    VERSION_REMAINING_TRACE = variants.remaining_trace
+    VERSION_REQUIRED_ACTIVITIES = variants.required_activities
+
 
 class Parameters(Enum):
     PARAM_TRACE_COST_FUNCTION = "trace_cost_function"
@@ -73,7 +77,7 @@ class Parameters(Enum):
     BEST_WORST_COST_INTERNAL = "best_worst_cost_internal"
     FITNESS_ROUND_DIGITS = "fitness_round_digits"
     SYNCHRONOUS = "synchronous_dijkstra"
-    EXPONENT="theta"
+    EXPONENT = "theta"
     ENABLE_BEST_WORST_COST = "enable_best_worst_cost"
 
 
@@ -521,7 +525,9 @@ def get_diagnostics_dataframe(log, align_output, parameters=None):
         Parameters.CASE_ID_KEY, parameters, DEFAULT_TRACEID_KEY
     )
 
-    log = log_converter.apply(log, variant=log_converter.Variants.TO_EVENT_LOG, parameters=parameters)
+    log = log_converter.apply(
+        log, variant=log_converter.Variants.TO_EVENT_LOG, parameters=parameters
+    )
 
     diagn_stream = []
 
