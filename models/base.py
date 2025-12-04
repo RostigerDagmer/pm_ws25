@@ -255,7 +255,8 @@ class ClassificationModel(ABC):
         features = self.feature_extractor.extract(
             model, im, fm,
             trace_net, trace_im, trace_fm,
-            return_as_dict=False
+            return_as_dict=False,
+            use_cache=False  # Disable cache to measure actual extraction time
         )
         t_fe_end = time.perf_counter()
         feature_extraction_time = t_fe_end - t_fe_start

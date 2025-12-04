@@ -62,19 +62,22 @@ class BaseFeatureExtractor(ABC):
         )
 
     def extract(
-        self, *args, return_as_dict: bool = False, **kwargs
+        self, *args, return_as_dict: bool = False, use_cache: bool = None, **kwargs
     ) -> Union[np.ndarray, Dict[str, float]]:
         """
         Extract features from input.
 
         Args:
             return_as_dict: If True, return dict. Otherwise return numpy array.
+            use_cache: Override instance cache setting. If None, uses self.use_cache.
 
         Returns:
             Feature vector as numpy array or dict.
         """
+        should_cache = self.use_cache if use_cache is None else use_cache
+
         # Check cache if enabled
-        if self.use_cache:
+        if should_cache:
             cache_key = self._compute_cache_key(*args, **kwargs)
             if cache_key is not None and cache_key in self._feature_cache:
                 cached_dict = self._feature_cache[cache_key]
@@ -90,7 +93,7 @@ class BaseFeatureExtractor(ABC):
         )
 
         # Cache if enabled
-        if self.use_cache:
+        if should_cache:
             cache_key = self._compute_cache_key(*args, **kwargs)
             if cache_key is not None:
                 self._feature_cache[cache_key] = feature_dict
