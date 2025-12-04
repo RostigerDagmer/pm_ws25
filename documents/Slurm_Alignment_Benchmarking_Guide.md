@@ -26,15 +26,17 @@
 
 This system is a **Process Mining benchmarking tool** designed to compare different alignment algorithms on SLURM cluster systems.
 
-**Main Purpose:** Evaluates the performance of 4 different alignment algorithms (used to match event logs with process models) across multiple datasets and traces, then trains ML models to predict which algorithm will be fastest for a given case.
+**Main Purpose:** Evaluates the performance of 5 different alignment algorithms (used to match event logs with process models) across multiple datasets and traces, then trains ML models to predict which algorithm will be fastest for a given case.
 
 ### Experiment Design
 
-**4 Alignment Variants:**
-- `dijkstra` - Basic approach without heuristics
-- `lp_heuristic` - A* with linear programming heuristic
-- `ilp_heuristic` - A* with integer linear programming
-- `incremental_astar` - Incremental A* search
+**5 Alignment Variants:**
+- `dijkstra` - Dijkstra (h=0) without heuristics
+- `remaining_trace` - Remaining Trace heuristic
+- `required_activities` - Required Activities heuristic
+- `lp_heuristic` - A* with linear programming (LP) heuristic
+- `ilp_heuristic` - A* with integer linear programming (ILP)
+- ~~`incremental_astar`~~ - Incremental A* search (commented out due to known issues)
 
 **2 Datasets:**
 - BPI Challenge 2013
@@ -42,7 +44,7 @@ This system is a **Process Mining benchmarking tool** designed to compare differ
 
 **10 trace indices** per dataset to test on
 
-**Total:** 2 datasets × 10 traces × 4 variants = **80 experiments**
+**Total:** 2 datasets × 10 traces × 5 variants = **100 experiments**
 
 ### Simple Explanation
 
@@ -50,7 +52,7 @@ Think of it like testing cars on race tracks:
 
 - **2 Datasets** = 2 different race tracks (BPI 2013, BPI 2017)
 - **10 Traces** = 10 different routes on each track
-- **4 Variants** = 4 different navigation algorithms
+- **5 Variants** = 5 different navigation algorithms
 
 The script tests **every combination** to find out which algorithm is fastest for different situations!
 
@@ -66,19 +68,19 @@ The script tests **every combination** to find out which algorithm is fastest fo
 
 **Core Functions:**
 
-- **`profile_alignment()`** (Line 123)
+- **`profile_alignment()`**
   - Runs alignment with profiling enabled
   - Measures: total runtime, search time, LP/ILP solving time
   - Returns detailed performance metrics
 
-- **`run_single_experiment()`** (Line 169)
+- **`run_single_experiment()`**
   - Loads event log and extracts specific trace
   - Discovers process model using Inductive Miner
   - Runs alignment with one variant
   - Extracts features for ML training (optional)
   - Saves results as JSON
 
-- **`aggregate_results()`** (Line 324)
+- **`aggregate_results()`**
   - Aggregates individual experiment results
   - Creates summary CSV with all metrics
   - Identifies the fastest aligner for each trace
@@ -89,7 +91,7 @@ The script tests **every combination** to find out which algorithm is fastest fo
 
 ### 2. SLURM Batch Script (run_heuristics_parallel.slurm)
 
-Automates the parallel execution of all 80 experiments on the LRZ cluster.
+Automates the parallel execution of all 100 experiments on the LRZ cluster.
 
 **SLURM Configuration:**
 
@@ -97,7 +99,7 @@ Job Settings:
 - `--job-name=pm_heuristics` - Job identifier
 - `--clusters=serial` - Use serial cluster
 - `--partition=serial_std` - Standard serial partition
-- `--array=0-79` - Create 80 parallel tasks (one per experiment)
+- `--array=0-99` - Create 100 parallel tasks (one per experiment)
 
 Resources per Task:
 - `--time=01:00:00` - 1 hour maximum runtime
@@ -117,12 +119,12 @@ Logging:
 
 **Execution Flow:**
 
-Each of the 80 tasks:
+Each of the 100 tasks:
 1. Prints job information (task ID, node, resources, timestamp)
 2. Runs: `python lrz-cluster/run_heuristics_parallel.py --run_id $SLURM_ARRAY_TASK_ID`
 3. Saves individual experiment results to `results/exp_XXXX.json`
 
-**Special behavior for last task (ID 79):**
+**Special behavior for last task (ID 99):**
 - Waits 10 seconds for all other tasks to finish writing
 - Automatically runs aggregation: `python ... --aggregate`
 - Trains all ML models and creates summary CSV
@@ -134,7 +136,7 @@ Each of the 80 tasks:
 ### SLURM Cluster Usage
 
 ```bash
-# Submit the SLURM job array (starts all 80 experiments)
+# Submit the SLURM job array (starts all 100 experiments)
 sbatch lrz-cluster/run_heuristics_parallel.slurm
 
 # Check job status
@@ -151,7 +153,7 @@ cat logs/job_<array_id>_<task_id>.err
 ### Manual Python Usage (without SLURM)
 
 ```bash
-# List all 80 experiment configurations
+# List all 100 experiment configurations
 python run_heuristics_parallel.py --list-experiments
 
 # Run experiment #0 manually
@@ -186,8 +188,8 @@ This command was used to generate `summary.csv` and `best_aligner_labels.csv` af
 ## Complete Workflow
 
 1. **Submit SLURM array job** - `sbatch lrz-cluster/run_heuristics_parallel.slurm`
-2. **80 tasks run in parallel** - Each saves results to `results/exp_XXXX.json`
-3. **Task 79 automatically aggregates** - Creates `results/summary.csv` and trains ML models
+2. **100 tasks run in parallel** - Each saves results to `results/exp_XXXX.json`
+3. **Task 99 automatically aggregates** - Creates `results/summary.csv` and trains ML models
 4. **ML models saved** - 3 trained models as `.pkl` files (if training succeeds)
 
 ---
@@ -197,7 +199,7 @@ This command was used to generate `summary.csv` and `best_aligner_labels.csv` af
 ### Experiment Data (`pm_ws25/results/`)
 
 **Individual Experiment Results:**
-- `exp_0000.json` to `exp_0079.json` - Individual experiment results (80 files expected)
+- `exp_0000.json` to `exp_0099.json` - Individual experiment results (100 files expected)
   - Contains: timing metrics, visited states, costs, feature vectors
 
 **Aggregated Results:**
@@ -216,21 +218,23 @@ This command was used to generate `summary.csv` and `best_aligner_labels.csv` af
 
 ### SLURM Job Logs (`pm_ws25/logs/`)
 
-- `job_<array_id>_0.out` to `job_<array_id>_79.out` - Standard output for each task (80 files)
-- `job_<array_id>_0.err` to `job_<array_id>_79.err` - Error output for each task (80 files)
+- `job_<array_id>_0.out` to `job_<array_id>_99.out` - Standard output for each task (100 files)
+- `job_<array_id>_0.err` to `job_<array_id>_99.err` - Error output for each task (100 files)
 
 ---
 
 ## Known Issues & Workarounds
 
-### Incremental A* Failures
+### Incremental A* Failures (Historical)
 
-**Problem:** 11 out of 80 experiments failed with `incremental_astar` variant returning `None`.
+**Note:** The `incremental_astar` variant has been commented out in the current configuration due to known reliability issues.
+
+**Problem:** Previously, 11 out of 80 experiments failed with `incremental_astar` variant returning `None`.
 
 **Failed Experiments:**
 - exp_0011, exp_0043, exp_0047, exp_0051, exp_0055, exp_0059, exp_0063, exp_0067, exp_0071, exp_0075, exp_0079
 
-**Pattern:** All failed experiments have `experiment_id % 4 = 3`, meaning all use the `incremental_astar` variant.
+**Pattern:** All failed experiments had `experiment_id % 4 = 3`, meaning all used the `incremental_astar` variant.
 
 **Root Cause Analysis:**
 
@@ -251,25 +255,10 @@ The `incremental_astar` implementation in pm4py has multiple issues:
 
 **Impact:**
 - 69 out of 80 experiments succeeded (86% success rate)
-- Only affects `incremental_astar` variant
-- Other 3 variants (`dijkstra`, `lp_heuristic`, `ilp_heuristic`) work correctly
+- Only affected `incremental_astar` variant
+- Other variants (`dijkstra`, `remaining_trace`, `required_activities`, `lp_heuristic`, `ilp_heuristic`) work correctly
 
-**Workaround:**
-
-Due to this error, manual aggregation was performed on the 69 successful experiments using:
-
-```bash
-cd ~/pm_ws25
-export PYTHONPATH="${PYTHONPATH}:${HOME}/pm_ws25"
-source .venv/bin/activate
-python lrz-cluster/run_heuristics_parallel.py --aggregate --output-dir results
-```
-
-This successfully generated:
-- ✅ `results/summary.csv` - Statistics for 69 successful experiments
-- ✅ `results/best_aligner_labels.csv` - Best aligner per trace
-
-The other 3 variants are reliable and sufficient for algorithm comparison.
+The 5 active variants are reliable and sufficient for algorithm comparison.
 
 **Note on ML Training:** ML model training failed because all 20 tested traces showed `dijkstra` as the fastest variant. Machine learning requires at least 2 different classes, but this result is valuable - it shows that for these particular traces, **dijkstra consistently performs best**.
 
