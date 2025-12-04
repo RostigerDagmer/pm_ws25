@@ -44,9 +44,11 @@ SEED = 42
 # Alignment algorithm variants
 ALIGNMENT_VARIANTS = {
     "dijkstra": AlignmentsVariants.VERSION_DIJKSTRA_NO_HEURISTICS,
+    "remaining_trace": AlignmentsVariants.VERSION_REMAINING_TRACE,
+    "required_activities": AlignmentsVariants.VERSION_REQUIRED_ACTIVITIES,
     "lp_heuristic": AlignmentsVariants.VERSION_STATE_EQUATION_A_STAR,
     "ilp_heuristic": AlignmentsVariants.VERSION_STATE_EQUATION_A_STAR_ILP,
-    "incremental_astar": AlignmentsVariants.VERSION_INCREMENTAL_A_STAR,
+    # "incremental_astar": AlignmentsVariants.VERSION_INCREMENTAL_A_STAR,
 }
 
 # Dataset configurations
