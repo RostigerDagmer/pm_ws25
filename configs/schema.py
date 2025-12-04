@@ -137,6 +137,7 @@ class TraceSamplerConfig(BaseModel):
 
 class AlignmentConfig(BaseModel):
     runs: int = Field(gt=0)
+    cache_path: Optional[str] = None
     workers: int = Field(ge=0)
     write_batch_size: int = Field(gt=0)
     variants: Union[str, list[str]]

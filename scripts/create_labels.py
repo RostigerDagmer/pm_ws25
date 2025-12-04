@@ -107,6 +107,32 @@ def collate(batch: list[RunDataset.SerializedItemType]) -> pd.DataFrame:
     return df_local
 
 
+def split_dataframes(
+    labels: pd.DataFrame,
+    train_ratio: float,
+    test_ratio: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    unique_ids = labels["combination_id"].unique()
+    random.shuffle(unique_ids)
+
+    n = len(unique_ids)
+    n_train = int(n * train_ratio)
+    n_test = int(n * test_ratio)
+
+    train_ids = set(unique_ids[:n_train])
+    test_ids = set(unique_ids[n_train : n_train + n_test])
+    eval_ids = set(unique_ids[n_train + n_test :])  # residual into eval
+
+    train_df = labels[labels["combination_id"].isin(train_ids)]
+    test_df = labels[labels["combination_id"].isin(test_ids)]
+    eval_df = labels[labels["combination_id"].isin(eval_ids)]
+
+    print(
+        f"SPLIT SIZES → train:{len(train_df)}  test:{len(test_df)}  eval:{len(eval_df)}"
+    )
+    return train_df, test_df, eval_df
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
@@ -173,28 +199,10 @@ if __name__ == "__main__":
     if not np.isclose(total_ratio, 1.0):
         raise ValueError(f"Split ratios must sum to 1.0 (got {total_ratio})")
 
-    unique_ids = labels["combination_id"].unique()
-    random.shuffle(unique_ids)
-
-    n = len(unique_ids)
-    n_train = int(n * args.train)
-    n_test = int(n * args.test)
-
-    train_ids = set(unique_ids[:n_train])
-    test_ids = set(unique_ids[n_train : n_train + n_test])
-    eval_ids = set(unique_ids[n_train + n_test :])  # residual into eval
-
-    train_df = labels[labels["combination_id"].isin(train_ids)]
-    test_df = labels[labels["combination_id"].isin(test_ids)]
-    eval_df = labels[labels["combination_id"].isin(eval_ids)]
-
-    print(
-        f"SPLIT SIZES → train:{len(train_df)}  test:{len(test_df)}  eval:{len(eval_df)}"
-    )
-
-    # write to csv
     base = run_dataset.save_path().with_suffix('')
-
+    train_df, test_df, eval_df = split_dataframes(
+        labels, args.train, args.test
+    )
     train_df.to_csv(f"{base}.train.csv", index=False)
     test_df.to_csv(f"{base}.test.csv", index=False)
     eval_df.to_csv(f"{base}.eval.csv", index=False)

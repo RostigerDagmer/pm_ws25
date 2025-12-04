@@ -34,7 +34,7 @@ def build_pipeline(cfg: PipelineConfig) -> RunDataset:
         )
 
     return RunDataset(
-        base_path=Path("data/runs"),
+        base_path=cfg.alignment.cache_path or Path("data/runs"),
         process_model_dataset=pm_dataset,
         aligners=cfg.alignment.resolve(),
         trace_sampler=cfg.alignment.sampler.build(ds=pm_dataset),

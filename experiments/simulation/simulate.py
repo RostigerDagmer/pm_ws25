@@ -94,7 +94,15 @@ def simulate_batch(
         enabled = (M.unsqueeze(1) >= pre).all(dim=2)  # [B, T]
 
         # zero out probs where not enabled
-        probs = (enabled.float() * weights).clamp(min=1e-8)  # [B, T]
+        probs = enabled.float() * weights  # [B, T]
+
+        # Identify active rows (at least one enabled transition)
+        active = enabled.any(dim=1)  # [B]
+
+        # Handle all-zero probs to avoid multinomial error
+        # We set a dummy probability for deadlocked rows, but we won't use the result
+        probs[~active, 0] = 1.0
+
         probs = torch.nn.functional.normalize(probs, dim=1)
         # sample one transition per batch row
         # torch.multinomial expects non-negative rows that sum to 1
@@ -103,14 +111,23 @@ def simulate_batch(
         )  # [B]
 
         # build delta = post - pre
+        # build delta = post - pre
         delta = post[t_idx] - pre[t_idx]
-        M = M + delta  # broadcast add per row
+
+        # Only update M for active rows
+        M[active] = M[active] + delta[active]
 
         # record label if visible
         visible = ~silent_mask[t_idx]
-        logs[torch.arange(batch_size, device=device), step] = (
-            labels_t[t_idx] + 1
-        ) * visible.long() - 1
+
+        current_step_logs = (labels_t[t_idx] + 1) * visible.long() - 1
+
+        # Create a mask for update: active
+        update_mask = active
+
+        logs[torch.arange(batch_size, device=device)[update_mask], step] = (
+            current_step_logs[update_mask]
+        )
 
         # check completion
         done |= torch.all(M == Mf, dim=1)

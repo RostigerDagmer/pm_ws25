@@ -14,6 +14,7 @@ import multiprocessing
 from pathlib import Path
 import pickle
 import time
+import torch
 from torch.utils.data import Dataset
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 import os
@@ -326,8 +327,10 @@ class SyntheticTraceSampler(TraceSampler):
         batch_size: int = 128,
         steps: int = 100,
         noise: NoiseParams = NoiseParams(),
-        device: str = "cuda:0",
+        device: str = "cpu",
     ):
+        if slice is None:
+            slice = range(batch_size)
         super().__init__(seed=seed, ds=ds, slice=slice)
         self.pm_dataset = ds
         self.batch_size = batch_size
@@ -342,8 +345,9 @@ class SyntheticTraceSampler(TraceSampler):
         return self._traces_per_model
 
     def __getitem__(self, index: int) -> Trace:
-        trace: Trace = self.log[index]
-        return inject_noise_trace(trace=trace, seed=self.seed)
+        raise RuntimeError(
+            "SyntheticTraceSampler must be used via iter_for_model(model)"
+        )
 
     def __iter__(self):
         raise RuntimeError(
@@ -364,8 +368,7 @@ class SyntheticTraceSampler(TraceSampler):
     def iter_for_model(
         self, model: SyntheticProcessModelDataset.SerializedItemType
     ) -> Iterator[Trace]:
-        deser = model  # -> ItemType(stnet, params)
-        N = deser.net
+        N = model.net
 
         pre = N.pre.to(self.device)
         post = N.post.to(self.device)
@@ -374,15 +377,14 @@ class SyntheticTraceSampler(TraceSampler):
         labels = N.labels  # list[str]
 
         # for determinism: derive a per-model seed
-        model_seed = (int(model.hash(), 16) ^ self.seed) % 0xFFFFFFFFFF
+        model_seed = (int(model.hash(), 16) ^ self.seed) % 0xFFFFFFFFFFFF
 
         # generate traces in batches but expose as individual Trace objects
         remaining = self._traces_per_model
         trace_index = 0
-
+        generator = torch.Generator(device=self.device).manual_seed(model_seed)
         while remaining > 0:
             bsz = min(self.batch_size, remaining)
-
             seq_batch = simulate_batch(
                 (pre, post),
                 M0,
@@ -391,13 +393,13 @@ class SyntheticTraceSampler(TraceSampler):
                 steps=self.steps,
                 batch_size=bsz,
                 compact=True,
-                generator=torch.Generator(device=self.device).manual_seed(
-                    model_seed + trace_index
-                ),
+                generator=generator,
             )  # shape [B, steps'] with integer label ids
 
             log = apply_labels(seq_batch, labels)
             for trace in log:
+                trace_hash = RunDataset._hash_trace(trace)
+                trace_seed = (int(trace_hash, 16) ^ model_seed) % 2**64
                 noisy_trace = inject_noise_trace(
                     trace,
                     p_insert=self.noise.p_insert,
@@ -405,7 +407,7 @@ class SyntheticTraceSampler(TraceSampler):
                     p_swap=self.noise.p_swap,
                     labels=labels,
                     activity_key="concept:name",
-                    seed=model_seed + trace_index,  # deterministic per-trace
+                    seed=trace_seed,  # deterministic per-trace
                 )
                 yield noisy_trace
                 trace_index += 1
@@ -475,6 +477,7 @@ class RunDataset(
         n_runs: int = 1,  # Number of runs per trace/model pair
         n_workers: int = 0,
         write_batch_size: int = 100,
+        timeout: float = 20.0,
     ):
         self.base_path = base_path
         self.pm_dataset = process_model_dataset
@@ -485,7 +488,7 @@ class RunDataset(
         self.index: list[str] = []
         self.n_workers = n_workers
         self.write_batch_size = write_batch_size
-        self.timeout = 20.0
+        self.timeout = timeout
         self._init_cache_mp()
 
     def __iter__(self) -> Iterator[ItemType]:
@@ -743,15 +746,20 @@ class RunDataset(
             json.dumps(item, sort_keys=True).encode()
         ).hexdigest()
 
-    def _get_serialized(self, idx: int) -> "RunDataset.SerializedItemType":
-        key = self.index[idx]
+    def _get_serialized(
+        self, idx: int | str
+    ) -> "RunDataset.SerializedItemType":
+        if isinstance(idx, str):
+            key = idx
+        else:
+            key = self.index[idx]
         item = self.items[key]
         # replace model index with model object
         if isinstance(item.model, int):
             item.model = self.pm_dataset.serialized[item.model]
         return item
 
-    def __getitem__(self, index: int) -> "RunDataset.ItemType":
+    def __getitem__(self, index: int | str) -> "RunDataset.ItemType":
         return self._get_serialized(index).deserialize()
 
     def iter_by_combination(self) -> Iterator[Tuple[
@@ -816,7 +824,6 @@ def get_stats(stats: list[PerfCounter]) -> dict[str, float]:
 
 
 if __name__ == "__main__":
-    import torch
     from dataloaders.net import VariantRandomDistributionSampler
     from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
     import matplotlib.pyplot as plt
@@ -852,12 +859,12 @@ if __name__ == "__main__":
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                3,
+                5,  # Number of models per config
             ),
             (
                 {
                     "dist_params": {
-                        "op": CategoricalSpec([0.1, 0.5, 0.3, 0.1]),
+                        "op": CategoricalSpec([0.2, 0.2, 0.2, 0.4]),
                         "seq_len": PoissonSpec(4),
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
@@ -867,12 +874,12 @@ if __name__ == "__main__":
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                3,
+                5,  # Number of models per config
             ),
             (
                 {
                     "dist_params": {
-                        "op": CategoricalSpec([0.1, 0.3, 0.5, 0.1]),
+                        "op": CategoricalSpec([0.2, 0.4, 0.2, 0.2]),
                         "seq_len": PoissonSpec(4),
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
@@ -882,12 +889,12 @@ if __name__ == "__main__":
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                3,
+                5,  # Number of models per config
             ),
             (
                 {
                     "dist_params": {
-                        "op": CategoricalSpec([0.1, 0.3, 0.3, 0.3]),
+                        "op": CategoricalSpec([0.2, 0.2, 0.4, 0.2]),
                         "seq_len": PoissonSpec(4),
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
@@ -897,12 +904,16 @@ if __name__ == "__main__":
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                3,
+                5,  # Number of models per config
             ),
         ],
     )
     trace_sampler = SyntheticTraceSampler(
-        ds=synthetic_dataset, seed=RNG.get_seed(), slice=range(0, 8), steps=40
+        ds=synthetic_dataset,
+        seed=RNG.get_seed(),
+        batch_size=128,
+        slice=range(0, 8),
+        steps=40,
     )
 
     run_dataset = RunDataset(
