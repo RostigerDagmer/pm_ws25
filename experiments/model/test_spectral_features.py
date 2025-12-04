@@ -98,6 +98,31 @@ def test_spectral_extractor():
     )
 
     features_normal = extractor.extract(
+        net, im, fm, trace_net, trace_im, trace_fm, return_as_dict=False
+    )
+
+    features_unknown = extractor.extract(
+        net,
+        im,
+        fm,
+        unknown_trace_net,
+        unknown_trace_im,
+        unknown_trace_fm,
+        return_as_dict=False,
+    )
+    print(features_normal)
+    print(features_unknown)
+
+    import matplotlib.pyplot as plt
+
+    # set backend to Agg
+    plt.switch_backend('qtagg')
+
+    plt.plot(features_normal)
+    plt.plot(features_unknown)
+    plt.show()
+
+    features_normal = extractor.extract(
         net, im, fm, trace_net, trace_im, trace_fm, return_as_dict=True
     )
 
@@ -113,7 +138,7 @@ def test_spectral_extractor():
 
     # 5. Verify
     print("\n--- Verification ---")
-    expected_dims = n_coeffs * (d_model + 1)
+    expected_dims = n_coeffs * d_model
     print(f"Expected feature count: {expected_dims}")
     print(f"Normal features count: {len(features_normal)}")
     print(f"Unknown features count: {len(features_unknown)}")
@@ -127,7 +152,7 @@ def test_spectral_extractor():
 
     unknown_activity_energy = 0.0
     for c in range(n_coeffs):
-        key = f"spectral_dct_c{c}_d{d_model}"
+        key = f"spectral_dct_c{c}_d{d_model - 1}"
         val = features_unknown[key]
         unknown_activity_energy += abs(val)
         print(f"{key}: {val:.4f}")
@@ -142,7 +167,7 @@ def test_spectral_extractor():
     # Check normal trace has 0 energy in unknown dimension
     normal_unknown_energy = 0.0
     for c in range(n_coeffs):
-        key = f"spectral_dct_c{c}_d{d_model}"
+        key = f"spectral_dct_c{c}_d{d_model - 1}"
         normal_unknown_energy += abs(features_normal[key])
 
     print(
@@ -155,5 +180,70 @@ def test_spectral_extractor():
     print("\nTest Passed!")
 
 
+def test_fast_path():
+    import time
+
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    print("\n--- Testing Fast Path ---")
+    # 1. Generate Random Model
+    dist_params = {
+        "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
+        "seq_len": PoissonSpec(4),
+        "p_stop": BernoulliDepthLinearSpec(base=0.15, slope=0.1),
+        "width": PoissonSpec(3),
+    }
+    stnet = sample_net(dist_params, max_depth=5)
+    net, im, fm = stnet.net, stnet.im, stnet.fm
+
+    # 2. Simulate Traces
+    net_tensor = stnet.to_tensor(device=device)
+    logs_tensor = simulate_batch(
+        (net_tensor.pre, net_tensor.post),
+        net_tensor.M0,
+        net_tensor.Mf,
+        net_tensor.labels,
+        steps=50,
+        batch_size=128,
+    )
+
+    # 3. Extract Features (Fast Path)
+    d_model = 64
+    n_coeffs = 8
+    extractor = SpectralFeatureExtractor(d_model=d_model, n_coeffs=n_coeffs)
+
+    start = time.time()
+    tensors = extractor.extract_batch_tensors(
+        (net_tensor.pre, net_tensor.post), net_tensor.labels, logs_tensor
+    )
+    end = time.time()
+    feature_time = end - start
+    print(f"Extracted in {feature_time:.4f} seconds")
+    print(
+        f"per sample time: {feature_time / logs_tensor.shape[0]:.4f} seconds"
+    )
+
+    model_basis = tensors["model_basis"]
+    trace_embeddings = tensors["trace_embedding"]
+
+    print(f"Model Basis Shape: {model_basis.shape}")
+    print(f"Trace Embeddings Shape: {trace_embeddings.shape}")
+
+    # Expected Shapes
+    # model_basis: [1, T_unique, d_model]
+    # trace_embeddings: [B, d_trace]
+
+    B = logs_tensor.shape[0]
+    d_trace = n_coeffs * (extractor.d_model + 1)
+
+    assert model_basis.dim() == 3
+    assert model_basis.shape[0] == 1
+    assert model_basis.shape[2] == extractor.d_model
+
+    assert trace_embeddings.shape == (B, d_trace)
+
+    print("Fast Path Test Passed!")
+
+
 if __name__ == "__main__":
     test_spectral_extractor()
+    test_fast_path()

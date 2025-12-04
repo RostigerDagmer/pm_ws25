@@ -7,7 +7,10 @@ from enum import Enum
 from experiments.simulation.structured_net import StructuredNet
 import logging
 import uuid
+import torch
 from util.distributions import make_distribution
+import hashlib
+import json
 
 
 def seq(name, labels):
@@ -18,13 +21,13 @@ def seq(name, labels):
     net = PetriNet(name)
 
     # create places
-    places = [PetriNet.Place(f"p{i}") for i in range(len(labels) + 1)]
+    places = [PetriNet.Place(f"p_{l}") for l in labels + [f"{labels[-1]}_end"]]
     for p in places:
         net.places.add(p)
 
     # create transitions and arcs
     for i, lbl in enumerate(labels):
-        t = PetriNet.Transition(f"t{i}", lbl)
+        t = PetriNet.Transition(f"t_{lbl}", lbl)
         net.transitions.add(t)
         petri_utils.add_arc_from_to(places[i], t, net)
         petri_utils.add_arc_from_to(t, places[i + 1], net)
@@ -32,7 +35,10 @@ def seq(name, labels):
     # define initial/final markings
     im = Marking({places[0]: 1})
     fm = Marking({places[-1]: 1})
-    return StructuredNet("Seqnet", net, im, fm)
+
+    name = hashlib.sha1(json.dumps(labels).encode("utf-8")).hexdigest()
+
+    return StructuredNet(f"block_{name}", net, im, fm)
 
 
 class Composition(Enum):
@@ -124,8 +130,12 @@ def sample_net(
     if stop or (max_depth and depth >= max_depth):
         seq_len = int(dists["seq_len"].sample(generator=generator).item())
         if seq_len == 0:
-            return StructuredNet.tau()
-        labels = [f"{uuid.uuid4().hex}" for i in range(seq_len)]
+            name = f"tau_{torch.randint(0, 2**32, (1,), dtype=torch.int64, generator=generator).item():x}"
+            return StructuredNet.tau(name)
+        random_ints = torch.randint(
+            0, 2**32, (seq_len,), dtype=torch.int64, generator=generator
+        )
+        labels = [f"{x.item():x}" for x in random_ints]
         return seq("seq", labels)
 
     op = dists["op"].sample(generator=generator).item()
@@ -167,8 +177,10 @@ if __name__ == "__main__":
         CategoricalSpec,
         PoissonSpec,
     )
+    from util.rng import RNG
 
     logging.basicConfig(level=logging.DEBUG)
+    RNG.initialize(4)
 
     dist_params = {
         "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
@@ -176,8 +188,18 @@ if __name__ == "__main__":
         "p_stop": BernoulliDepthLinearSpec(base=0.15, slope=0.1),
         "width": PoissonSpec(3),
     }
-    stnet = sample_net(dist_params, max_depth=5)
+    stnet = sample_net(
+        dist_params, max_depth=5, generator=RNG.torch_generator()
+    )
     view_petri_net(stnet.net, stnet.im, stnet.fm)
+
+    # perform some random sampling
+    t = torch.randint(0, 2**32, (1000,), dtype=torch.int64)
+
+    stnet_resample = sample_net(
+        dist_params, max_depth=5, generator=RNG.torch_generator()
+    )
+    view_petri_net(stnet_resample.net, stnet_resample.im, stnet_resample.fm)
 
 
 # %%

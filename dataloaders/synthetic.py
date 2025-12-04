@@ -83,22 +83,12 @@ class ItemType(Serializable["SerializedItemType"]):
         return self.stnet.fm
 
     def hash(self) -> str:
-        serializable_params = self._dict()
         return hashlib.sha1(
-            json.dumps(serializable_params, sort_keys=True).encode()
+            json.dumps(self.params, sort_keys=True, default=asdict).encode()
         ).hexdigest()
 
-    def _dict(self) -> dict[str, Any]:
-        return {
-            **self.params,
-            "dist_params": {
-                k: (v.__dict__ if hasattr(v, "__dict__") else v)
-                for k, v in self.params.get("dist_params", {}).items()
-            },
-        }
-
     def serialize(self) -> "SerializedItemType":
-        return SerializedItemType(self._dict(), self.stnet.to_tensor())
+        return SerializedItemType(self.params, self.stnet.to_tensor())
 
 
 @dataclass
@@ -107,15 +97,8 @@ class SerializedItemType(Deserializable[ItemType]):
     net: TensorNet
 
     def hash(self) -> str:
-        serializable_params = {
-            **self.params,
-            "dist_params": {
-                k: (v.__dict__ if hasattr(v, "__dict__") else v)
-                for k, v in self.params.get("dist_params", {}).items()
-            },
-        }
         return hashlib.sha1(
-            json.dumps(serializable_params, sort_keys=True).encode()
+            json.dumps(self.params, sort_keys=True, default=asdict).encode()
         ).hexdigest()
 
     def deserialize(self) -> ItemType:
@@ -189,22 +172,22 @@ class SyntheticProcessModelDataset(
 
 if __name__ == "__main__":
 
-    from experiments.simulation.models import (
+    from util.distributions import (
         CategoricalSpec,
         PoissonSpec,
         BernoulliDepthLinearSpec,
     )
 
-    rng = RNG()
-    rng.initialize(42)
+    RNG.initialize(42)
 
     dist_params = {
         "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
         "seq_len": PoissonSpec(4),
         "p_stop": BernoulliDepthLinearSpec(base=0.2, slope=0.1),
+        "width": PoissonSpec(4),
     }
 
-    stnet = models.sample_net(dist_params)
+    stnet = models.sample_net(dist_params, generator=RNG.torch_generator())
     dataset = SyntheticEventLogDataset(
         model=stnet,
         n_traces=10,
@@ -214,7 +197,6 @@ if __name__ == "__main__":
         print(trace)
 
     model_dataset = SyntheticProcessModelDataset(
-        rng=rng,
         param_grid=[
             (
                 {
@@ -224,6 +206,7 @@ if __name__ == "__main__":
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
                         ),
+                        "width": PoissonSpec(4),
                     },
                     "depth": 4,
                 },
@@ -237,6 +220,7 @@ if __name__ == "__main__":
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
                         ),
+                        "width": PoissonSpec(4),
                     },
                     "depth": 4,
                 },
@@ -250,6 +234,7 @@ if __name__ == "__main__":
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
                         ),
+                        "width": PoissonSpec(4),
                     },
                     "depth": 4,
                 },
@@ -263,6 +248,7 @@ if __name__ == "__main__":
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
                         ),
+                        "width": PoissonSpec(4),
                     },
                     "depth": 4,
                 },

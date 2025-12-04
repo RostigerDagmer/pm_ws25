@@ -265,7 +265,11 @@ class ItemType(Serializable["SerializedItemType"]):
     trace_indices: list[int] | None
 
     def hash(self) -> str:
-        d = {str(k): str(v) for k, v in self.__dict__.items() if k != "pm"}
+        d = {
+            str(k): str(v)
+            for k, v in self.__dict__.items()
+            if k != "pm" and k != "fm" and k != "im"
+        }
         return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
     def serialize(self) -> "SerializedItemType":
@@ -375,7 +379,10 @@ class ProcessModelDataset(
             self._populate_cache_parallel()
 
     def hash(self) -> str:
+        log_path = self.cache_dir
+        log_id = log_path.parts[-2]
         base = {
+            "log_id": log_id,
             "methods": list(self.discovery_methods.keys()),
             "param_grid": self.param_grid,
             "sampler_specs": {

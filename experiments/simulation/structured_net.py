@@ -28,6 +28,15 @@ class TensorNet:
         m[self.final] = 1
         return m
 
+    def to(self, device):
+        return TensorNet(
+            self.pre.to(device),
+            self.post.to(device),
+            self.labels,
+            self.init,
+            self.final,
+        )
+
 
 class StructuredNet:
     def __init__(self, name: str, net: PetriNet, im: Marking, fm: Marking):
@@ -41,7 +50,7 @@ class StructuredNet:
         net = PetriNet(f"{self.name}_seq_{other.name}")
         petri_utils.merge(net, [self.net, other.net])
 
-        t_seq = PetriNet.Transition("t_seq", None)
+        t_seq = PetriNet.Transition(f"t_{self.name}_seq_{other.name}", None)
         net.transitions.update({t_seq})
 
         pA_end = list(self.fm.keys())[0]
@@ -72,16 +81,18 @@ class StructuredNet:
         # Merge all subnets
         petri_utils.merge(net, [n.net for n in nets])
 
-        p_in = PetriNet.Place("p_xor_in")
-        p_out = PetriNet.Place("p_xor_out")
+        p_in = PetriNet.Place(f"p_{name}_xor_in")
+        p_out = PetriNet.Place(f"p_{name}_xor_out")
         net.places.update({p_in, p_out})
 
         # Create split and join transitions for each subnet
         for i, subnet in enumerate(nets):
             t_split = PetriNet.Transition(
-                f"t_xor_split_{subnet.name}_{i}", None
+                f"t_{name}_xor_split_{subnet.name}_{i}", None
             )
-            t_join = PetriNet.Transition(f"t_xor_join_{subnet.name}_{i}", None)
+            t_join = PetriNet.Transition(
+                f"t_{name}_xor_join_{subnet.name}_{i}", None
+            )
             net.transitions.update({t_split, t_join})
 
             p_start = list(subnet.im.keys())[0]
@@ -113,10 +124,10 @@ class StructuredNet:
         net = PetriNet(name)
         petri_utils.merge(net, [n.net for n in nets])
 
-        p_in = PetriNet.Place("p_and_in")
-        p_out = PetriNet.Place("p_and_out")
-        t_split = PetriNet.Transition("t_split", None)
-        t_join = PetriNet.Transition("t_join", None)
+        p_in = PetriNet.Place(f"p_{name}_and_in")
+        p_out = PetriNet.Place(f"p_{name}_and_out")
+        t_split = PetriNet.Transition(f"t_{name}_split", None)
+        t_join = PetriNet.Transition(f"t_{name}_join", None)
 
         net.places.update({p_in, p_out})
         net.transitions.update({t_split, t_join})
@@ -142,10 +153,10 @@ class StructuredNet:
         net = PetriNet(f"{self.name}_loop_{exit.name}")
         petri_utils.merge(net, [self.net, exit.net])
 
-        p_in = PetriNet.Place("p_loop_in")
-        p_out = PetriNet.Place("p_loop_out")
-        t_split = PetriNet.Transition("t_loop_split", None)
-        t_link = PetriNet.Transition("t_loop_link", None)
+        p_in = PetriNet.Place(f"p_{self.name}_loop_in")
+        p_out = PetriNet.Place(f"p_{self.name}_loop_out")
+        t_split = PetriNet.Transition(f"t_{self.name}_loop_split", None)
+        t_link = PetriNet.Transition(f"t_{self.name}_loop_link", None)
         t_exit = PetriNet.Transition(f"t_exit_{self.name}_{exit.name}", None)
         t_repeat = PetriNet.Transition(
             f"t_repeat_{self.name}_{exit.name}", None
@@ -180,9 +191,9 @@ class StructuredNet:
     @staticmethod
     def tau(name: str = "tau") -> "StructuredNet":
         net = PetriNet(name)
-        p_in = PetriNet.Place("p_in")
-        p_out = PetriNet.Place("p_out")
-        t = PetriNet.Transition("t_tau", None)  # None == silent
+        p_in = PetriNet.Place(f"p_{name}_in")
+        p_out = PetriNet.Place(f"p_{name}_out")
+        t = PetriNet.Transition(f"t_{name}_tau", None)  # None == silent
         net.places.update({p_in, p_out})
         net.transitions.add(t)
         petri_utils.add_arc_from_to(p_in, t, net)
@@ -205,8 +216,8 @@ class StructuredNet:
         return StructuredNet(t[0].name, t[0], t[1], t[2])
 
     def to_tensor(self, device=None) -> TensorNet:
-        places = list(self.net.places)
-        transitions = list(self.net.transitions)
+        places = sorted(list(self.net.places), key=lambda x: x.name)
+        transitions = sorted(list(self.net.transitions), key=lambda x: x.name)
 
         P = len(places)
         T = len(transitions)
@@ -239,9 +250,9 @@ class StructuredNet:
         net = PetriNet("Reconstructed")
 
         # rebuild fresh places and transitions deterministically
-        places = [PetriNet.Place(f"p{i}") for i in range(P)]
+        places = [PetriNet.Place(f"p{i:06d}") for i in range(P)]
         trans = [
-            PetriNet.Transition(f"t{j}", tn.labels[j] or None)
+            PetriNet.Transition(f"t{j:06d}", tn.labels[j] or None)
             for j in range(T)
         ]
 
@@ -264,26 +275,36 @@ class StructuredNet:
 
 def test_tensor_conversion():
     from pm4py.vis import view_petri_net
-    from experiments.simulation.models import (
+    from util.distributions import (
         CategoricalSpec,
         PoissonSpec,
         BernoulliDepthLinearSpec,
-        sample_net,
     )
+    from experiments.simulation.models import sample_net
     from util.rng import RNG
+    from pm4py.objects.log.obj import EventLog
+    from experiments.simulation.simulate import simulate_batch, apply_labels
 
-    rng = RNG()
-    rng.initialize(3)
+    RNG.initialize(6)
+
+    def get_variants(log: EventLog) -> set[str]:
+        return set(
+            ";".join([event["concept:name"] for event in trace])
+            for trace in log
+        )
 
     dist_params = {
-        "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
+        "op": CategoricalSpec([0.1, 0.3, 0.3, 0.3]),
         "seq_len": PoissonSpec(4),
         "p_stop": BernoulliDepthLinearSpec(base=0.1, slope=0.1),
+        "width": PoissonSpec(4),
     }
+
+    generator = RNG.torch_generator()
 
     # Create a random StructuredNet for testing
     sample_stnet = sample_net(
-        dist_params, max_depth=3
+        dist_params, max_depth=3, generator=generator
     )  # Assuming sample_net() provides a random StructuredNet
 
     # Convert the StructuredNet to TensorNet
@@ -308,6 +329,69 @@ def test_tensor_conversion():
 
     # Optionally, you can add a more formal check here based on your requirements
     # For example, comparing places, transitions, and arcs in both nets
+
+    tensor_log = simulate_batch(
+        (tensor_net.pre, tensor_net.post),
+        tensor_net.M0,
+        tensor_net.Mf,
+        tensor_net.labels,
+        steps=100,
+        batch_size=10,
+        generator=RNG.torch_generator(),
+    )
+
+    log1 = apply_labels(tensor_log, tensor_net.labels)
+
+    r_tensor_net = reconstructed_stnet.to_tensor()
+    r_tensor_log = simulate_batch(
+        (r_tensor_net.pre, r_tensor_net.post),
+        r_tensor_net.M0,
+        r_tensor_net.Mf,
+        r_tensor_net.labels,
+        steps=100,
+        batch_size=10,
+        generator=RNG.torch_generator(),
+    )
+    log2 = apply_labels(r_tensor_log, r_tensor_net.labels)
+
+    print("tensor_log equality: ", torch.equal(tensor_log, r_tensor_log))
+
+    print(
+        "tensor_net pre equality: ",
+        torch.equal(tensor_net.pre, r_tensor_net.pre),
+    )
+    print(
+        "tensor_net post equality: ",
+        torch.equal(tensor_net.post, r_tensor_net.post),
+    )
+    print(
+        "tensor_net labels equality: ",
+        tensor_net.labels == r_tensor_net.labels,
+    )
+    print(
+        "tensor_net M0 equality: ", torch.equal(tensor_net.M0, r_tensor_net.M0)
+    )
+    print(
+        "tensor_net Mf equality: ", torch.equal(tensor_net.Mf, r_tensor_net.Mf)
+    )
+
+    print("tensor_net pre:", tensor_net.pre)
+    print("tensor_net post:", tensor_net.post)
+    print("tensor_net labels:", tensor_net.labels)
+    print("tensor_net M0:", tensor_net.M0)
+    print("tensor_net Mf:", tensor_net.Mf)
+
+    print("r_tensor_net pre:", r_tensor_net.pre)
+    print("r_tensor_net post:", r_tensor_net.post)
+    print("r_tensor_net labels:", r_tensor_net.labels)
+    print("r_tensor_net M0:", r_tensor_net.M0)
+    print("r_tensor_net Mf:", r_tensor_net.Mf)
+
+    # print("Variants in original log:", get_variants(log1))
+    # print("Variants in reconstructed log:", get_variants(log2))
+
+    print("set difference:", get_variants(log1).difference(get_variants(log2)))
+    print("set overlap:", get_variants(log1).intersection(get_variants(log2)))
 
 
 if __name__ == "__main__":
