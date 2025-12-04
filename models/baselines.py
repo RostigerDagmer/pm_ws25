@@ -40,6 +40,16 @@ class SingleBestSolver(ClassificationModel):
         proba = np.zeros((n_samples, n_classes))
         proba[:, best_class_idx] = 1.0
         return proba
+    
+    def get_feature_importance(self) -> Dict[str, float]:
+        """
+        Return feature importance scores.
+
+        Returns:
+            Dictionary mapping feature names to importance scores
+        """
+        return {name: 0.0 for name in self.feature_extractor.feature_names}
+
 
 
 class RandomClassifier(ClassificationModel):
@@ -73,3 +83,12 @@ class RandomClassifier(ClassificationModel):
             proba[:, cls_idx] = prob
 
         return proba
+    
+    def get_feature_importance(self) -> Dict[str, float]:
+        """
+        Return feature importance scores.
+
+        Returns:
+            Dictionary mapping feature names to importance scores
+        """
+        return {name: 0.0 for name in self.feature_extractor.feature_names}
