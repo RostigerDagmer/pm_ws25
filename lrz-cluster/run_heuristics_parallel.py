@@ -52,27 +52,113 @@ ALIGNMENT_VARIANTS = {
 }
 
 # Dataset configurations
+# Dataset configurations
 DATASETS = {
-    "bpi2013": {
+    "bpi2013_closed": {
         "path": "data/c2c3b154-ab26-4b31-a0e8-8f2350ddac11/BPI_Challenge_2013_closed_problems.xes",
         "noise_threshold": 0.23,
-        "trace_indices": [
-            529,
-            823,
-            100,
-            200,
-            300,
-            400,
-            500,
-            600,
-            700,
-            800,
-        ],  # Example traces
+        "trace_indices": "all",
     },
     "bpi2017": {
         "path": "data/5f3067df-f10b-45da-b98b-86ae4c7a310b/BPI%20Challenge%202017.xes",
         "noise_threshold": 0.21,
-        "trace_indices": [761, 100, 200, 300, 400, 500, 600, 700, 800, 900],
+        "trace_indices": "all",
+    },
+    # Training datasets (20 total)
+    "01345ac4": {
+        "path": "data/01345ac4-7d1d-426e-92b8-24933a079412/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "12683249": {
+        "path": "data/12683249/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "2b02709f": {
+        "path": "data/2b02709f-9a84-4538-a76a-eb002eacf8d1/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "3301445f": {
+        "path": "data/3301445f-95e8-4ff0-98a4-901f1f204972/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "33632f3c": {
+        "path": "data/33632f3c-5c48-40cf-8d8f-2db57f5a6ce7/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "3537c19d": {
+        "path": "data/3537c19d-6c64-4b1d-815d-915ab0e479da/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "3926db30": {
+        "path": "data/3926db30-f712-4394-aebc-75976070e91f/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "3cfa2260": {
+        "path": "data/3cfa2260-f5c5-44be-afe1-b70d35288d6d/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "3d5ae0ce": {
+        "path": "data/3d5ae0ce-198c-4b5c-b0f9-60d3035d07bf/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "500573e6": {
+        "path": "data/500573e6-accc-4b0c-9576-aa5468b10cee/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "5f3067df": {
+        "path": "data/5f3067df-f10b-45da-b98b-86ae4c7a310b/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "63a8435a": {
+        "path": "data/63a8435a-077d-4ece-97cd-2c76d394d99c/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "679b11cf": {
+        "path": "data/679b11cf-47cd-459e-a6de-9ca614e25985/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "6a0a26d2": {
+        "path": "data/6a0a26d2-82d0-4018-b1cd-89afb0e8627f/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "6af6d5f0": {
+        "path": "data/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "86977bac": {
+        "path": "data/86977bac-f874-49cf-8337-80f26bf5d2ef/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "91fd1fa8": {
+        "path": "data/91fd1fa8-4df4-4b1a-9a3f-0116c412378f/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "9b99a146": {
+        "path": "data/9b99a146-51b5-48df-aa70-288a76c82ec4/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
+    },
+    "a0addfda": {
+        "path": "data/a0addfda-2044-4541-a450-fdcc9fe16d17/",
+        "noise_threshold": 0.20,
+        "trace_indices": "all",
     },
 }
 
