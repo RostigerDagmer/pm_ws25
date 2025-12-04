@@ -2,7 +2,7 @@
 #SBATCH --job-name=pm_heuristics
 #SBATCH --clusters=serial
 #SBATCH --partition=serial_std
-#SBATCH --array=0-79                    # 80 Experimente (2 Datasets x 10 Traces x 4 Variants)
+#SBATCH --array=0-99                    # 100 Experimente (2 Datasets x 10 Traces x 5 Variants)
 #SBATCH --time=01:00:00                 # 1 Stunde pro Job
 #SBATCH --ntasks=1                      # 1 CPU pro Job
 #SBATCH --mem=4G                        # 4GB RAM
@@ -65,8 +65,8 @@ echo "Job Finished: $(date)"
 echo "Exit Code: $EXIT_CODE"
 echo "======================================"
 
-# Wenn der letzte Job (ID 79), aggregiere Ergebnisse und trainiere ML Modelle
-if [ $SLURM_ARRAY_TASK_ID -eq 79 ]; then
+# Wenn der letzte Job (ID 99), aggregiere Ergebnisse und trainiere ML Modelle
+if [ $SLURM_ARRAY_TASK_ID -eq 99 ]; then
     echo ""
     echo "Last job completed - aggregating results and training ML models..."
     sleep 10  # Warte kurz, damit alle Jobs ihre Dateien schreiben können
