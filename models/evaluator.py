@@ -27,9 +27,11 @@ class EvaluationMetrics:
     class_labels: List[str]
 
     # Time performance metrics
-    mean_actual_time: float  # Mean time of predicted heuristic
-    mean_optimal_time: float  # Mean time of fastest heuristic
-    performance_ratio: float  # actual / optimal (lower is better, 1.0 is perfect)
+    mean_alignment_time_only: float  # Alignment time only (predicted heuristic)
+    mean_alignment_time_with_prediction: float  # Total: feature extraction + classification + alignment
+    mean_optimal_alignment_time: float  # Fastest heuristic alignment time
+    performance_ratio_alignment_only: float  # alignment_only / optimal
+    performance_ratio_with_prediction: float  # with_prediction / optimal
     time_savings_vs_worst: float  # Savings compared to always picking worst
 
     # Per-heuristic timing statistics
@@ -52,9 +54,11 @@ class EvaluationMetrics:
             'f1_per_class': self.f1_per_class,
             'confusion_matrix': self.confusion_matrix.tolist(),
             'class_labels': self.class_labels,
-            'mean_actual_time': self.mean_actual_time,
-            'mean_optimal_time': self.mean_optimal_time,
-            'performance_ratio': self.performance_ratio,
+            'mean_alignment_time_only': self.mean_alignment_time_only,
+            'mean_alignment_time_with_prediction': self.mean_alignment_time_with_prediction,
+            'mean_optimal_alignment_time': self.mean_optimal_alignment_time,
+            'performance_ratio_alignment_only': self.performance_ratio_alignment_only,
+            'performance_ratio_with_prediction': self.performance_ratio_with_prediction,
             'time_savings_vs_worst': self.time_savings_vs_worst,
             'heuristic_timings': self.heuristic_timings,
             'feature_importance': self.feature_importance,
@@ -70,10 +74,14 @@ class EvaluationMetrics:
             "EVALUATION SUMMARY",
             "=" * 80,
             f"Classification Accuracy: {self.accuracy:.2%}",
-            f"Performance Ratio (actual/optimal): {self.performance_ratio:.3f}",
-            f"Mean Actual Time: {self.mean_actual_time:.4f}s",
-            f"Mean Optimal Time: {self.mean_optimal_time:.4f}s",
-            f"Time Savings vs Worst: {self.time_savings_vs_worst:.2%}",
+            "",
+            "Alignment Time Performance:",
+            f"  Alignment Only (predicted heuristic): {self.mean_alignment_time_only:.4f}s",
+            f"  With Prediction Overhead: {self.mean_alignment_time_with_prediction:.4f}s",
+            f"  Optimal (fastest heuristic): {self.mean_optimal_alignment_time:.4f}s",
+            f"  Performance Ratio (alignment only): {self.performance_ratio_alignment_only:.3f}x",
+            f"  Performance Ratio (with prediction): {self.performance_ratio_with_prediction:.3f}x",
+            f"  Time Savings vs Worst: {self.time_savings_vs_worst:.2%}",
             "",
             "Per-Class Metrics:",
         ]
@@ -89,9 +97,9 @@ class EvaluationMetrics:
         lines.extend([
             "",
             "Prediction Timing:",
-            f"  Mean Total: {self.mean_prediction_time:.6f}s",
-            f"  Mean Feature Extraction: {self.mean_feature_extraction_time:.6f}s",
-            f"  Mean Classification: {self.mean_classification_time:.6f}s",
+            f"  Mean Total: {self.mean_prediction_time * 1000:.3f}ms",
+            f"  Mean Feature Extraction: {self.mean_feature_extraction_time * 1000:.3f}ms",
+            f"  Mean Classification: {self.mean_classification_time * 1000:.3f}ms",
             "",
             "Top 5 Important Features:",
         ])
@@ -193,12 +201,15 @@ class RecommenderEvaluator:
         conf_matrix = confusion_matrix(y_true, y_pred, labels=unique_labels)
 
         # Compute time performance metrics
-        mean_actual = np.mean(actual_times)
+        mean_alignment_only = np.mean(actual_times)
+        mean_prediction = np.mean(prediction_times)
+        mean_alignment_with_pred = mean_alignment_only + mean_prediction
         mean_optimal = np.mean(optimal_times)
         mean_worst = np.mean(worst_times)
 
-        performance_ratio = mean_actual / mean_optimal if mean_optimal > 0 else float('inf')
-        time_savings = (mean_worst - mean_actual) / (mean_worst - mean_optimal) if (mean_worst - mean_optimal) > 0 else 0.0
+        performance_ratio_alignment_only = mean_alignment_only / mean_optimal if mean_optimal > 0 else float('inf')
+        performance_ratio_with_pred = mean_alignment_with_pred / mean_optimal if mean_optimal > 0 else float('inf')
+        time_savings = (mean_worst - mean_alignment_only) / (mean_worst - mean_optimal) if (mean_worst - mean_optimal) > 0 else 0.0
 
         # Compute per-heuristic timing statistics
         heuristic_timings = {}
@@ -222,9 +233,11 @@ class RecommenderEvaluator:
             f1_per_class=f1_dict,
             confusion_matrix=conf_matrix,
             class_labels=unique_labels,
-            mean_actual_time=mean_actual,
-            mean_optimal_time=mean_optimal,
-            performance_ratio=performance_ratio,
+            mean_alignment_time_only=mean_alignment_only,
+            mean_alignment_time_with_prediction=mean_alignment_with_pred,
+            mean_optimal_alignment_time=mean_optimal,
+            performance_ratio_alignment_only=performance_ratio_alignment_only,
+            performance_ratio_with_prediction=performance_ratio_with_pred,
             time_savings_vs_worst=time_savings,
             heuristic_timings=heuristic_timings,
             feature_importance=feature_importance,
@@ -249,8 +262,10 @@ class RecommenderEvaluator:
         results.append({
             'model': self.classifier.__class__.__name__,
             'accuracy': main_metrics.accuracy,
-            'performance_ratio': main_metrics.performance_ratio,
-            'mean_actual_time': main_metrics.mean_actual_time,
+            'performance_ratio_alignment_only': main_metrics.performance_ratio_alignment_only,
+            'performance_ratio_with_prediction': main_metrics.performance_ratio_with_prediction,
+            'mean_alignment_time_only': main_metrics.mean_alignment_time_only,
+            'mean_alignment_time_with_prediction': main_metrics.mean_alignment_time_with_prediction,
             'mean_prediction_time': main_metrics.mean_prediction_time,
         })
 
@@ -263,14 +278,17 @@ class RecommenderEvaluator:
             results.append({
                 'model': baseline.__class__.__name__,
                 'accuracy': baseline_metrics.accuracy,
-                'performance_ratio': baseline_metrics.performance_ratio,
-                'mean_actual_time': baseline_metrics.mean_actual_time,
+                'performance_ratio_alignment_only': baseline_metrics.performance_ratio_alignment_only,
+                'performance_ratio_with_prediction': baseline_metrics.performance_ratio_with_prediction,
+                'mean_alignment_time_only': baseline_metrics.mean_alignment_time_only,
+                'mean_alignment_time_with_prediction': baseline_metrics.mean_alignment_time_with_prediction,
                 'mean_prediction_time': baseline_metrics.mean_prediction_time,
             })
 
         df = pd.DataFrame(results)
 
         # Add relative performance columns
-        df['relative_to_best'] = df['performance_ratio'] / df['performance_ratio'].min()
+        df['relative_to_best_alignment_only'] = df['performance_ratio_alignment_only'] / df['performance_ratio_alignment_only'].min()
+        df['relative_to_best_with_prediction'] = df['performance_ratio_with_prediction'] / df['performance_ratio_with_prediction'].min()
 
         return df

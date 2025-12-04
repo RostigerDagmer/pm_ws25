@@ -192,7 +192,7 @@ if __name__ == "__main__":
     feature_extractor = CompositeFeatureExtractor(use_cache=True)
 
     logging.info("\nTraining XGBoostClassifier...")
-    xgb_classifier = XGBoostClassifier(
+    classifier = XGBoostClassifier(
         run_datasets=train_run_datasets,
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
@@ -216,12 +216,11 @@ if __name__ == "__main__":
     # Evaluate
     logging.info("\nEvaluating on test datasets...")
     evaluator = RecommenderEvaluator(
-        classifier=xgb_classifier,
+        classifier=classifier,
         run_datasets=test_run_datasets
     )
 
     metrics = evaluator.evaluate()
-    logging.info("\n" + metrics.summary())
 
     # Compare with baselines
     logging.info("\nComparing with baselines...")
