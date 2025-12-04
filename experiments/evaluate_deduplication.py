@@ -85,8 +85,8 @@ def evaluate_dataset(dataset_uuid: str, filename: str, dedup_config: Deduplicati
             mean, std
         )
 
-        # Create ProcessModelDataset with 10 models
-        print("Creating ProcessModelDataset with 10 models...")
+        # Create ProcessModelDataset with 100 models
+        print("Creating ProcessModelDataset with 100 models...")
         pm_dataset = ProcessModelDataset(
             log_dataset=log_dataset,
             discovery_methods={"inductive": discover_petri_net_inductive},
@@ -95,16 +95,21 @@ def evaluate_dataset(dataset_uuid: str, filename: str, dedup_config: Deduplicati
                 "disable_fallthroughs": [True],
             },
             sampler_specs={
-                "variant3": VariantRandomDistributionSampler(
-                    n_subsets=50,  # number of subsets: defines how often the log is sampled... basically
-                    max_len_subset=150,
-                    min_len_subset=20,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
-                    len_distribution=len_distribution,
-                    freq_distribution=freq_distribution,
-            )
-        },
+                "variant_random": VariantRandomDistributionSampler(
+                    n_subsets=1000,
+                    max_len_subset=100,
+                    min_len_subset=10,
+                    len_distribution=torch.distributions.Exponential(
+                        torch.tensor([1.0 / 100.0])
+                    ),  
+                    freq_distribution=torch.distributions.Normal(
+                        10.0, 5.0
+                    ),  
+                    reconstruct_frequency=True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)
+                )
+            },
             cached=True,
-            max_models=10,
+            max_models=100,
         )
 
         # Apply deduplication
@@ -120,21 +125,21 @@ def evaluate_dataset(dataset_uuid: str, filename: str, dedup_config: Deduplicati
         dataset_output_dir = base_output_dir / config_name / filename.replace('.xes', '')
         dataset_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save duplicate visualizations
-        print(f"Saving duplicate visualizations to {dataset_output_dir / 'duplicates'}...")
-        unique_dataset.save_duplicate_visualizations(
-            output_dir=str(dataset_output_dir / "duplicates"),
-            bgcolor="white",
-            format="png"
-        )
+        # # Save duplicate visualizations
+        # print(f"Saving duplicate visualizations to {dataset_output_dir / 'duplicates'}...")
+        # unique_dataset.save_duplicate_visualizations(
+        #     output_dir=str(dataset_output_dir / "duplicates"),
+        #     bgcolor="white",
+        #     format="png"
+        # )
 
-        # Save unique net visualizations
-        print(f"Saving unique visualizations to {dataset_output_dir / 'unique'}...")
-        unique_dataset.save_unique_visualizations(
-            output_dir=str(dataset_output_dir / "unique"),
-            bgcolor="white",
-            format="png"
-        )
+        # # Save unique net visualizations
+        # print(f"Saving unique visualizations to {dataset_output_dir / 'unique'}...")
+        # unique_dataset.save_unique_visualizations(
+        #     output_dir=str(dataset_output_dir / "unique"),
+        #     bgcolor="white",
+        #     format="png"
+        # )
 
         # Save deduplication report
         report_path = dataset_output_dir / "deduplication_report.json"
@@ -185,7 +190,7 @@ if __name__ == "__main__":
     dedup_config = DeduplicationConfig()
 
     # Create base output directory
-    base_output_dir = Path("outputs") / "evaluate_improved_dedupliation" / "10_models"
+    base_output_dir = Path("outputs") / "evaluate_improved_dedupliation" / "100_models"
     base_output_dir.mkdir(parents=True, exist_ok=True)
 
     # Process each dataset
