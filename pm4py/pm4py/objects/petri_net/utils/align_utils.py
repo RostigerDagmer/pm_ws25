@@ -19,10 +19,11 @@ visit <https://www.gnu.org/licenses/>.
 Website: https://processintelligence.solutions
 Contact: info@processintelligence.solutions
 '''
+
 import heapq
 import sys
 from copy import copy
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -329,6 +330,56 @@ def __compute_exact_heuristic_new_version(
     return prim_obj, points
 
 
+def __build_place_to_trace_index(
+    net,
+    trace_len: int = 0,
+    *,
+    infer_source_sink: bool = False,
+) -> Dict[Any, int]:
+    """
+    Build a mapping from places in a (synchronous) net to a trace index.
+
+    * Normal case: parse names like 'trace_p_3', 'p_3', '..._5' and map to int index.
+    * If infer_source_sink is True, also:
+      - map 'source' places to index 0
+      - map 'sink'/'end' places to index trace_len
+    Handles tuple-wrapped places (e.g. (place, ...)) used in some sync nets.
+    """
+    place_to_idx: Dict[Any, int] = {}
+
+    for p in net.places:
+        # unwrap tuple places used in some sync product variants
+        place = p[0] if isinstance(p, tuple) and len(p) > 0 else p
+        pname = getattr(place, "name", None)
+        if pname is None:
+            continue
+
+        pname_str = str(pname)
+        idx: Optional[int] = None
+
+        # 1) typical trace places like 'trace_p_3', 'p_3', or any '..._<digit>'
+        parts = pname_str.split("_")
+        if parts and parts[-1].isdigit():
+            try:
+                idx = int(parts[-1])
+            except ValueError:
+                idx = None
+
+        # 2) optionally handle source/sink labels
+        if idx is None and infer_source_sink:
+            if "source" in pname_str and "model" not in pname_str:
+                idx = 0
+            elif "sink" in pname_str or "end" in pname_str:
+                idx = trace_len
+
+        if idx is not None:
+            place_to_idx[place] = idx
+            if place is not p:
+                place_to_idx[p] = idx
+
+    return place_to_idx
+
+
 def __get_tuple_from_queue(marking, queue):
     for t in queue:
         if t.m == marking:
@@ -426,6 +477,7 @@ class DijkstraSearchTuple:
         ]
         return " ".join(string_build)
 
+
 class DijkstraSearchTupleForAntiAndMulti:
     # in this version we keep the run and not the previous element
     # the display is different
@@ -446,9 +498,13 @@ class DijkstraSearchTupleForAntiAndMulti:
         return self.r
 
     def __repr__(self):
-        string_build = ["\nm=" + str(self.m), " g=" + str(self.g),
-                        " path=" + str(self.__get_firing_sequence()) + "\n\n"]
+        string_build = [
+            "\nm=" + str(self.m),
+            " g=" + str(self.g),
+            " path=" + str(self.__get_firing_sequence()) + "\n\n",
+        ]
         return " ".join(string_build)
+
 
 class TweakedSearchTuple:
     def __init__(self, f, g, h, m, p, t, x, trust, virgin):
@@ -504,8 +560,10 @@ class SplitTraceSearchTuple:
         self.t = t
         self.x = x
         self.trust = trust
-        self.k = k # Number of intervals (k splits = k+1 intervals)
-        self.split_points = split_points  # Tuple of trace indices defining splits
+        self.k = k  # Number of intervals (k splits = k+1 intervals)
+        self.split_points = (
+            split_points  # Tuple of trace indices defining splits
+        )
 
     def __lt__(self, other):
         if self.f < other.f:
@@ -583,47 +641,62 @@ def get_visible_transitions_eventually_enabled_by_marking(net, marking):
 
     return visible_transitions
 
-def discountedEditDistance(s1,s2,exponent=2, modeled=True):
+
+def discountedEditDistance(s1, s2, exponent=2, modeled=True):
     '''
     Fast implementation of the discounted distance
     Inspired from the faster version of the edit distance
     '''
-    #print(s1,s2)
+    # print(s1,s2)
     if len(s1) < len(s2):
-        return discountedEditDistance(s2, s1,exponent=exponent,modeled=False)
+        return discountedEditDistance(s2, s1, exponent=exponent, modeled=False)
 
     previous_row = [0]
     for a in range(len(s2)):
-        if not modeled and (s2[a]=="tau" or s2[a]==None or s2[a][0]=="n"):
+        if not modeled and (
+            s2[a] == "tau" or s2[a] is None or s2[a][0] == "n"
+        ):
             previous_row.append(previous_row[-1])
-        else :
-            previous_row.append(previous_row[-1]+exponent**(-(a)))
+        else:
+            previous_row.append(previous_row[-1] + exponent ** (-(a)))
     for i, c1 in enumerate(s1):
         if modeled:
-            exp1 = sum(exponent**(-(a))  for a in range(i+1) if s1[a]!="tau" and s1[a]!=None and s1[a][0]!="n")
-        else :
-            exp1 = sum(exponent**(-(a))  for a in range(i+1))
-        current_row =  [exp1]
+            exp1 = sum(
+                exponent ** (-(a))
+                for a in range(i + 1)
+                if s1[a] != "tau" and s1[a] is not None and s1[a][0] != "n"
+            )
+        else:
+            exp1 = sum(exponent ** (-(a)) for a in range(i + 1))
+        current_row = [exp1]
         for j, c2 in enumerate(s2):
 
-            exp2 = exponent**(-(i+1 + j))
-            if modeled and  (c1 in ["tau", None] or c1[0]=="n" or "skip" in c1):
-                insertions = previous_row[j +1 ]  # j+1 instead of j since previous_row and current_row are one character longer
-                deletions = current_row[j] + exp2    # than s2
-            elif not modeled and (c2 in ["tau", None] or c2[0]=="n"):
-                insertions = previous_row[j +1 ] + exp2 # j+1 instead of j since previous_row and current_row are one character longer
+            exp2 = exponent ** (-(i + 1 + j))
+            if modeled and (
+                c1 in ["tau", None] or c1[0] == "n" or "skip" in c1
+            ):
+                insertions = previous_row[
+                    j + 1
+                ]  # j+1 instead of j since previous_row and current_row are one character longer
+                deletions = current_row[j] + exp2  # than s2
+            elif not modeled and (c2 in ["tau", None] or c2[0] == "n"):
+                insertions = (
+                    previous_row[j + 1] + exp2
+                )  # j+1 instead of j since previous_row and current_row are one character longer
                 deletions = current_row[j]
-            else :
-                insertions = previous_row[j +1 ] + exp2 # j+1 instead of j since previous_row and current_row are one character longer
+            else:
+                insertions = (
+                    previous_row[j + 1] + exp2
+                )  # j+1 instead of j since previous_row and current_row are one character longer
                 deletions = current_row[j] + exp2
-            if (c1 != c2):
+            if c1 != c2:
                 current_row.append(min(insertions, deletions))
-            else :
+            else:
                 substitutions = previous_row[j]
                 current_row.append(min(insertions, deletions, substitutions))
 
         previous_row = current_row
-    return len(s1)+len(s2),previous_row[-1]
+    return len(s1) + len(s2), previous_row[-1]
 
 
 def levenshtein(seq1, seq2):
@@ -632,29 +705,27 @@ def levenshtein(seq1, seq2):
     '''
     size_x = len(seq1) + 1
     size_y = len(seq2) + 1
-    matrix = np.zeros ((size_x, size_y))
+    matrix = np.zeros((size_x, size_y))
     for x in range(size_x):
-        matrix [x, 0] = x
+        matrix[x, 0] = x
     for y in range(size_y):
-        matrix [0, y] = y
+        matrix[0, y] = y
 
     for x in range(1, size_x):
         for y in range(1, size_y):
-            if seq1[x-1] in [None,"tau"] or seq1[x-1][0]=='n' or "skip" in seq1[x-1] or "tau" in seq1[x-1] :
-                matrix [x,y] = min(
-                    matrix[x-1, y],
-                    matrix[x,y-1] + 1
-                )
-            elif seq1[x-1] == seq2[y-1]:
-                matrix [x,y] = min(
-                    matrix[x-1, y] + 1,
-                    matrix[x-1, y-1],
-                    matrix[x, y-1] + 1
+            if (
+                seq1[x - 1] in [None, "tau"]
+                or seq1[x - 1][0] == 'n'
+                or "skip" in seq1[x - 1]
+                or "tau" in seq1[x - 1]
+            ):
+                matrix[x, y] = min(matrix[x - 1, y], matrix[x, y - 1] + 1)
+            elif seq1[x - 1] == seq2[y - 1]:
+                matrix[x, y] = min(
+                    matrix[x - 1, y] + 1,
+                    matrix[x - 1, y - 1],
+                    matrix[x, y - 1] + 1,
                 )
             else:
-                matrix [x,y] = min(
-                    matrix[x-1,y] + 1,
-                    matrix[x,y-1] + 1
-                )
-    return (matrix[size_x - 1, size_y - 1])
-
+                matrix[x, y] = min(matrix[x - 1, y] + 1, matrix[x, y - 1] + 1)
+    return matrix[size_x - 1, size_y - 1]
