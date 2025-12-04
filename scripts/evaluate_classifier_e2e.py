@@ -50,7 +50,6 @@ TRAIN_DATASETS = {
     # '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
     # 'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
     # '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
-
 }
 
 TEST_DATASETS = {
@@ -60,7 +59,6 @@ TEST_DATASETS = {
     # 'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
     # '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
     # 'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': ['BPI_Challenge_2013_closed_problems.xes'],
-    
 }
 
 
