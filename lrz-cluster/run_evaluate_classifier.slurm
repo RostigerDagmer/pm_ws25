@@ -25,7 +25,7 @@ module load slurm_setup
 module load python/3.10.12-extended
 
 # Activate virtual environment
-source ~/venv/.venv/bin/activate
+source ~/pm_ws25/.venv/bin/activate
 
 # Set Python module path
 export PYTHONPATH="${PYTHONPATH}:${HOME}/pm_ws25"
