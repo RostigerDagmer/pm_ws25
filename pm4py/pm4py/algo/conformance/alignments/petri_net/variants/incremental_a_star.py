@@ -639,12 +639,15 @@ def _eme_solve_inner(
         eme_solver,
         current_marking: Marking,
         use_ilp: bool,
-) -> Tuple[float, np.ndarray, bool]:
+) -> Tuple[float, np.ndarray, bool, str]:
     """
     Internal function to solve the EME problem for a given marking using LEAN LP.
     Uses cvxopt.glpk.lp directly for performance.
-    """
 
+    Returns:
+        (h_val, x_array, is_feasible, status)
+        status: 'optimal' | 'primal_infeasible' | 'dual_infeasible' | 'unknown' | 'error'
+    """
     try:
         # 1. Update initial marking vector in the solver
         # This recalculates vectors based on the new current marking
@@ -664,34 +667,42 @@ def _eme_solve_inner(
         glpk.options["msg_lev"] = "GLP_MSG_OFF"
 
         # 5. Solve directly using GLPK (Lean LP)
-        # We always use LP relaxation as per Incremental A* paper recommendation
-        # If use_ilp is True, we could use glpk.ilp, but for incremental performance
-        # the paper relies on LP relaxation + derived updates.
-        # However, if strict ILP was requested for some reason, we could swap calls here.
-        # Assuming "Lean LP" logic for incremental A*:
+        if use_ilp:
+            # Identify integer variable indices
+            size = Aub.size[1]
+            I = list(range(size))
+            status, x = glpk.ilp(c_cvx, Aub_cvx, bub_cvx, Aeq_cvx, beq_cvx, I=I)
+
         status, x, y, z = glpk.lp(c_cvx, Aub_cvx, bub_cvx, Aeq_cvx, beq_cvx)
 
-        # 6. Extract result
-        if status == 'optimal' and x is not None:
-            # Calculate h = c^T * x
-            from cvxopt import blas
-            h_val = blas.dot(c_cvx, x)
-
-            # Convert x to list for EME object, then to numpy for return
-            x_list = list(x)
-
-            # Use EME solver to map variables back correctly
-            x_vec_list = eme_solver.get_x_vector(x_list)
-            # use EME solver to get h value (more robust)
-            h_val = float(eme_solver.get_h(x_list))
-
-            return h_val, np.array(x_vec_list), True
+        # 6. Map statuses to clearer identifiers
+        # cvxopt.glpk uses: 'optimal', 'primal infeasible', 'dual infeasible', 'unknown'
+        if isinstance(status, str):
+            stat = status.lower().strip()
         else:
-            # If solver fails/infeasible
-            return float(sys.maxsize), np.array([]), False
+            stat = str(status).lower().strip()
+
+        if stat == "optimal" and x is not None:
+            # Use EME solver to compute robust h and x-vector mapping
+            x_list = list(x)
+            x_vec_list = eme_solver.get_x_vector(x_list)
+            h_val = float(eme_solver.get_h(x_list))
+            return h_val, np.array(x_vec_list), True, "optimal"
+        elif "primal infeasible" in stat:
+            return float(sys.maxsize), np.array([]), False, "primal_infeasible"
+        elif "dual infeasible" in stat:
+            # treat as infeasible for our purposes
+            return float(sys.maxsize), np.array([]), False, "dual_infeasible"
+        elif "unknown" in stat:
+            # numerical trouble; we treat as dead-end
+            return float(sys.maxsize), np.array([]), False, "unknown"
+        else:
+            # Fallback to 'error' for any other unexpected status
+            return float(sys.maxsize), np.array([]), False, "error"
 
     except Exception:
-        return float(sys.maxsize), np.array([]), False
+        # Any exception during LP -> report as 'error'
+        return float(sys.maxsize), np.array([]), False, "error"
 
 
 def get_trace_index(marking: Marking, place_to_trace_index: Dict[Any, int], trace_len: int) -> int:
@@ -749,6 +760,9 @@ def __search(
     split_points = {0, trace_len}
     restarts = 0
 
+    # Track the maximum "explained" trace index seen among LP solutions
+    max_explained_idx = 0
+
     if ext_me_parameters is None:
         ext_me_parameters = {}
     if EME_Params.COSTS not in ext_me_parameters:
@@ -758,27 +772,44 @@ def __search(
     while True:
         try:
             # A. Update EME Solver Parameters
-            # We MUST set MAX_K_VALUE to a high number to prevent the 'classic' solver from dropping our splits
             valid_split_idx = sorted([i for i in split_points if i < trace_len])
 
             ext_me_parameters[EME_Params.SPLIT_IDX] = valid_split_idx
+            # Keep a margin on MAX_K_VALUE so chosen splits are not trimmed away by the builder
             ext_me_parameters[EME_Params.MAX_K_VALUE] = len(valid_split_idx) + 5  # Ensure no trimming
 
             # B. Build EME Solver
             eme_solver = eme_build(original_trace, sync_net, ini, fin, parameters=ext_me_parameters)
+
+            # given x (list/ndarray), update max_explained_idx using the EME solver
+            def _maybe_update_max_explained(x_vec):
+                nonlocal max_explained_idx
+                try:
+                    if x_vec is None or len(x_vec) == 0:
+                        return
+                    # ensure integer list for get_firing_sequence
+                    x_list = [int(v) for v in (list(x_vec) if not isinstance(x_vec, list) else x_vec)]
+                    _, _, explained_events = eme_solver.get_firing_sequence(x_list)
+                    if explained_events is not None:
+                        max_explained_idx = max(max_explained_idx, explained_events)
+                except Exception:
+                    pass
 
             # C. A* Initialization
             closed = set()
             visited = 0
             queued = 0
             traversed = 0
-            lp_solved = 1
+            lp_solved = 0
 
-            # Initial Heuristic (Exact at start)
-            h, x, is_feasible = _eme_solve_inner(eme_solver, ini, use_ilp)
-            if not is_feasible: return None
-
+            h, x, is_feasible, status = _eme_solve_inner(eme_solver, ini, use_ilp=use_ilp)
+            if status != "optimal":
+                # root LP must be solvable: otherwise no alignment via this decomposition
+                return None
+            _maybe_update_max_explained(x)
+            lp_solved += 1
             ini_state = utils.SearchTuple(0 + h, 0, h, ini, None, None, x, True)
+
             open_set = [ini_state]
             heapq.heapify(open_set)
 
@@ -786,20 +817,21 @@ def __search(
 
             # D. Inner A* Loop
             while open_set:
-                if (time.time() - start_time) > max_align_time_trace: return None
+                # time guard
+                if (time.time() - start_time) > max_align_time_trace:
+                    return None
 
                 curr = heapq.heappop(open_set)
                 current_marking = curr.m
 
                 # --- INCREMENTAL LOGIC START ---
-                # Logic: If a state is "Trusted" (heuristic derived from parent), we skip LP.
-                # BUT if it is "Untrusted" (trust=False), we MUST solve the LP.
-                # The Incremental optimization is: If we are forced to solve the LP, and we are NOT
-                # at a designated "split point", we assume our current approximation is too coarse.
-                # So we stop, add this index to split points, and restart with a finer grid.
+                # If a state is "Trusted" (heuristic derived from parent), we skip LP.
+                # If "Untrusted", we must solve LP for that marking. If it's not at a split point,
+                # we add a new split (selected at max_explained_idx as per the practical paper) and restart the whole search.
 
                 while not curr.trust:
-                    if (time.time() - start_time) > max_align_time_trace: return None
+                    if (time.time() - start_time) > max_align_time_trace:
+                        return None
 
                     if current_marking in closed:
                         if open_set:
@@ -809,18 +841,31 @@ def __search(
                         else:
                             return None
 
-                    # Check trace index
+                    # Determine trace index
                     curr_trace_idx = get_trace_index(current_marking, place_to_trace_index, trace_len)
 
                     # If we need an exact calculation but are not at a split point -> RESTART
                     if curr_trace_idx not in split_points:
-                        raise RestartException(curr_trace_idx)
+                        # choose split at the maximum number of events explained so far
+                        new_split_index = max_explained_idx if (
+                                    max_explained_idx and (max_explained_idx not in split_points)) else curr_trace_idx
+                        # Safety bounds
+                        if new_split_index in split_points or new_split_index <= 0 or new_split_index >= trace_len:
+                            new_split_index = curr_trace_idx
+                        raise RestartException(new_split_index) # trigger restart of the outer loop
 
-                    # If we are at a split point, we solve normally
-                    h, x, is_feasible = _eme_solve_inner(eme_solver, curr.m, use_ilp)
+                    # We are at a split point -> solve LP for curr.m
+                    h, x, is_feasible, status = _eme_solve_inner(eme_solver, curr.m, use_ilp=False)
+                    # Only update max_explained if we received an actual x
+                    _maybe_update_max_explained(x)
 
-                    if not is_feasible:
-                        # Path dead
+                    # as described in paper: handle LP statuses:
+                    # - 'optimal' -> proceed
+                    # - 'primal_infeasible' or 'dual_infeasible' or 'unknown' or 'error' -> treat as dead-end
+                    if status != "optimal":
+                        # dead path according to LP
+                        closed.add(current_marking)
+                        # get next candidate from open set
                         if open_set:
                             curr = heapq.heappop(open_set)
                             current_marking = curr.m
@@ -828,6 +873,7 @@ def __search(
                         else:
                             return None
 
+                    # LP successful
                     lp_solved += 1
                     tp = utils.SearchTuple(curr.g + h, curr.g, h, curr.m, curr.p, curr.t, x, True)
                     curr = heapq.heappushpop(open_set, tp)
@@ -835,8 +881,10 @@ def __search(
                 # --- INCREMENTAL LOGIC END ---
 
                 # Standard A* checks
-                if curr.h > lp_solver.MAX_ALLOWED_HEURISTICS: continue
-                if current_marking in closed: continue
+                if curr.h > lp_solver.MAX_ALLOWED_HEURISTICS:
+                    continue
+                if current_marking in closed:
+                    continue
 
                 # Goal Reached?
                 if curr.h < 0.01 and current_marking == fin:
@@ -849,7 +897,7 @@ def __search(
                 closed.add(current_marking)
                 visited += 1
 
-                # Explore
+                # Expand transitions
                 enabled_trans = copy(trans_empty_preset)
                 for p in current_marking:
                     for t in p.ass_trans:
@@ -864,7 +912,8 @@ def __search(
                 for t, cost in trans_to_visit_with_cost:
                     traversed += 1
                     new_marking = utils.add_markings(current_marking, t.add_marking)
-                    if new_marking in closed: continue
+                    if new_marking in closed:
+                        continue
 
                     g = curr.g + cost
 
@@ -883,10 +932,11 @@ def __search(
                     tp = utils.SearchTuple(new_f, g, h_derived, new_marking, curr, t, x_derived, trustable)
                     heapq.heappush(open_set, tp)
 
+            # no alignment found for this decomposition
             return None
 
         except RestartException as e:
-            # Handle Restart
+            # Add the new split point suggested by the incremental logic and restart
             split_points.add(e.new_split_index)
             restarts += 1
             # Loop continues, rebuilding eme_solver with new splits

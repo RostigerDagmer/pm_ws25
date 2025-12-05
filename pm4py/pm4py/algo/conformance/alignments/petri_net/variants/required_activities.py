@@ -571,6 +571,120 @@ def _heuristic_simple_required_activities(
     return float(lb_moves)
 
 
+def _heuristic_label_reachability(
+    marking: Marking,
+    trace_labels: list,
+    trace_len: int,
+    place_to_trace_index: Dict[Any, int],
+    place_label_depth: Dict[Any, Dict[str, int]],
+    heuristic_weight: float,
+) -> float:
+    """Label-Reachability heuristic: use depth to the next trace label.
+
+    For the next event label in the trace, find the minimal visible-depth from
+    any place in the marking to a transition with that label. If that label is
+    unreachable or very deep, we need at least one non-sync move.
+    """
+    if trace_len == 0 or not trace_labels:
+        return 0.0
+
+    # Infer conservative current trace index
+    idx_candidates = [
+        place_to_trace_index[p]
+        for p in marking
+        if p in place_to_trace_index
+    ]
+    trace_idx = max(idx_candidates) if idx_candidates else 0
+    if trace_idx >= trace_len:
+        return 0.0
+
+    next_label = trace_labels[trace_idx]
+    if next_label is None:
+        return 0.0
+
+    depths = []
+    for p in marking:
+        by_label = place_label_depth.get(p)
+        if by_label is not None and next_label in by_label:
+            depths.append(by_label[next_label])
+
+    if not depths:
+        # The next label is not reachable from here => at least one log move
+        return float(heuristic_weight)
+
+    d_min = min(depths)
+    if d_min <= 0:
+        # already enabled somewhere, cannot infer extra cost
+        return 0.0
+
+    # At least one non-sync move needed before this label can be matched
+    return float(max(1, d_min) * heuristic_weight)
+
+
+def _heuristic_bitset_required_activities(
+    marking: Marking,
+    trace_labels: list,
+    trace_len: int,
+    place_to_trace_index: Dict[Any, int],
+    place_req_mask: Dict[Any, int],
+    suffix_masks: Dict[int, int],
+    heuristic_weight: float,
+) -> float:
+    """Bitset-based required-activities heuristic.
+
+    Use bitsets for required labels (per place) and for labels in each trace
+    suffix. Derive lower bounds from missing/impossible labels via popcount.
+    """
+    if trace_len == 0 or not trace_labels:
+        return 0.0
+
+    idx_candidates = [
+        place_to_trace_index[p]
+        for p in marking
+        if p in place_to_trace_index
+    ]
+    trace_idx = max(idx_candidates) if idx_candidates else 0
+    if trace_idx >= trace_len:
+        return 0.0
+
+    # Aggregate required labels mask for this marking
+    R = 0
+    for p in marking:
+        R |= place_req_mask.get(p, 0)
+
+    T = suffix_masks.get(trace_idx, 0)
+
+    if R == 0 and T == 0:
+        return 0.0
+
+    # Required model labels not present in trace suffix
+    missing_model = R & ~T
+    # Trace labels not compatible with model from this marking
+    impossible_log = T & ~R
+
+    lb_model = missing_model.bit_count() if hasattr(int, "bit_count") else bin(missing_model).count("1")
+    lb_log = impossible_log.bit_count() if hasattr(int, "bit_count") else bin(impossible_log).count("1")
+
+    lb_moves = max(lb_model, lb_log)
+    return float(lb_moves * heuristic_weight)
+
+
+def _heuristic_structural_shortest_path(
+    marking: Marking,
+    dist_place: Dict[Any, float],
+) -> float:
+    """Structural shortest-path heuristic on the sync net (place-level).
+
+    Use a precomputed lower bound on model-side non-sync costs from each place
+    to final marking, and aggregate via max over all marked places.
+    """
+    if not dist_place:
+        return 0.0
+
+    vals = [dist_place[p] for p in marking if p in dist_place]
+    return max(vals) if vals else 0.0
+
+
 def _precompute_label_depths(sync_net, final_marking) -> Dict[Any, Dict[str, int]]:
     """Backward label-reachability with depth per place/label."""
     incoming_transitions: Dict[Any, Set[Any]] = defaultdict(set)
@@ -802,6 +916,27 @@ def __search(
                 place_to_required_labels,
                 heuristic_weight,
             )
+        if mode == RequiredActivitiesMode.LABEL_REACHABILITY:
+            return _heuristic_label_reachability(
+                marking,
+                trace_labels,
+                trace_len,
+                place_to_trace_index,
+                place_label_depth,
+                heuristic_weight,
+            )
+        if mode == RequiredActivitiesMode.BITSET:
+            return _heuristic_bitset_required_activities(
+                marking,
+                trace_labels,
+                trace_len,
+                place_to_trace_index,
+                place_req_mask,
+                suffix_masks,
+                heuristic_weight,
+            )
+        if mode == RequiredActivitiesMode.STRUCTURAL_SHORTEST_PATH:
+            return _heuristic_structural_shortest_path(marking, dist_place)
         # fallback
         return 0.0
 
