@@ -2,6 +2,7 @@ from pm4py.objects.conversion.log import converter as log_converter
 from pm4py.objects.log.obj import EventLog, Trace, EventStream
 from collections.abc import Sequence
 import pandas as pd
+from pathlib import Path
 
 
 def _normalize_log_input(subset):
@@ -136,3 +137,23 @@ DEFAULT_PARAMS_CSV = {
 }
 
 DEFAULT_PARAMS_XES = {"attribute": "concept:name"}
+
+
+def build_dataset(path: str):
+    from dataloaders.csv_log import CSVEventLogDataset
+    from dataloaders.xes_log import XESEventLogDataset
+
+    ext = Path(path).suffix.lower()
+
+    if ext == ".xes":
+        return XESEventLogDataset(path)
+
+    if ext == ".csv":
+        dataset_id = Path(path).parent.name  # or another identifier
+        if dataset_id not in CONSTRUCTION_PARAMS:
+            raise KeyError(
+                f"No CSV event log constructor params for '{dataset_id}'"
+            )
+        return CSVEventLogDataset(path, **CONSTRUCTION_PARAMS[dataset_id])
+
+    raise ValueError(f"Unsupported log format: {ext}")

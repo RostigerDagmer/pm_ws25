@@ -236,6 +236,9 @@ class ProcessModelDataset(Dataset):
             for i in range(len(self.ds)):
                 yield self.ds.__get_serialized__(i)
 
+    # Type alias for compatibility
+    SerializedItemType = SerializedView.ItemType
+
     def __init__(
         self,
         log_dataset: BaseEventLogDataset,
