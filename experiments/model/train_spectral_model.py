@@ -1,3 +1,4 @@
+import gc
 from configs.schema import SliceType
 from typing import Optional
 from scripts.create_labels import split_dataframes
@@ -29,6 +30,8 @@ from util.distributions import (
     PoissonSpec,
     BernoulliDepthLinearSpec,
 )
+
+import os
 
 # Configuration
 LOGGING_LEVEL = logging.INFO
@@ -167,21 +170,16 @@ def get_natural_dataset(
     log_path: str,
     config: str,
     base_path: Optional[str] = None,
-    slice: Optional[range] = None,
+    skip_init: bool = True,
 ) -> RunDataset:
+    RNG.initialize(SEED)
     cfg_dict = yaml.safe_load(open(config))
     cfg = PipelineConfig.model_validate(cfg_dict)
     cfg.log_path = log_path
     cfg.alignment.cache_path = base_path
-    if slice is not None:
-        cfg.alignment.sampler.slice = SliceType(
-            **{"from": slice.start, "to": slice.stop}
-        )
     cfg.seed = SEED
-    cfg.alignment.workers = 24
-    return build_pipeline(
-        cfg,
-    )
+    cfg.alignment.workers = 16
+    return build_pipeline(cfg, skip_init)
 
 
 def create_label_df(
@@ -195,7 +193,7 @@ def create_label_df(
         run_dataset.serialized,
         batch_size=512,
         shuffle=False,
-        num_workers=4,  # cfg.alignment.workers if cfg.alignment.workers > 0 else os.cpu_count(),
+        num_workers=4,
         persistent_workers=True,
         collate_fn=collate,
     )
@@ -210,7 +208,13 @@ def create_label_df(
 
 
 def prepare_batches(
-    run_dataset, label_map, extractor, device, desc="Preparing Data"
+    run_dataset,
+    label_map,
+    timing_map,
+    extractor,
+    device,
+    dataset_id,
+    desc="Preparing Data",
 ):
     print(f"Pre-computing batches: {desc}...")
     models = run_dataset.pm_dataset.serialized
@@ -236,28 +240,28 @@ def prepare_batches(
         model_traces = list(
             run_dataset.trace_sampler.iter_for_model(model_item)
         )
-        # This gives us all traces for the model.
 
         # Get targets
         model_targets = []
         model_keys = []
+        model_timings = []
         for t in model_traces:
             t_hash = RunDataset._hash_trace(t)
-            if (model_hash, t_hash) in label_map:
-                model_targets.append(label_map[(model_hash, t_hash)])
-                model_keys.append((model_hash, t_hash))
-            else:
-                # This trace belongs to a different split (e.g. val or test) if we are preparing train
-                # Or it is just missing.
-                # Since we iterate over ALL traces for the model, we need to skip those not in the current label_map
-                model_targets.append(-1)
-                model_keys.append(None)
+            if (dataset_id, model_hash, t_hash) in label_map:
+                model_targets.append(
+                    label_map[(dataset_id, model_hash, t_hash)]
+                )
+                model_timings.append(
+                    timing_map[(dataset_id, model_hash, t_hash)]
+                )
+                model_keys.append((dataset_id, model_hash, t_hash))
 
         # Filter valid
         valid_indices = [i for i, t in enumerate(model_targets) if t != -1]
         model_traces = [model_traces[i] for i in valid_indices]
         model_targets = [model_targets[i] for i in valid_indices]
         model_keys = [model_keys[i] for i in valid_indices]
+        model_timings = [model_timings[i] for i in valid_indices]
 
         # Batching
         for i in range(0, len(model_traces), BATCH_SIZE):
@@ -266,6 +270,9 @@ def prepare_batches(
                 model_targets[i : i + BATCH_SIZE], device=device
             )
             batch_keys_chunk = model_keys[i : i + BATCH_SIZE]
+            batch_timings_chunk = torch.tensor(
+                model_timings[i : i + BATCH_SIZE], device=device
+            )
 
             # Convert Traces to Tensor
             # We need to map labels to indices
@@ -303,19 +310,14 @@ def prepare_batches(
             model_basis = tensors["model_basis"]  # [1, T, d_model]
             trace_embedding = tensors["trace_embedding"]  # [B, d_trace]
 
-            # Get keys for this batch
-            batch_keys = []
-            for i in range(len(batch_trace_objs)):
-                # Re-construct key or store it?
-                # We filtered model_traces and model_targets using valid_indices.
-                # We need the corresponding hashes.
-                # Let's store hashes when we filter.
-                pass
-
-            # Actually, let's refactor the loop slightly to keep keys
-
             all_batches.append(
-                (model_basis, trace_embedding, batch_y, batch_keys_chunk)
+                (
+                    model_basis,
+                    trace_embedding,
+                    batch_y,
+                    batch_keys_chunk,
+                    batch_timings_chunk,
+                )
             )
 
     return all_batches
@@ -329,13 +331,14 @@ def evaluate(model, batches, criterion, device):
 
     with torch.no_grad():
         for batch in batches:
-            model_basis, trace_embedding, batch_y, _ = batch
+            model_basis, trace_embedding, batch_y, _, batch_timings = batch
 
             # Expand model basis for batch
             model_basis = model_basis.expand(len(batch_y), -1, -1)
 
             logits = model(model_basis, trace_embedding)
             loss = criterion(logits, batch_y)
+            loss = (batch_timings * loss).mean()
 
             total_loss += loss.item() * len(batch_y)
             preds = logits.argmax(dim=1)
@@ -353,32 +356,46 @@ def in_depth_eval(model, batches, df, aligners, device):
 
     # Pre-compute stats
     print("Computing duration stats...")
-    stats_df = df.groupby(["model_hash", "trace_hash"])["duration"].agg(
-        ["mean", "max", "min"]
-    )
+    stats_df = df.groupby(["dataset_id", "model_hash", "trace_hash"])[
+        "duration"
+    ].agg(["mean", "max", "min"])
     stats_lookup = stats_df.to_dict(orient="index")
 
-    # Lookup for specific durations: (model_hash, trace_hash, aligner) -> duration
-    duration_lookup = df.set_index(["model_hash", "trace_hash", "aligner"])[
-        "duration"
-    ].to_dict()
+    # Lookup for specific durations: (dataset_id, model_hash, trace_hash, aligner) -> duration
+    duration_lookup = df.set_index(
+        ["dataset_id", "model_hash", "trace_hash", "aligner"]
+    )["duration"].to_dict()
 
     total_avg_saved = 0.0
     total_max_saved = 0.0
     total_avg_lost = 0.0
+    predictions_timeout = 0
     count = 0
+
+    pred_aligners = {}
 
     with torch.no_grad():
         for batch in batches:
-            model_basis, trace_embedding, batch_y, batch_keys = batch
+            (
+                model_basis,
+                trace_embedding,
+                batch_y,
+                batch_keys,
+                batch_timings,
+            ) = batch
 
             model_basis = model_basis.expand(len(batch_y), -1, -1)
             logits = model(model_basis, trace_embedding)
             preds = logits.argmax(dim=1)
 
             for i, pred_idx in enumerate(preds):
-                key = batch_keys[i]  # (model_hash, trace_hash)
+                key = batch_keys[i]  # (dataset_id, model_hash, trace_hash)
                 pred_aligner = aligners[pred_idx.item()]
+
+                if pred_aligner not in pred_aligners:
+                    pred_aligners[pred_aligner] = 1
+                else:
+                    pred_aligners[pred_aligner] += 1
 
                 if key not in stats_lookup:
                     continue
@@ -402,9 +419,12 @@ def in_depth_eval(model, batches, df, aligners, device):
                 # Get predicted duration
                 # If the predicted aligner failed or is missing for this trace, what do we do?
                 # The dataset should be complete?
-                lookup_key = (key[0], key[1], pred_aligner)
+                lookup_key = (key[0], key[1], key[2], pred_aligner)
                 if lookup_key in duration_lookup:
                     pred_duration = duration_lookup[lookup_key]
+                    if pred_duration == float("inf"):
+                        pred_duration = TIMEOUT
+                        predictions_timeout += 1
 
                     total_avg_saved += avg_duration - pred_duration
                     total_max_saved += max_duration - pred_duration
@@ -418,35 +438,73 @@ def in_depth_eval(model, batches, df, aligners, device):
         return 0.0, 0.0, 0.0
 
     return (
+        pred_aligners,
         total_avg_saved / count,
         total_max_saved / count,
         total_avg_lost / count,
+        predictions_timeout,
     )
 
 
-def train():
-    logging.basicConfig(level=LOGGING_LEVEL)
-    RNG.initialize(SEED)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+TRAIN_DATASETS = {
+    'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
+    '63a8435a-077d-4ece-97cd-2c76d394d99c': ['BPIC15_2.xes'],
+    'ed445cdd-27d5-4d77-a1f7-59fe7360cfbe': ['BPIC15_3.xes'],
+    '679b11cf-47cd-459e-a6de-9ca614e25985': ['BPIC15_4.xes'],
+    '3301445f-95e8-4ff0-98a4-901f1f204972': ['BPI%20Challenge%202018.xes'],
+    '3926db30-f712-4394-aebc-75976070e91f': ['BPI_Challenge_2012.xes'],
+    'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
+    '6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd': [
+        'Hospital%20Billing%20-%20Event%20Log.xes'
+    ],
+    '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
+        'Sepsis%20Cases%20-%20Event%20Log.xes'
+    ],
+    'd06aff4b-79f0-45e6-8ec8-e19730c248f1': ['BPI_Challenge_2019.xes'],
+    '3537c19d-6c64-4b1d-815d-915ab0e479da': [
+        'BPI_Challenge_2013_open_problems.xes'
+    ],
+    '500573e6-accc-4b0c-9576-aa5468b10cee': [
+        'BPI_Challenge_2013_incidents.xes'
+    ],
+    '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
+    'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
+    '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
+}
 
-    config = "./configs/default.yaml"
-    log_path = "./data/5f3067df-f10b-45da-b98b-86ae4c7a310b/BPI%20Challenge%202017.xes"
-    log_path = "./data/6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd/Hospital%20Billing%20-%20Event%20Log.xes"
-    log_path = "./data/a0addfda-2044-4541-a450-fdcc9fe16d17/BPIC15_1.xes"
+TEST_DATASETS = {
+    'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
+    'b32c6fe5-f212-4286-9774-58dd53511cf8': ['BPIC15_5.xes'],
+    '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
+    'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
+    '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
+    'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
+        'BPI_Challenge_2013_closed_problems.xes'
+    ],
+}
 
-    # run_dataset = get_natural_dataset(log_path, config, slice=range(0, 10))
-    run_dataset = get_synthetic_dataset(device="cuda:0")
 
+def get_batches(
+    path: str,
+    config: str,
+    feature_extractor: SpectralFeatureExtractor,
+    device: str,
+    # dataset_id: str,
+):
+    run_dataset = get_natural_dataset(path, config)
     # 2. Label Extraction
-    print("Extracting labels from RunDataset...")
-    # We need to map (model_hash, trace_hash) -> best_aligner_index
+    print(f"Extracting labels from RunDataset {path}")
 
+    # We need to map (model_hash, trace_hash) -> best_aligner_index
     df = create_label_df(
         run_dataset,
         ["combination_id", "model_hash", "trace_hash", "aligner", "duration"],
         collate_fn,
     )
+
+    # insert column containing the run_dataset.hash()
+    dataset_id = run_dataset.hash()
+    df["dataset_id"] = dataset_id
 
     # Find best aligner for each combination
     best_indices = df.groupby("combination_id")["duration"].idxmin()
@@ -460,39 +518,135 @@ def train():
     print("==== TIMEOUTS ====")
     print(df.loc[timeout_indices]["aligner"].value_counts())
 
+    # shuffle
+    df = df.sample(frac=1).reset_index(drop=True)
+
     # Create label map
     # We need a mapping from aligner name to class index
     aligners = sorted(df["aligner"].unique())
     aligner_to_idx = {a: i for i, a in enumerate(aligners)}
     print(f"Aligner classes: {aligner_to_idx}")
 
-    label_map = {}  # (model_hash, trace_hash) -> class_idx
-    print(f"Generated {len(label_map)} labels.")
-
     train_df, test_df, eval_df = split_dataframes(labels_df, 0.8, 0.1)
 
-    def build_map(df_split):
+    def build_map(df_split, aligner_to_idx_map, timeout_val):
         m = {}
+        mt = {}
         for _, row in df_split.iterrows():
-            key = (row["model_hash"], row["trace_hash"])
-            m[key] = aligner_to_idx[row["aligner"]]
-        return m
+            key = (row["dataset_id"], row["model_hash"], row["trace_hash"])
+            m[key] = aligner_to_idx_map[row["aligner"]]
+            mt[key] = (
+                row["duration"]
+                if row["duration"] != float('inf')
+                else timeout_val
+            )
+        return m, mt
 
-    train_label_map = build_map(train_df)
-    val_label_map = build_map(
-        test_df
-    )  # split_dataframes returns train, test(val), eval(test)
-    test_label_map = build_map(eval_df)
+    train_label_map, train_timing_map = build_map(
+        train_df, aligner_to_idx, TIMEOUT
+    )
+    val_label_map, val_timing_map = build_map(test_df, aligner_to_idx, TIMEOUT)
+    test_label_map, test_timing_map = build_map(
+        eval_df, aligner_to_idx, TIMEOUT
+    )
 
     print(
         f"Split sizes: Train={len(train_label_map)}, Val={len(val_label_map)}, Test={len(test_label_map)}"
     )
 
+    torch.use_deterministic_algorithms(False)
+
+    # We iterate over models, then generate traces for each model
+    # We can use the dataset's serialized items to get models
+
+    # Pre-compute data
+    train_batches = prepare_batches(
+        run_dataset,
+        train_label_map,
+        train_timing_map,
+        feature_extractor,
+        device,
+        dataset_id,
+        desc="Train Data",
+    )
+    val_batches = prepare_batches(
+        run_dataset,
+        val_label_map,
+        val_timing_map,
+        feature_extractor,
+        device,
+        dataset_id,
+        desc="Val Data",
+    )
+    test_batches = prepare_batches(
+        run_dataset,
+        test_label_map,
+        test_timing_map,
+        feature_extractor,
+        device,
+        dataset_id,
+        desc="Test Data",
+    )
+
+    del run_dataset
+    del train_label_map
+    del val_label_map
+    del test_label_map
+    del train_df
+    del test_df
+    del eval_df
+    del labels_df
+    del best_indices
+    del timeout_indices
+    del aligner_to_idx
+
+    gc.collect()
+
+    return df, aligners, (train_batches, val_batches, test_batches)
+
+
+def train():
+    logging.basicConfig(level=LOGGING_LEVEL)
+    RNG.initialize(SEED)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
+    config = "./configs/default.yaml"
+
+    DATASETS = {
+        **TRAIN_DATASETS,
+        **TEST_DATASETS,
+    }
     # 3. Model Initialization
     extractor = SpectralFeatureExtractor(d_model=D_MODEL, n_coeffs=N_COEFFS)
 
+    train_batches = []
+    val_batches = []
+    test_batches = []
+    df = pd.DataFrame()
+    aligners = []
+    i = 22
+    for dataset_name, files in DATASETS.items():
+        for file in files:
+            log_path = os.path.join("data/", dataset_name, file)
+            batch_df, algs, bts = get_batches(
+                log_path, config, extractor, device
+            )
+            train_batches.extend(bts[0])
+            val_batches.extend(bts[1])
+            test_batches.extend(bts[2])
+            df = pd.concat([df, batch_df], ignore_index=True)
+            print(f"len(df): {len(df)}")
+            aligners.extend(algs)
+        i -= 1
+        if i == 0:
+            break
+
+    aligners = sorted(set(aligners))
+    print(f"Aligner classes: {aligners}")
+
     model = SpectralModel(
-        d_model=extractor.d_model,  # Pass internal d_model (63)
+        d_model=extractor.d_model,  # Pass internal d_model (64)
         d_trace=extractor.dim,
         hidden_dim=HIDDEN_DIM,
         mlp_hidden_dim=MLP_HIDDEN_DIM,
@@ -503,26 +657,7 @@ def train():
     ).to(device)
 
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-    criterion = nn.CrossEntropyLoss()
-
-    # 4. Training Loop
-    torch.use_deterministic_algorithms(False)
-    print("Starting training...")
-    model.train()
-
-    # We iterate over models, then generate traces for each model
-    # We can use the dataset's serialized items to get models
-
-    # Pre-compute data
-    train_batches = prepare_batches(
-        run_dataset, train_label_map, extractor, device, desc="Train Data"
-    )
-    val_batches = prepare_batches(
-        run_dataset, val_label_map, extractor, device, desc="Val Data"
-    )
-    test_batches = prepare_batches(
-        run_dataset, test_label_map, extractor, device, desc="Test Data"
-    )
+    criterion = nn.CrossEntropyLoss(reduction="none")
 
     for epoch in range(EPOCHS):
         model.train()
@@ -534,7 +669,7 @@ def train():
 
         pbar = tqdm(train_batches, desc=f"Epoch {epoch + 1}/{EPOCHS}")
         for batch in pbar:
-            model_basis, trace_embedding, batch_y, _ = batch
+            model_basis, trace_embedding, batch_y, _, batch_timings = batch
 
             # Expand model basis for batch
             model_basis = model_basis.expand(len(batch_y), -1, -1)
@@ -544,6 +679,10 @@ def train():
             logits = model(model_basis, trace_embedding)
 
             loss = criterion(logits, batch_y)
+
+            # scale loss by timing per category
+            loss = (loss * batch_timings).mean()
+
             loss.backward()
             optimizer.step()
 
@@ -575,12 +714,16 @@ def train():
     print(f"Test Results: Loss={test_loss:.4f}, Acc={test_acc:.4f}")
 
     # In-Depth Eval
-    avg_saved, max_saved, avg_lost = in_depth_eval(
-        model, test_batches, df, aligners, device
+    pred_aligners, avg_saved, max_saved, avg_lost, predictions_timeout = (
+        in_depth_eval(model, test_batches, df, aligners, device)
     )
     print(
         f"In-Depth Eval: Avg Time Saved={avg_saved:.4f}s, Max Time Saved={max_saved:.4f}s, Avg Time Lost={avg_lost:.4f}s"
     )
+    print(
+        f"Number of predictions that would have timed out: {predictions_timeout}"
+    )
+    print(f"Prediction distribution of aligners: {pred_aligners}")
 
     # save model
     torch.save(model.state_dict(), "synthetic_model.pth")

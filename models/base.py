@@ -20,8 +20,13 @@ from features.extractors import BaseFeatureExtractor
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.objects.log.obj import Trace
 from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
+import pandas as pd
 
-from models.utils import normalize_datasets, validate_aligner_consistency, iter_combined_datasets
+from models.utils import (
+    normalize_datasets,
+    validate_aligner_consistency,
+    iter_combined_datasets,
+)
 
 
 @dataclass
@@ -51,8 +56,9 @@ class ClassificationModel(ABC):
 
     def __init__(
         self,
-        run_datasets: Union[RunDataset, List[RunDataset]],
-        feature_extractor: BaseFeatureExtractor,
+        run_datasets: Optional[Union[RunDataset, List[RunDataset]]] = None,
+        feature_extractor: Optional[BaseFeatureExtractor] = None,
+        tables: Optional[List[pd.DataFrame]] = None,
         cache_dir: Optional[Path] = None,
         hyperparameters: Optional[Dict[str, Any]] = None,
         force_retrain: bool = False,
@@ -61,16 +67,28 @@ class ClassificationModel(ABC):
         Args:
             run_datasets: Single RunDataset or list of RunDatasets for training
             feature_extractor: Feature extractor for model/trace pairs
+            table: Optional compressed table of ids + feature_vector for training
             cache_dir: Directory for model cache (defaults to first dataset's base_path / .cache_models)
             hyperparameters: Model-specific hyperparameters
             force_retrain: Force retraining even if cached model exists
         """
         # Normalize to list and validate
-        self.run_datasets = normalize_datasets(run_datasets)
-        validate_aligner_consistency(self.run_datasets)
+        self.tables = tables
+
+        if tables is None:
+            if run_datasets is None:
+                raise ValueError(
+                    "At least one of run_datasets or tables must be provided."
+                )
+            self.run_datasets = normalize_datasets(run_datasets)
+            validate_aligner_consistency(self.run_datasets)
+        else:
+            self.run_datasets = None
 
         self.feature_extractor = feature_extractor
-        self.hyperparameters = hyperparameters or self._default_hyperparameters()
+        self.hyperparameters = (
+            hyperparameters or self._default_hyperparameters()
+        )
 
         # Setup cache directory
         if cache_dir is None:
@@ -84,7 +102,9 @@ class ClassificationModel(ABC):
         self.is_trained = False
 
         cache_key = self._compute_cache_key()
-        self.cache_file = self.cache_dir / f"{self.__class__.__name__}_{cache_key}.pkl"
+        self.cache_file = (
+            self.cache_dir / f"{self.__class__.__name__}_{cache_key}.pkl"
+        )
 
         if force_retrain or not self._load_from_cache():
             logging.info(f"Training new {self.__class__.__name__}...")
@@ -100,9 +120,7 @@ class ClassificationModel(ABC):
 
     @abstractmethod
     def _train_classifier(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray
+        self, X_train: np.ndarray, y_train: np.ndarray
     ) -> Any:
         """
         Train the classifier model.
@@ -117,10 +135,7 @@ class ClassificationModel(ABC):
         pass
 
     @abstractmethod
-    def _predict_proba(
-        self,
-        X: np.ndarray
-    ) -> np.ndarray:
+    def _predict_proba(self, X: np.ndarray) -> np.ndarray:
         """
         Predict class probabilities.
 
@@ -145,10 +160,14 @@ class ClassificationModel(ABC):
     def _compute_cache_key(self) -> str:
         """Compute cache key from datasets, feature extractor, and hyperparameters."""
         key_data = {
-            'dataset_hashes': sorted([ds.hash() for ds in self.run_datasets]),
+            'dataset_hashes': (
+                sorted([ds.hash() for ds in self.run_datasets])
+                if self.run_datasets
+                else []
+            ),
             'feature_extractor_names': self.feature_extractor.feature_names,
             'hyperparameters': self.hyperparameters,
-            'model_class': self.__class__.__name__
+            'model_class': self.__class__.__name__,
         }
         return hashlib.sha1(
             json.dumps(key_data, sort_keys=True).encode()
@@ -181,25 +200,25 @@ class ClassificationModel(ABC):
             pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
         logging.info(f"Saved model to {self.cache_file}")
 
-    def _train(self):
-        """
-        Extract features and train classifier on RunDatasets.
-        Uses iter_combined_datasets() to get the fastest heuristic per combination.
-        """
-        X_list = []
-        y_list = []
-
-        logging.info("Extracting features and identifying fastest heuristics...")
+    def _get_xy_dataset(self):
+        logging.info(
+            "Extracting features and identifying fastest heuristics..."
+        )
+        X_list, y_list = [], []
         for model, trace, results_dict in tqdm(
             iter_combined_datasets(self.run_datasets),
-            desc="Training data preparation"
+            desc="Training data preparation",
         ):
             # Extract features
             trace_net, trace_im, trace_fm = construct_trace_net(trace)
             features = self.feature_extractor.extract(
-                model.pm, model.im, model.fm,
-                trace_net, trace_im, trace_fm,
-                return_as_dict=False
+                model.pm,
+                model.im,
+                model.fm,
+                trace_net,
+                trace_im,
+                trace_fm,
+                return_as_dict=False,
             )
 
             # Find fastest heuristic
@@ -208,7 +227,11 @@ class ClassificationModel(ABC):
 
             for algo_name, (algo, item, perf_list) in results_dict.items():
                 # Compute mean time from perf counters
-                durations = [p.duration for p in perf_list if p.duration is not None and p.duration != float('inf')]
+                durations = [
+                    p.duration
+                    for p in perf_list
+                    if p.duration is not None and p.duration != float('inf')
+                ]
                 if durations:
                     mean_time = np.mean(durations)
                     if mean_time < best_time:
@@ -218,32 +241,62 @@ class ClassificationModel(ABC):
             if best_algo is not None:
                 X_list.append(features)
                 y_list.append(best_algo)
+        return X_list, y_list
+
+    def _get_xy_table(self):
+        X_list, y_list = [], []
+        for table in self.tables:
+            parsed_features = (
+                table['feature_vector']
+                .apply(
+                    lambda x: np.fromstring(
+                        x.strip('[]').replace('\n', ' '), sep=' '
+                    )
+                )
+                .tolist()
+            )
+            X_list.extend(parsed_features)
+            y_list.extend(table['aligner'].tolist())
+        return X_list, y_list
+
+    def _train(self):
+        """
+        Extract features and train classifier on RunDatasets.
+        Uses iter_combined_datasets() to get the fastest heuristic per combination.
+        """
+
+        if self.tables is not None:
+            X_list, y_list = self._get_xy_table()
+        else:
+            X_list, y_list = self._get_xy_dataset()
 
         X_train = np.array(X_list)
         y_train_str = np.array(y_list)
 
         if len(X_train) == 0:
-            raise ValueError("No valid training samples found. Check your RunDatasets.")
+            raise ValueError(
+                "No valid training samples found. Check your RunDatasets."
+            )
 
         # Encode labels to integers
         self.label_encoder = LabelEncoder()
         y_train = self.label_encoder.fit_transform(y_train_str)
 
-        logging.info(f"Training on {len(X_train)} samples with {X_train.shape[1]} features")
-        logging.info(f"Label distribution: {dict(zip(*np.unique(y_train_str, return_counts=True)))}")
+        logging.info(
+            f"Training on {len(X_train)} samples with {X_train.shape[1]} features"
+        )
+        logging.info(
+            f"Label distribution: {dict(zip(*np.unique(y_train_str, return_counts=True)))}"
+        )
 
         # Train classifier
         self.model = self._train_classifier(X_train, y_train)
         self.is_trained = True
 
     def predict_heuristic(
-        self,
-        model: PetriNet,
-        im: Marking,
-        fm: Marking,
-        trace: Trace
+        self, model: PetriNet, im: Marking, fm: Marking, trace: Trace
     ) -> PredictionResult:
-        """ Predict best heuristic for a single model/trace pair."""
+        """Predict best heuristic for a single model/trace pair."""
         if not self.is_trained:
             raise RuntimeError("Model not trained. Call _train() first.")
 
@@ -253,10 +306,14 @@ class ClassificationModel(ABC):
         t_fe_start = time.perf_counter()
         trace_net, trace_im, trace_fm = construct_trace_net(trace)
         features = self.feature_extractor.extract(
-            model, im, fm,
-            trace_net, trace_im, trace_fm,
+            model,
+            im,
+            fm,
+            trace_net,
+            trace_im,
+            trace_fm,
             return_as_dict=False,
-            use_cache=False  # Disable cache to measure actual extraction time
+            use_cache=False,  # Disable cache to measure actual extraction time
         )
         t_fe_end = time.perf_counter()
         feature_extraction_time = t_fe_end - t_fe_start
@@ -267,7 +324,9 @@ class ClassificationModel(ABC):
         proba = self._predict_proba(X)[0]
         predicted_class = np.argmax(proba)
         confidence = proba[predicted_class]
-        predicted_heuristic = self.label_encoder.inverse_transform([predicted_class])[0]
+        predicted_heuristic = self.label_encoder.inverse_transform(
+            [predicted_class]
+        )[0]
         t_clf_end = time.perf_counter()
         classification_time = t_clf_end - t_clf_start
 
@@ -279,5 +338,5 @@ class ClassificationModel(ABC):
             confidence=float(confidence),
             total_prediction_time=total_time,
             feature_extraction_time=feature_extraction_time,
-            classification_time=classification_time
+            classification_time=classification_time,
         )

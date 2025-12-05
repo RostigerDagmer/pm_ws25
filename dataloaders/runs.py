@@ -478,6 +478,7 @@ class RunDataset(
         n_workers: int = 0,
         write_batch_size: int = 100,
         timeout: float = 20.0,
+        skip_init: bool = False,
     ):
         self.base_path = base_path
         self.pm_dataset = process_model_dataset
@@ -485,11 +486,17 @@ class RunDataset(
         self.aligners = aligners
         self.n_runs = n_runs
         self.items: dict[str, "RunDataset.SerializedItemType"] = {}
+        self.combinations: dict[str, list[str]] = (
+            {}
+        )  # pivot table from combination_id -> item_ids
         self.index: list[str] = []
         self.n_workers = n_workers
         self.write_batch_size = write_batch_size
         self.timeout = timeout
-        self._init_cache_mp()
+        if skip_init:
+            self._tryload()
+        else:
+            self._init_cache_mp()
 
     def __iter__(self) -> Iterator[ItemType]:
         for i in range(len(self)):
@@ -508,12 +515,17 @@ class RunDataset(
         if not os.path.exists(path):
             return
         self.items = {}
+        self.combinations = {}
 
         with open(path, "rb") as f:
             while True:
                 try:
                     chunk = pickle.load(f)  # each chunk = dict of N items
                     self.items.update(chunk)
+                    for item in chunk.values():
+                        self.combinations.setdefault(item.comb_id, []).append(
+                            item.item_id
+                        )
                 except EOFError:
                     break
 
@@ -629,6 +641,7 @@ class RunDataset(
 
         existing_items = self.items
         new_items: dict[str, RunDataset.SerializedItemType] = {}
+        new_combinations: dict[str, list[str]] = {}
         batch: dict[str, RunDataset.SerializedItemType] = {}
         path = self.save_path()
         os.makedirs(path.parent, exist_ok=True)
@@ -685,6 +698,9 @@ class RunDataset(
 
                 new_items[item.item_id] = item
                 batch[item.item_id] = item
+                new_combinations.setdefault(item.comb_id, []).append(
+                    item.item_id
+                )
                 aligned.update(1)
 
                 if len(batch) >= self.write_batch_size:
@@ -698,6 +714,7 @@ class RunDataset(
                 written.update(len(batch))
         # finalize
         self.items.update(new_items)
+        self.combinations.update(new_combinations)
         self.index = list(self.items.keys())
 
     def hash(self):
@@ -762,11 +779,22 @@ class RunDataset(
     def __getitem__(self, index: int | str) -> "RunDataset.ItemType":
         return self._get_serialized(index).deserialize()
 
-    def iter_by_combination(self) -> Iterator[Tuple[
-        "ProcessModelDataset.ItemType",
-        Trace,
-        Dict[str, Tuple[str, Union[typing.AlignmentResult, typing.ListAlignments], List[PerfCounter]]]
-    ]]:
+    def iter_by_combination(
+        self,
+    ) -> Iterator[
+        Tuple[
+            "ProcessModelDataset.ItemType",
+            Trace,
+            Dict[
+                str,
+                Tuple[
+                    str,
+                    Union[typing.AlignmentResult, typing.ListAlignments],
+                    List[PerfCounter],
+                ],
+            ],
+        ]
+    ]:
         """
         Iterate over RunDataset grouped by combination_id.
 
@@ -775,24 +803,15 @@ class RunDataset(
             - trace: Trace object
             - results_dict: Dict[algo_name -> (algo, item, perf)]
         """
-        combinations = {}
-        for item_id in self.index:
-            item = self[self.index.index(item_id)]
 
-            comb_id = item.comb_id
-            if comb_id not in combinations:
-                combinations[comb_id] = {
-                    'model': item.model,
-                    'trace': item.trace,
-                    'results': {}
-                }
-
-            combinations[comb_id]['results'][item.algo] = (
-                item.algo, item.item, item.perf
-            )
-
-        for comb_id, data in combinations.items():
-            yield (data['model'], data['trace'], data['results'])
+        for comb_id in self.combinations:
+            items = [self[item_id] for item_id in self.combinations[comb_id]]
+            model = items[0].model
+            trace = items[0].trace
+            results_dict = {
+                item.algo: (item.algo, item.item, item.perf) for item in items
+            }
+            yield (model, trace, results_dict)
 
 
 def get_stats(stats: list[PerfCounter]) -> dict[str, float]:

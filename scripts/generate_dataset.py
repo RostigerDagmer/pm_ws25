@@ -12,7 +12,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 
 
-def build_pipeline(cfg: PipelineConfig) -> RunDataset:
+def build_pipeline(cfg: PipelineConfig, skip_init: bool = False) -> RunDataset:
     log_dataset = build_dataset(cfg.log_path)
 
     pm_dataset = ProcessModelDataset(
@@ -41,6 +41,7 @@ def build_pipeline(cfg: PipelineConfig) -> RunDataset:
         n_runs=cfg.alignment.runs,
         n_workers=cfg.alignment.workers,
         write_batch_size=cfg.alignment.write_batch_size,
+        skip_init=skip_init,
     )
 
 
