@@ -51,7 +51,7 @@ ALIGNMENT_VARIANTS = {
     # "incremental_astar": AlignmentsVariants.VERSION_INCREMENTAL_A_STAR,
 }
 
-# Dataset configurations
+
 # Dataset configurations
 DATASETS = {
     "bpi2013_closed": {
