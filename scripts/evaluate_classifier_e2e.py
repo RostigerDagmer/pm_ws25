@@ -192,7 +192,7 @@ if __name__ == "__main__":
     train_tables, test_tables, eval_tables = find_existing_tables(data_dir)
 
     logging.info("\nCreating feature extractor...")
-    feature_extractor = CompositeFeatureExtractor(use_cache=True)
+    feature_extractor = CompositeFeatureExtractor()
 
     logging.info("\nTraining XGBoostClassifier...")
     classifier = XGBoostClassifier(
