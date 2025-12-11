@@ -5,9 +5,9 @@
 ## Overview
 
 ```
-Step 0: Profile (one-time)  →  Step 1: Generate Labels  →  Step 2: Train Classifier
+Step 0: Profile (one-time)  →  Step 1: Generate Labels  →  Step 2: Train & Evaluate Classifier
    ~5-10 minutes                   ~2-4 hours (parallel)        ~1 hour
-   Optimize resources               N datasets → CSV files       CSV → trained model
+   Optimize resources               N datasets → CSV files       CSV → trained model + metrics
 ```
 
 ---
