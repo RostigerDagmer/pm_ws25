@@ -4,10 +4,12 @@ Evaluation framework for alignment heuristic recommenders.
 
 from typing import Dict, Any, List, Union
 from dataclasses import dataclass, field
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import logging
+import json
 from collections import defaultdict
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
 
@@ -96,6 +98,16 @@ class EvaluationMetrics:
 
         lines.extend([
             "",
+            "Confusion Matrix:",
+            "(Rows: Actual/True labels, Columns: Predicted labels)",
+            "",
+        ])
+
+        # Format confusion matrix
+        lines.append(self._format_confusion_matrix())
+
+        lines.extend([
+            "",
             "Prediction Timing:",
             f"  Mean Total: {self.mean_prediction_time * 1000:.3f}ms",
             f"  Mean Feature Extraction: {self.mean_feature_extraction_time * 1000:.3f}ms",
@@ -113,6 +125,45 @@ class EvaluationMetrics:
             lines.append(f"  {fname}: {importance:.4f}")
 
         lines.append("=" * 80)
+        return "\n".join(lines)
+
+    def _format_confusion_matrix(self) -> str:
+        """Format confusion matrix as a readable table."""
+        # Abbreviate long labels for better display
+        def abbreviate(label: str, max_len: int = 20) -> str:
+            if len(label) <= max_len:
+                return label
+            return label[:max_len]
+
+        labels = [abbreviate(label) for label in self.class_labels]
+
+        # Calculate column widths
+        max_label_width = max(len(label) for label in labels)
+        col_width = max(max_label_width, 8)
+
+        # Header row
+        header = " " * max_label_width + "  "
+        header += "  ".join(f"{label:>{col_width}}" for label in labels)
+        header += "  " + f"{'TOTAL':>{col_width}}"
+
+        lines = [header]
+
+        # Data rows
+        for i, row_label in enumerate(labels):
+            row_sum = self.confusion_matrix[i].sum()
+            row = f"{row_label:<{max_label_width}}  "
+            row += "  ".join(f"{self.confusion_matrix[i, j]:>{col_width}}" for j in range(len(labels)))
+            row += "  " + f"{row_sum:>{col_width}}"
+            lines.append(row)
+
+        # Total row
+        col_sums = self.confusion_matrix.sum(axis=0)
+        total_sum = self.confusion_matrix.sum()
+        total_row = f"{'TOTAL':<{max_label_width}}  "
+        total_row += "  ".join(f"{col_sums[j]:>{col_width}}" for j in range(len(labels)))
+        total_row += "  " + f"{total_sum:>{col_width}}"
+        lines.append(total_row)
+
         return "\n".join(lines)
 
 
@@ -292,3 +343,52 @@ class RecommenderEvaluator:
         df['relative_to_best_with_prediction'] = df['performance_ratio_with_prediction'] / df['performance_ratio_with_prediction'].min()
 
         return df
+
+    @staticmethod
+    def save_results(
+        metrics: EvaluationMetrics,
+        comparison_df: pd.DataFrame,
+        output_dir: Path,
+        train_count: int,
+        test_count: int
+    ):
+        """Save evaluation results to output directory."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save metrics as JSON
+        with open(output_dir / "metrics.json", 'w') as f:
+            metrics_dict = RecommenderEvaluator._convert_to_serializable(metrics.to_dict())
+            json.dump(metrics_dict, f, indent=2)
+
+        # Save summary as txt
+        with open(output_dir / "summary.txt", 'w') as f:
+            f.write("ML CLASSIFIER EVALUATION SUMMARY\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(f"Train datasets: {train_count}\n")
+            f.write(f"Test datasets: {test_count}\n\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(metrics.summary())
+            f.write("\n\n" + "=" * 80 + "\n\n")
+            f.write("Baseline Comparison:\n")
+            f.write(comparison_df.to_string())
+
+        logging.info(f"Results saved to: {output_dir}")
+
+    @staticmethod
+    def _convert_to_serializable(obj):
+        """Convert numpy types to Python native types for JSON serialization."""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {
+                key: RecommenderEvaluator._convert_to_serializable(value)
+                for key, value in obj.items()
+            }
+        elif isinstance(obj, list):
+            return [RecommenderEvaluator._convert_to_serializable(item) for item in obj]
+        return obj
