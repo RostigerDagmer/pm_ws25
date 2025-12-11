@@ -19,11 +19,11 @@
 #SBATCH --job-name=create_labels
 #SBATCH --clusters=serial
 #SBATCH --partition=serial_std
-#SBATCH --array=0-15%8                  # 16 datasets, 8 concurrent (BALANCED PROFILE)
-#SBATCH --time=04:00:00                 # 4 hours per dataset
+#SBATCH --array=0-15%16                  # 16 datasets, 8 concurrent (BALANCED PROFILE)
+#SBATCH --time=02:00:00                 # 4 hours per dataset
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8               # 8 CPUs per job
-#SBATCH --mem=32G                       # 32GB per job
+#SBATCH --cpus-per-task=4               # 8 CPUs per job
+#SBATCH --mem=24G                       # 32GB per job
 #SBATCH -o logs/create_labels_%A_%a.out
 #SBATCH -e logs/create_labels_%A_%a.err
 # SBATCH --mail-type=END,FAIL

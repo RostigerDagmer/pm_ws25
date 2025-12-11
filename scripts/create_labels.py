@@ -31,11 +31,16 @@ DF_SCHEMA = [
 
 
 def get_stats(perf: PerfCounter) -> dict[str, float]:
-    # Handle single PerfCounter object (not a list)
+    # Handle single PerfCounter object (current branch uses single, not list)
     duration = perf.duration if perf.duration is not None else 0.0
-    metrics = perf.extract_metrics()
-    search_time = metrics.get("search_time", 0.0)
-    lp_time = metrics.get("lp_time", 0.0)
+
+    # extract_metrics() is called automatically in PerfCounter.__exit__
+    # but we call it again to be safe in case perf was deserialized
+    if not hasattr(perf, 'search_time') or not hasattr(perf, 'lp_time'):
+        perf.extract_metrics()
+
+    search_time = perf.search_time
+    lp_time = perf.lp_time
 
     return {
         "mean_total": float(duration),

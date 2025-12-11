@@ -21,6 +21,9 @@ source ~/pm_ws25/.venv/bin/activate
 export PYTHONPATH="${PYTHONPATH}:${HOME}/pm_ws25"
 cd ~/pm_ws25
 
+# Ensure results directory exists
+mkdir -p results
+
 # Run with resource tracking
 echo "Running label generation with tracking..."
 /usr/bin/time -v python scripts/create_labels.py \
@@ -32,10 +35,16 @@ echo "Running label generation with tracking..."
     --workers $WORKERS \
     2>&1 | tee results/profile_output.txt
 
-echo ""
-echo "============================================"
-echo "PROFILING RESULTS"
-echo "============================================"
+# Function to print and append to file
+log_output() {
+    echo "$1"
+    echo "$1" >> results/profile_output.txt
+}
+
+log_output ""
+log_output "============================================"
+log_output "PROFILING RESULTS"
+log_output "============================================"
 
 # Extract metrics
 MAX_RSS=$(grep "Maximum resident set size" results/profile_output.txt | awk '{print $6}')
@@ -45,18 +54,18 @@ CPU_PCT=$(grep "Percent of CPU" results/profile_output.txt | awk '{print $7}' | 
 # Convert memory to GB
 MEM_GB=$((MAX_RSS / 1024 / 1024))
 
-echo ""
-echo "Resource Usage:"
-echo "  Memory:  ${MEM_GB}GB"
-echo "  Runtime: $ELAPSED"
-echo "  CPU:     ${CPU_PCT}%"
-echo ""
+log_output ""
+log_output "Resource Usage:"
+log_output "  Memory:  ${MEM_GB}GB"
+log_output "  Runtime: $ELAPSED"
+log_output "  CPU:     ${CPU_PCT}%"
+log_output ""
 
 # Generate recommendations
-echo "============================================"
-echo "RECOMMENDATIONS FOR SLURM CONFIG"
-echo "============================================"
-echo ""
+log_output "============================================"
+log_output "RECOMMENDATIONS FOR SLURM CONFIG"
+log_output "============================================"
+log_output ""
 
 # Memory recommendation
 if [ $MEM_GB -lt 20 ]; then
@@ -99,25 +108,25 @@ else
     CPU_REC="16"
 fi
 
-echo "Edit lrz-cluster/run_create_labels.slurm:"
-echo ""
-echo "  #SBATCH --cpus-per-task=$CPU_REC"
-echo "  #SBATCH --mem=$MEM_REC"
-echo "  #SBATCH --time=$TIME_REC"
-echo ""
+log_output "Edit lrz-cluster/run_create_labels.slurm:"
+log_output ""
+log_output "  #SBATCH --cpus-per-task=$CPU_REC"
+log_output "  #SBATCH --mem=$MEM_REC"
+log_output "  #SBATCH --time=$TIME_REC"
+log_output ""
 
 # Throttle recommendation based on cluster
-echo "Check cluster availability:"
-echo "  sinfo -o \"%P %a %T %c\""
-echo ""
-echo "Then adjust throttle in run_create_labels.slurm:"
-echo "  If idle CPUs > 128:  --array=0-15%16  (FAST)"
-echo "  If idle CPUs > 64:   --array=0-15%8   (BALANCED)"
-echo "  If idle CPUs > 32:   --array=0-15%4   (CONSERVATIVE)"
-echo ""
+log_output "Check cluster availability:"
+log_output "  sinfo -o \"%P %a %T %c\""
+log_output ""
+log_output "Then adjust throttle in run_create_labels.slurm:"
+log_output "  If idle CPUs > 128:  --array=0-15%16  (FAST)"
+log_output "  If idle CPUs > 64:   --array=0-15%8   (BALANCED)"
+log_output "  If idle CPUs > 32:   --array=0-15%4   (CONSERVATIVE)"
+log_output ""
 
-echo "============================================"
-echo "Finished: $(date)"
-echo "============================================"
-echo ""
-echo "Full output saved to: results/profile_output.txt"
+log_output "============================================"
+log_output "Finished: $(date)"
+log_output "============================================"
+log_output ""
+log_output "Full output saved to: results/profile_output.txt"

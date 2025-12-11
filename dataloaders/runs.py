@@ -61,6 +61,10 @@ class PerfCounter:
         self.duration: float | None = None
         self.stats: pstats.Stats | None = None
 
+        # Specific metrics extracted from profile
+        self.search_time: float = 0.0
+        self.lp_time: float = 0.0
+
     def __enter__(self):
         self._t_start = time.perf_counter()
         self._profiler.enable()
@@ -71,7 +75,32 @@ class PerfCounter:
         self._t_end = time.perf_counter()
         self.duration = self._t_end - self._t_start
         self.stats = pstats.Stats(self._profiler).strip_dirs()
+        self.extract_metrics()
         return False
+
+    def extract_metrics(self) -> Optional[dict[str, float]]:
+        """
+        Parses the pstats to find cumulative time for specific functions
+        (__search and LP solvers).
+        """
+        if not self.stats:
+            return None
+
+        self.search_time = 0.0
+        self.lp_time = 0.0
+
+        # ps.stats is a dict: (filename, line, funcname) -> (cc, nc, tt, ct, callers)
+        for func, (cc, nc, tt, ct, callers) in self.stats.stats.items():
+            fname = func[2]
+
+            if "__search" in fname or "synchr" in fname:
+                self.search_time += ct
+            elif "cvxopt.glpk.lp" in fname or "cvxopt.glpk.ilp" in fname:
+                self.lp_time += ct
+        return {
+            "search_time": self.search_time,
+            "lp_time": self.lp_time,
+        }
 
     def dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +121,8 @@ class PerfCounter:
         pc = PerfCounter()
         pc.duration = duration
         pc.stats = stats
+        # Extract metrics from the deserialized stats
+        pc.extract_metrics()
         return pc
 
 

@@ -33,6 +33,7 @@ Before running the full pipeline on datasets, profile a single dataset to determ
 
 ```bash
 cd ~/pm_ws25
+source .venv/bin/activate
 bash scripts/profile_job.sh
 ```
 
@@ -128,11 +129,11 @@ sbatch lrz-cluster/run_create_labels.slurm
 3. **Per-Job Workflow**:
    - Loads one XES event log
    - Discovers process models using inductive miner with noise thresholds [0.0, 0.1, 0.2, 0.3]
-   - Samples trace variants using configured distributions
-   - Generates ~100 process models per dataset
+   - Samples trace variants using configured distributions (2 samplers × 100 subsets each)
+   - Generates up to 800 process models per dataset (4 thresholds × 2 samplers × 100 models)
    - Runs alignment benchmarks (20 traces × 5 runs each)
    - Saves results to CSV files in `data/runs/<dataset_hash>/`
-4. **Deduplication**: Removes duplicate models (typically reduces 800 → 584 unique)
+4. **Deduplication**: Removes duplicate models (typically reduces ~800 → ~584 unique)
 5. **Caching**: Automatically skips datasets with existing CSV files
 
 **Expected output:** Each job creates 3 CSV files (train/test/eval) containing features and timing labels for ML training.
@@ -259,44 +260,114 @@ cat outputs/evaluate_classifier/metrics.json
 
 ## Output Locations
 
-### Complete File Structure
+### Directory Structure Overview
 
-| Step | Directory | Files | Full Path Example | Description |
-|------|-----------|-------|-------------------|-------------|
-| **Step 0** | `results/` | `profile_output.txt` | `~/pm_ws25/results/profile_output.txt` | Resource usage metrics and Slurm recommendations |
-| **Step 1** | `data/runs/<hash>/` | `run_<id>.train.csv` | `~/pm_ws25/data/runs/a0addfda-2044.../run_123.train.csv` | Training features and labels (70% split) |
-| | | `run_<id>.test.csv` | `~/pm_ws25/data/runs/a0addfda-2044.../run_123.test.csv` | Test features and labels (20% split) |
-| | | `run_<id>.eval.csv` | `~/pm_ws25/data/runs/a0addfda-2044.../run_123.eval.csv` | Evaluation features and labels (10% split) |
-| | | `process_models.pkl` | `~/pm_ws25/data/runs/a0addfda-2044.../process_models.pkl` | Cached discovered process models |
-| | | `dedup_mapping.json` | `~/pm_ws25/data/runs/a0addfda-2044.../dedup_mapping.json` | Model deduplication metadata |
-| **Step 2** | `outputs/evaluate_classifier/` | `summary.txt` | `~/pm_ws25/outputs/evaluate_classifier/summary.txt` | Human-readable performance report |
-| | | `metrics.json` | `~/pm_ws25/outputs/evaluate_classifier/metrics.json` | Detailed metrics in JSON format |
-| | | `model.pkl` | `~/pm_ws25/outputs/evaluate_classifier/model.pkl` | Trained classifier (serialized) |
-| **Logs** | `logs/` | `create_labels_<job>_<task>.out` | `~/pm_ws25/logs/create_labels_123456_0.out` | Stdout from Step 1 job array |
-| | | `create_labels_<job>_<task>.err` | `~/pm_ws25/logs/create_labels_123456_0.err` | Stderr from Step 1 job array |
-| | | `eval_classifier_<job>.out` | `~/pm_ws25/logs/eval_classifier_789012.out` | Stdout from Step 2 training |
-| | | `eval_classifier_<job>.err` | `~/pm_ws25/logs/eval_classifier_789012.err` | Stderr from Step 2 training |
+```
+pm_ws25/
+├── results/                              # Step 0: Profiling output
+│   └── profile_output.txt                # Resource usage and recommendations
+│
+├── data/runs/                            # Step 1: Generated training data (per dataset)
+│   ├── <hash1>.pkl                       # Each hash = one unique dataset
+│   ├── <hash2>.pkl                       # Contains: process models + alignments
+│   ├── ...                               # Total: 16 .pkl files (one per dataset)
+│   └── <hash16>.pkl
+│
+├── outputs/evaluate_classifier/          # Step 2: ML classifier results
+│   ├── summary.txt                       # Human-readable performance report
+│   ├── metrics.json                      # Detailed metrics (accuracy, F1, etc.)
+│   └── model.pkl                         # Trained classifier (serialized)
+│
+└── logs/                                 # Slurm job logs
+    ├── create_labels_<jobid>_0.out       # Job array task 0 output
+    ├── create_labels_<jobid>_0.err       # Job array task 0 errors
+    ├── create_labels_<jobid>_1.out       # Job array task 1 output
+    ├── ...
+    ├── create_labels_<jobid>_15.err      # Job array task 15 errors
+    ├── eval_classifier_<jobid>.out       # Classifier training output
+    └── eval_classifier_<jobid>.err       # Classifier training errors
+```
+
+### Understanding the Hash Files
+
+**What is a hash?** Each `.pkl` file in `data/runs/` represents one dataset, identified by a SHA-1 hash of the dataset path.
+
+**Example mapping:**
+- Dataset: `data/a0addfda-2044-4541-a450-fdcc9fe16d17/BPIC15_1.xes`
+- Hash file: `data/runs/28893bc1b19233185e6a2910b54781d9756f091c.pkl`
+
+**What's inside each `.pkl` file?**
+```python
+{
+    'process_models': [...],      # ~584 unique process models
+    'alignments': [...],          # Alignment results (20 traces × 5 runs per model)
+    'train_csv': 'path/to/train', # Training data (70%)
+    'test_csv': 'path/to/test',   # Test data (20%)
+    'eval_csv': 'path/to/eval'    # Evaluation data (10%)
+}
+```
+
+### Detailed File Descriptions
+
+| File | Purpose | Created By | Size (Approx) |
+|------|---------|------------|---------------|
+| `results/profile_output.txt` | Resource profiling results and Slurm recommendations | Step 0 | 20 KB |
+| `data/runs/<hash>.pkl` | All data for one dataset (models + alignments + CSV paths) | Step 1 | 50-200 MB each |
+| `outputs/evaluate_classifier/summary.txt` | ML model performance summary | Step 2 | 2-5 KB |
+| `outputs/evaluate_classifier/metrics.json` | Detailed performance metrics | Step 2 | 1-2 KB |
+| `outputs/evaluate_classifier/model.pkl` | Trained classifier | Step 2 | 10-50 MB |
+| `logs/create_labels_<job>_<task>.out` | Standard output for each dataset processing job | Step 1 | 10-100 KB |
+| `logs/create_labels_<job>_<task>.err` | Error output for each dataset processing job | Step 1 | 0-10 KB |
+| `logs/eval_classifier_<job>.out` | Classifier training standard output | Step 2 | 10-50 KB |
+| `logs/eval_classifier_<job>.err` | Classifier training errors | Step 2 | 0-5 KB |
 
 ### Quick Access Commands
 
+**Check profiling results:**
 ```bash
-# View profiling results
 cat results/profile_output.txt
+```
 
-# Count generated CSV files (should be 16 each)
-find data/runs -name "*.train.csv" | wc -l
-find data/runs -name "*.test.csv" | wc -l
-find data/runs -name "*.eval.csv" | wc -l
+**Count generated datasets (Step 1):**
+```bash
+# Should show 16 .pkl files (one per dataset)
+ls -1 data/runs/*.pkl | wc -l
 
-# List all training datasets with sizes
-ls -lh data/runs/*/run_*.train.csv
+# Show file sizes
+ls -lh data/runs/*.pkl
+```
 
-# View classifier results
+**Inspect a specific dataset:**
+```bash
+# List what's inside a .pkl file (requires Python)
+python3 -c "
+import pickle
+with open('data/runs/<hash>.pkl', 'rb') as f:
+    data = pickle.load(f)
+    print(f'Models: {len(data.get(\"process_models\", []))}')
+    print(f'Alignments: {len(data.get(\"alignments\", []))}')
+"
+```
+
+**View classifier results (Step 2):**
+```bash
 cat outputs/evaluate_classifier/summary.txt
 cat outputs/evaluate_classifier/metrics.json
+```
 
-# Check latest logs
-ls -lt logs/ | head -10
+**Check job logs:**
+```bash
+# List all log files
+ls -lth logs/
+
+# View specific job output
+cat logs/create_labels_<jobid>_<taskid>.out
+
+# Check for errors
+cat logs/create_labels_<jobid>_<taskid>.err
+
+# Search for failures across all jobs
+grep -l "Exit Code: 1" logs/create_labels_*.out
 ```
 
 ---
@@ -396,13 +467,15 @@ bash scripts/profile_job.sh data/path/to/new_dataset.xes
 ```
 XES Event Logs (16 files)
     ↓
-Process Discovery (800 models → 584 unique)
+Process Discovery (~800 models per dataset)
     ↓
-Alignment Benchmarks (20 traces × 5 runs)
+Deduplication (~584 unique models per dataset)
     ↓
-CSV Datasets (train/test/eval)
+Alignment Benchmarks (20 traces × 5 runs per model)
     ↓
-ML Classifier Training
+CSV Datasets (train/test/eval split per dataset)
+    ↓
+ML Classifier Training (aggregate all datasets)
     ↓
 Performance Evaluation
 ```
