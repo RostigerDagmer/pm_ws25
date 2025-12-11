@@ -129,13 +129,13 @@ class EvaluationMetrics:
 
     def _format_confusion_matrix(self) -> str:
         """Format confusion matrix as a readable table."""
-        # Abbreviate long labels for better display
-        def abbreviate(label: str, max_len: int = 20) -> str:
-            if len(label) <= max_len:
-                return label
-            return label[:max_len]
+        def clean_and_abbreviate(label: str, max_len: int = 25) -> str:
+            cleaned = label.replace("VERSION_", "")
+            if len(cleaned) <= max_len:
+                return cleaned
+            return cleaned[:max_len]
 
-        labels = [abbreviate(label) for label in self.class_labels]
+        labels = [clean_and_abbreviate(label) for label in self.class_labels]
 
         # Calculate column widths
         max_label_width = max(len(label) for label in labels)
