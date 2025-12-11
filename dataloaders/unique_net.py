@@ -104,11 +104,10 @@ class UniqueProcessModelDataset(
         # Load from cache or deduplicate
         if use_cache and not force_recompute and self.cache_file.exists():
             self._load_from_cache()
-        else:
-            self._deduplicate()
-            if use_cache:
-                self._dedup_cache_dir.mkdir(parents=True, exist_ok=True)
-                self._save_to_cache()
+        self._deduplicate()
+        if use_cache:
+            self._dedup_cache_dir.mkdir(parents=True, exist_ok=True)
+            self._save_to_cache()
 
     def _compute_cache_key(self) -> str:
         """
@@ -119,7 +118,7 @@ class UniqueProcessModelDataset(
             16-character hash string
         """
         components = {
-            'base_dataset_hash': self.base_dataset.hash(),
+            'base_dataset_hash': self.base_dataset.log_uuid,
             'dedup_config': {
                 'label_threshold': self.dedup_config.label_similarity_threshold,
                 'combined_threshold': self.dedup_config.combined_similarity_threshold,
@@ -226,11 +225,13 @@ class UniqueProcessModelDataset(
     def __len__(self):
         return len(self.unique_indices)
 
-    def __getitem__(self, idx: int) -> ProcessModelDataset.ItemType:
+    def __getitem__(self, idx: int | str) -> ProcessModelDataset.ItemType:
         """
         Get item by index in the unique dataset.
         Maps to the corresponding index in the base dataset.
         """
+        if isinstance(idx, str):
+            return self.base_dataset[idx]
         if idx < 0 or idx >= len(self.unique_indices):
             raise IndexError(
                 f"Index {idx} out of range for dataset of size {len(self)}"
@@ -244,12 +245,14 @@ class UniqueProcessModelDataset(
             yield self.base_dataset[base_idx]
 
     def _get_serialized(
-        self, idx: int
+        self, idx: int | str
     ) -> ProcessModelDataset.SerializedItemType:
         """
         Get serialized item for unique dataset.
         Maps unique index to base dataset index.
         """
+        if isinstance(idx, str):
+            return self.base_dataset.serialized[idx]
         if idx < 0 or idx >= len(self.unique_indices):
             raise IndexError(
                 f"Index {idx} out of range for dataset of size {len(self)}"
@@ -263,30 +266,14 @@ class UniqueProcessModelDataset(
         return self.base_dataset.log
 
     @property
+    def log_uuid(self) -> str:
+        """Access the log UUID from the base dataset."""
+        return self.base_dataset.log_uuid
+
+    @property
     def cache_dir(self):
         """Access the cache directory from the base dataset."""
         return self.base_dataset.cache_dir
-
-    def hash(self) -> str:
-        """
-        Compute hash for the unique dataset.
-
-        Combines the base dataset hash with deduplication config to create
-        a unique identifier for this specific deduplicated dataset.
-        """
-        base = {
-            "base_dataset_hash": self.base_dataset.hash(),
-            "dedup_config": {
-                "label_similarity_threshold": self.dedup_config.label_similarity_threshold,
-                "combined_similarity_threshold": self.dedup_config.combined_similarity_threshold,
-                "enable_stage1": self.dedup_config.enable_stage1,
-                "enable_stage2": self.dedup_config.enable_stage2,
-            },
-            "num_unique": len(self.unique_indices),
-        }
-        return hashlib.sha1(
-            json.dumps(base, sort_keys=True).encode()
-        ).hexdigest()
 
     def save_duplicate_visualizations(
         self,
@@ -466,6 +453,7 @@ if __name__ == "__main__":
     from pm4py.discovery import discover_petri_net_inductive
     from dataloaders.net import VariantRandomDistributionSampler
     from util.rng import RNG
+    from util.distributions import ExponentialSpec, NormalSpec
     import torch
 
     RNG.initialize(42)
@@ -491,10 +479,10 @@ if __name__ == "__main__":
                 n_subsets=1000,  # number of subsets: defines how often the log is sampled... basically
                 max_len_subset=100,
                 min_len_subset=10,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
-                len_distribution=torch.distributions.Exponential(
-                    torch.tensor([1.0 / 100.0])
+                len_distribution=ExponentialSpec(
+                    1.0 / 100.0
                 ),  # subset length distribution: defines the distribution of lengths across samples
-                freq_distribution=torch.distributions.Normal(
+                freq_distribution=NormalSpec(
                     10.0, 5.0
                 ),  # (variant) freq_distribution: defines the reordering of traces/variants on every sampling call, by defining the sampling behavior over index(variant) -> frequency.
                 reconstruct_frequency=True,  # toggle whether to reconstruct the frequency of variants in the sampled subset (repeat variants according to sampled frequency)

@@ -49,6 +49,7 @@ from pm4py.util import typing
 from pm4py.visualization.petri_net import visualizer as pn_visualizer
 from util.rng import RNG
 import random
+import gc
 
 
 class Aligner(ABC):
@@ -257,11 +258,24 @@ class SimplePerturbedTraceSampler(TraceSampler):
         self,
         seed: int,
         ds: Union[ProcessModelDataset, UniqueProcessModelDataset],
-        noise_params: NoiseParams = NoiseParams(),
+        noise_params: NoiseParams | dict[str, float] = NoiseParams(),
         slice: Optional[range] = None,
     ):
         super().__init__(seed=seed, ds=ds, slice=slice)
+        if isinstance(noise_params, dict):
+            noise_params = NoiseParams(**noise_params)
         self.noise_params = noise_params
+
+    def hash(self) -> str:
+        base = {
+            "name": str(self.__class__),
+            "ds": str(self.source_path),
+            "seed": self.seed,
+            "noise": self.noise_params.hash(),
+        }
+        return hashlib.sha1(
+            json.dumps(base, sort_keys=True).encode()
+        ).hexdigest()
 
     def __getitem__(self, index: int) -> Trace:
         trace: Trace = self.log[index]
@@ -279,11 +293,13 @@ class SubsetAwarePerturbedTraceSampler(TraceSampler):
         self,
         seed: int,
         ds: Union[ProcessModelDataset, UniqueProcessModelDataset],
-        noise_params: NoiseParams = NoiseParams(),
+        noise_params: NoiseParams | dict[str, float] = NoiseParams(),
         slice: Optional[range] = None,
         pick_random: bool = False,
     ):
         super().__init__(seed=seed, ds=ds, slice=slice)
+        if isinstance(noise_params, dict):
+            noise_params = NoiseParams(**noise_params)
         self.noise_params = noise_params
         self.pick_random = pick_random
 
@@ -296,6 +312,17 @@ class SubsetAwarePerturbedTraceSampler(TraceSampler):
             p_swap=self.noise_params.p_swap,
             seed=self.seed,
         )
+
+    def hash(self) -> str:
+        base = {
+            "name": str(self.__class__),
+            "ds": str(self.source_path),
+            "seed": self.seed,
+            "noise": self.noise_params.hash(),
+        }
+        return hashlib.sha1(
+            json.dumps(base, sort_keys=True).encode()
+        ).hexdigest()
 
     def iter_for_model(
         self, model: ProcessModelDataset.SerializedItemType
@@ -326,7 +353,7 @@ class SyntheticTraceSampler(TraceSampler):
         slice: Optional[range] = None,
         batch_size: int = 128,
         steps: int = 100,
-        noise: NoiseParams = NoiseParams(),
+        noise: NoiseParams | dict[str, float] = NoiseParams(),
         device: str = "cpu",
     ):
         if slice is None:
@@ -335,6 +362,8 @@ class SyntheticTraceSampler(TraceSampler):
         self.pm_dataset = ds
         self.batch_size = batch_size
         self.steps = steps
+        if isinstance(noise, dict):
+            noise = NoiseParams(**noise)
         self.noise = noise
         self.device = device
         self._traces_per_model = (
@@ -419,7 +448,7 @@ class SyntheticTraceSampler(TraceSampler):
 @dataclass
 class ItemType(Serializable["SerializedItemType"]):
     item_id: str
-    model: ProcessModelDataset.ItemType
+    model: ProcessModelDataset.ItemType | SyntheticProcessModelDataset.ItemType
     trace: Trace
     item: Union[typing.AlignmentResult, typing.ListAlignments]
     perf: list[PerfCounter]
@@ -441,7 +470,11 @@ class ItemType(Serializable["SerializedItemType"]):
 @dataclass
 class SerializedItemType(Deserializable[ItemType]):
     item_id: str
-    model: ProcessModelDataset.SerializedItemType
+    model: (
+        ProcessModelDataset.SerializedItemType
+        | SyntheticProcessModelDataset.SerializedItemType
+        | str
+    )  # either a serialized model or a key into the process model dataset
     trace: Trace
     item: Union[typing.AlignmentResult, typing.ListAlignments]
     perf: list[dict[str, Any]]
@@ -449,6 +482,8 @@ class SerializedItemType(Deserializable[ItemType]):
     comb_id: str  # an identifier for the combination of model, trace (to group by aligner)
 
     def deserialize(self) -> ItemType:
+        if isinstance(self.model, str):
+            raise ValueError("Cannot deserialize model from key")
         return ItemType(
             self.item_id,
             self.model.deserialize(),
@@ -482,6 +517,14 @@ class RunDataset(
     ):
         self.base_path = base_path
         self.pm_dataset = process_model_dataset
+        self.save_path = (
+            self.base_path / Path(f"{(self.pm_dataset.log_uuid)}.pkl")
+            if isinstance(
+                self.pm_dataset,
+                (ProcessModelDataset, UniqueProcessModelDataset),
+            )
+            else self.base_path / Path("synthetic.pkl")
+        )
         self.trace_sampler = trace_sampler
         self.aligners = aligners
         self.n_runs = n_runs
@@ -498,6 +541,10 @@ class RunDataset(
         else:
             self._init_cache_mp()
 
+    @property
+    def log_uuid(self) -> str:
+        return self.pm_dataset.log_uuid
+
     def __iter__(self) -> Iterator[ItemType]:
         for i in range(len(self)):
             yield self[i]
@@ -511,7 +558,7 @@ class RunDataset(
         os.fsync(f.fileno())
 
     def _tryload(self):
-        path = self.save_path()
+        path = self.save_path
         if not os.path.exists(path):
             return
         self.items = {}
@@ -530,9 +577,6 @@ class RunDataset(
                     break
 
         self.index = list(self.items.keys())
-
-    def save_path(self):
-        return self.base_path / Path(f"{self.hash()}.pkl")
 
     @staticmethod
     def _stuff_timeout_item(
@@ -562,7 +606,6 @@ class RunDataset(
     @staticmethod
     def _process_item(
         hash: str,
-        model_index: int,
         model: (
             ProcessModelDataset.SerializedItemType
             | SyntheticProcessModelDataset.SerializedItemType
@@ -609,7 +652,7 @@ class RunDataset(
         # Calculate aggregates
         return SerializedItemType(
             hash,
-            model_index,
+            model.hash(),
             trace,
             last_item,
             stats,
@@ -643,37 +686,39 @@ class RunDataset(
         new_items: dict[str, RunDataset.SerializedItemType] = {}
         new_combinations: dict[str, list[str]] = {}
         batch: dict[str, RunDataset.SerializedItemType] = {}
-        path = self.save_path()
-        os.makedirs(path.parent, exist_ok=True)
+        os.makedirs(self.save_path.parent, exist_ok=True)
 
         with (
             pebble.ProcessPool(max_workers=num_workers) as pool,
-            open(path, "ab") as f,
+            open(self.save_path, "ab") as f,
         ):
             futures: dict[Future[RunDataset.SerializedItemType], tuple] = {}
             scheduled = tqdm(total=total, desc="Scheduled")
             aligned = tqdm(total=0, desc="Aligned")  # dynamic total
             written = tqdm(total=0, desc="Written")  # dynamic total
             seen_hashes = set()
+            irrelevant = set(self.items.keys())
 
-            for i, m in enumerate(self.pm_dataset.serialized):
+            for m in self.pm_dataset.serialized:
                 for t in self.trace_sampler.iter_for_model(m):
                     for a in self.aligners:
                         item_id = RunDataset._hash_item(m, t, a)
+                        try:
+                            irrelevant.remove(item_id)
+                        except KeyError:
+                            pass
                         if item_id in existing_items or item_id in seen_hashes:
                             scheduled.total -= 1
                             continue
-
                         seen_hashes.add(item_id)
                         fut = pool.schedule(
                             RunDataset._process_item,
                             args=(
                                 item_id,
-                                i,
                                 m,
                                 t,
                                 a,
-                                self.n_runs,  # pass n_runs to worker
+                                self.n_runs,
                             ),
                             timeout=self.timeout,
                         )
@@ -713,22 +758,20 @@ class RunDataset(
                 RunDataset._flush_batch(f, batch)
                 written.update(len(batch))
         # finalize
+        self.items = {
+            k: v for k, v in self.items.items() if k not in irrelevant
+        }
+        self.combinations = {
+            k: [v for v in vals if v not in irrelevant]
+            for k, vals in self.combinations.items()
+        }
+        self.combinations = {
+            k: v for k, v in self.combinations.items() if v
+        }  # filter empty
         self.items.update(new_items)
         self.combinations.update(new_combinations)
         self.index = list(self.items.keys())
-
-    def hash(self):
-        base: dict[str, str | list[str] | int] = {
-            "model_ds_hash": self.pm_dataset.hash(),
-            "trace_sampler_hash": self.trace_sampler.hash(),
-            "aligner_hash": [
-                a.hash() for a in sorted(self.aligners, key=lambda x: x.name)
-            ],
-            "n_runs": self.n_runs,  # Hash must include n_runs to invalidate cache if changed
-        }
-        return hashlib.sha1(
-            json.dumps(base, sort_keys=True).encode()
-        ).hexdigest()
+        gc.collect()
 
     @staticmethod
     def _hash_trace(trace: Trace) -> str:
@@ -772,7 +815,7 @@ class RunDataset(
             key = self.index[idx]
         item = self.items[key]
         # replace model index with model object
-        if isinstance(item.model, int):
+        if isinstance(item.model, (str, int)):
             item.model = self.pm_dataset.serialized[item.model]
         return item
 
@@ -783,7 +826,10 @@ class RunDataset(
         self,
     ) -> Iterator[
         Tuple[
-            "ProcessModelDataset.ItemType",
+            Union[
+                "ProcessModelDataset.ItemType",
+                "SyntheticProcessModelDataset.ItemType",
+            ],
             Trace,
             Dict[
                 str,
@@ -866,9 +912,9 @@ if __name__ == "__main__":
     synthetic_dataset = SyntheticProcessModelDataset(
         param_grid=[
             (
-                {
+                {  # and dominant
                     "dist_params": {
-                        "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
+                        "op": CategoricalSpec([0.1, 0.6, 0.2, 0.1]),
                         "seq_len": PoissonSpec(4),
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
@@ -878,12 +924,12 @@ if __name__ == "__main__":
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                5,  # Number of models per config
+                20,  # Number of models per config
             ),
             (
-                {
+                {  # xor dominant
                     "dist_params": {
-                        "op": CategoricalSpec([0.2, 0.2, 0.2, 0.4]),
+                        "op": CategoricalSpec([0.6, 0.1, 0.2, 0.1]),
                         "seq_len": PoissonSpec(4),
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
@@ -893,27 +939,42 @@ if __name__ == "__main__":
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                5,  # Number of models per config
+                20,  # Number of models per config
             ),
             (
-                {
+                {  # shallow and wide xor dominant
                     "dist_params": {
-                        "op": CategoricalSpec([0.2, 0.4, 0.2, 0.2]),
-                        "seq_len": PoissonSpec(4),
+                        "op": CategoricalSpec([0.6, 0.1, 0.2, 0.1]),
+                        "seq_len": PoissonSpec(1),
                         "p_stop": BernoulliDepthLinearSpec(
-                            base=0.2, slope=0.1
+                            base=0.5, slope=0.3
                         ),
-                        "width": PoissonSpec(3),
+                        "width": PoissonSpec(10),
                     },
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                5,  # Number of models per config
+                20,  # Number of models per config
             ),
             (
-                {
+                {  # shallow and wide xor / loop dominant
                     "dist_params": {
-                        "op": CategoricalSpec([0.2, 0.2, 0.4, 0.2]),
+                        "op": CategoricalSpec([0.4, 0.1, 0.4, 0.1]),
+                        "seq_len": PoissonSpec(1),
+                        "p_stop": BernoulliDepthLinearSpec(
+                            base=0.5, slope=0.3
+                        ),
+                        "width": PoissonSpec(10),
+                    },
+                    "min_depth": MIN_DEPTH,
+                    "max_depth": MAX_DEPTH,
+                },
+                20,  # Number of models per config
+            ),
+            (
+                {  # loop dominant
+                    "dist_params": {
+                        "op": CategoricalSpec([0.15, 0.15, 0.6, 0.1]),
                         "seq_len": PoissonSpec(4),
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
@@ -923,7 +984,7 @@ if __name__ == "__main__":
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                5,  # Number of models per config
+                20,  # Number of models per config
             ),
         ],
     )
@@ -936,7 +997,7 @@ if __name__ == "__main__":
     )
 
     run_dataset = RunDataset(
-        Path('./data/runs'),
+        Path("cache/.runs"),
         synthetic_dataset,
         AlignerSpec.A_STAR.value,
         trace_sampler,

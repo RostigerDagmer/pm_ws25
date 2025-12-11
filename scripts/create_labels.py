@@ -199,7 +199,7 @@ if __name__ == "__main__":
     if not np.isclose(total_ratio, 1.0):
         raise ValueError(f"Split ratios must sum to 1.0 (got {total_ratio})")
 
-    base = run_dataset.save_path().with_suffix('')
+    base = run_dataset.save_path.with_suffix('')
     train_df, test_df, eval_df = split_dataframes(
         labels, args.train, args.test
     )

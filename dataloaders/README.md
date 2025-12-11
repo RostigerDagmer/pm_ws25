@@ -61,8 +61,8 @@ One can restrict the number of traces taken from the original dataset by specify
 After caching is complete extracting a "labeled" dataset becomes quite simple by grouping on the ids of each dataset item.
 Example for this is also in `__main__`.
 
-
-
+Datasets are "incremental" meaning they store all previously generated data yet only access items that result from the current configuration.
+This means that configurations can be "expanded" without recomputing already present items.
 
 TODOs:
 

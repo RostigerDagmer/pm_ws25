@@ -89,14 +89,6 @@ def main():
     print("")
 
     print("FILE_NAME_BASE=$(basename $INPUT_FILE .xes)")
-    # We don't strictly need OUTPUT_FILE variable if we don't use it, but user had it.
-    # The user's snippet didn't use OUTPUT_FILE in the command, but it's good practice.
-    # However, the user's snippet had:
-    # OUTPUT_FILE=results/${FILE_NAME_BASE}_${TASK_ID}.result
-    # mkdir -p results
-    # And then ran the command.
-    # The command `scripts.create_labels` likely handles output internally or via config.
-    # I will include the variable definition as requested.
     print("OUTPUT_FILE=results/${FILE_NAME_BASE}_${TASK_ID}.result")
     print("")
 
