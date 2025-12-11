@@ -43,7 +43,7 @@ TRAIN_DATASETS = {
     # '679b11cf-47cd-459e-a6de-9ca614e25985': ['BPIC15_4.xes'],
     # '3301445f-95e8-4ff0-98a4-901f1f204972': ['BPI%20Challenge%202018.xes'],
     # '3926db30-f712-4394-aebc-75976070e91f': ['BPI_Challenge_2012.xes'],
-    # 'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
+    'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
     # '6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd': [
     #     'Hospital%20Billing%20-%20Event%20Log.xes'
     # ],
@@ -57,17 +57,17 @@ TRAIN_DATASETS = {
     '500573e6-accc-4b0c-9576-aa5468b10cee': [
         'BPI_Challenge_2013_incidents.xes'
     ],
-    # '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
-    # 'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
-    # '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
+    '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
+    'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
+    '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
+    'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
 }
 
 TEST_DATASETS = {
-    # 'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
     # 'b32c6fe5-f212-4286-9774-58dd53511cf8': ['BPIC15_5.xes'],
     '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
-    # 'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
-    # '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
+    'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
+    '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
     # 'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
     #     'BPI_Challenge_2013_closed_problems.xes'
     # ],
@@ -140,6 +140,7 @@ def get_natural_dataset(
     log_path: str,
     config: str,
     base_path: Optional[str] = None,
+    skip_init: bool = False,
 ) -> RunDataset:
     RNG.initialize(SEED)
     cfg_dict = yaml.safe_load(open(config))
@@ -149,7 +150,10 @@ def get_natural_dataset(
 
     cfg.seed = SEED
     cfg.alignment.workers = 16
-    return build_pipeline(cfg)
+
+    # Skip config <-> cache check
+    # (This is unsafe if process models are being referenced in the cache that are not included in the current config)
+    return build_pipeline(cfg, skip_init=skip_init)
 
 
 if __name__ == "__main__":
@@ -174,7 +178,7 @@ if __name__ == "__main__":
                 train_run_datasets.append(run_dataset)
 
     train_run_datasets.append(
-        get_synthetic_dataset(Path(cache_path), seed=SEED)
+        get_synthetic_dataset(Path(cache_path), seed=SEED, count=50)
     )
 
     # Can merge individually extracted tables with precomputed features
@@ -207,20 +211,20 @@ if __name__ == "__main__":
         force_retrain=True,
     )
 
-    # Create test RunDatasets
-    logging.info(
-        f"\nCreating {sum(len(f) for f in TEST_DATASETS.values())} test RunDatasets..."
-    )
+    logging.info("\nLoading test RunDatasets (using cached alignment runs)...")
     test_run_datasets = []
     for dataset_uuid, files in TEST_DATASETS.items():
         for filename in files:
+            logging.info(f"Loading: {filename}")
             run_dataset = get_natural_dataset(
                 str(Path("data") / dataset_uuid / filename),
                 config_path,
                 cache_path,
+                use_cache=True,  # Use cached alignment runs for speed
             )
             if run_dataset is not None:
                 test_run_datasets.append(run_dataset)
+                logging.info(f"  ✓ Loaded {len(run_dataset)} runs from cache")
 
     test_run_datasets.append(
         get_synthetic_dataset(Path(cache_path), seed=SEED + 1, count=4)

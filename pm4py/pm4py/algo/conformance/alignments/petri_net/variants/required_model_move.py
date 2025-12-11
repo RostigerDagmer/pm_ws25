@@ -19,21 +19,21 @@ visit <https://www.gnu.org/licenses/>.
 Website: https://processintelligence.solutions
 Contact: info@processintelligence.solutions
 
-Remaining Log Moves Heuristic Variant
+REACH (Required Activities) Heuristic Alignment Implementation
+Based on: Casas-Ramos, J., Mucientes, M., & Lama, M. (2024). REACH: Researching Efficient Alignment-based Conformance Checking.
 '''
 import heapq
 import sys
 import time
-from collections import defaultdict, deque, Counter
 from copy import copy
 from enum import Enum
-from typing import Optional, Dict, Any, Union, Set
+from typing import Optional, Dict, Any, Union, Set, List
 
 from pm4py.objects.log import obj as log_implementation
 from pm4py.objects.log.obj import Trace
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.objects.petri_net.utils import align_utils as utils
-from pm4py.objects.petri_net.utils.incidence_matrix import construct as inc_mat_construct
+from pm4py.objects.petri_net.utils.align_utils import STD_SYNC_COST, STD_MODEL_LOG_MOVE_COST
 from pm4py.objects.petri_net.utils.petri_utils import (
     construct_trace_net_cost_aware,
     decorate_places_preset_trans,
@@ -48,58 +48,6 @@ from pm4py.util.constants import PARAMETER_CONSTANT_ACTIVITY_KEY
 from pm4py.util.xes_constants import DEFAULT_NAME_KEY
 
 
-def _precompute_required_model_labels(sync_net, final_marking) -> Dict[Any, Set[str]]:
-    """Backward collection of visible model labels reachable from each place.
-
-    For each place in the synchronous product net, compute a (conservative)
-    set of visible model activity labels that may be required to reach the
-    final marking from that place.
-    """
-    place_to_required: Dict[Any, Set[str]] = defaultdict(set)
-
-    # For backward traversal, we need: place -> incoming transitions.
-    incoming_transitions: Dict[Any, Set[Any]] = defaultdict(set)
-    for t in sync_net.transitions:
-        for arc in t.out_arcs:
-            incoming_transitions[arc.target].add(t)
-
-    queue = deque(final_marking.keys())
-    visited_places: Set[Any] = set(final_marking.keys())
-
-    while queue:
-        place = queue.popleft()
-        for t in incoming_transitions.get(place, ()):  # transitions producing 'place'
-            # identify the model-side label
-            if isinstance(t.label, tuple) and len(t.label) == 2:
-                model_label = t.label[1]
-            else:
-                model_label = t.label
-
-            # Add label if visible
-            if model_label is not None:
-                place_to_required[place].add(model_label)
-
-            # Propagate required labels back to all preset places
-            for arc in t.in_arcs:
-                p_in = arc.source
-                if place_to_required[place] - place_to_required[p_in]:
-                    place_to_required[p_in] |= place_to_required[place]
-                    if p_in not in visited_places:
-                        visited_places.add(p_in)
-                        queue.append(p_in)
-
-    return place_to_required
-
-
-class RequiredActivitiesMode(Enum):
-    """Select which required-activities heuristic design to use."""
-
-    SIMPLE = "simple"  # current minimal implementation
-    LABEL_REACHABILITY = "label_reachability"  # depth-based
-    BITSET = "bitset"  # pattern-based approximation
-    STRUCTURAL_SHORTEST_PATH = "structural_shortest_path"  # place-level shortest path
-
-
 class Parameters(Enum):
     PARAM_TRACE_COST_FUNCTION = "trace_cost_function"
     PARAM_MODEL_COST_FUNCTION = "model_cost_function"
@@ -110,15 +58,16 @@ class Parameters(Enum):
     TRACE_NET_COST_AWARE_CONSTR_FUNCTION = "trace_net_cost_aware_constr_function"
     PARAM_MAX_ALIGN_TIME_TRACE = "max_align_time_trace"
     ACTIVITY_KEY = PARAMETER_CONSTANT_ACTIVITY_KEY
-    # which heuristic flavour to use inside this variant
-    REQUIRED_ACTIVITIES_MODE = "required_activities_mode"
+    ENABLE_OPTIMIZATIONS = "enable_optimizations"  # Toggle for REACH optimizations (SRModel, SRLog, Greedy)
+
 
 PARAM_TRACE_COST_FUNCTION = Parameters.PARAM_TRACE_COST_FUNCTION.value
 PARAM_MODEL_COST_FUNCTION = Parameters.PARAM_MODEL_COST_FUNCTION.value
 PARAM_SYNC_COST_FUNCTION = Parameters.PARAM_SYNC_COST_FUNCTION.value
 
+
 def get_best_worst_cost(
-    petri_net, initial_marking, final_marking, parameters=None
+        petri_net, initial_marking, final_marking, parameters=None
 ):
     """
     Gets the best worst cost of an alignment
@@ -151,9 +100,6 @@ def get_best_worst_cost(
     return None
 
 
-
-
-
 def apply(trace: Trace, petri_net: PetriNet, initial_marking: Marking, final_marking: Marking,
           parameters: Optional[Dict[Union[str, Parameters], Any]] = None):
     if parameters is None: parameters = {}
@@ -169,13 +115,11 @@ def apply(trace: Trace, petri_net: PetriNet, initial_marking: Marking, final_mar
     trace_net_cost_aware_constr_function = exec_utils.get_param_value(Parameters.TRACE_NET_COST_AWARE_CONSTR_FUNCTION,
                                                                       parameters, construct_trace_net_cost_aware)
 
-
     if trace_cost_function is None:
         trace_cost_function = list(
             map(lambda e: utils.STD_MODEL_LOG_MOVE_COST, trace)
         )
         parameters[Parameters.PARAM_TRACE_COST_FUNCTION] = trace_cost_function
-
 
     if model_cost_function is None:
         # reset variables value
@@ -190,7 +134,6 @@ def apply(trace: Trace, petri_net: PetriNet, initial_marking: Marking, final_mar
         parameters[Parameters.PARAM_MODEL_COST_FUNCTION] = model_cost_function
         parameters[Parameters.PARAM_SYNC_COST_FUNCTION] = sync_cost_function
 
-
     if trace_net_constr_function is not None:
         trace_net, trace_im, trace_fm = trace_net_constr_function(trace, activity_key=activity_key)
     else:
@@ -203,7 +146,20 @@ def apply(trace: Trace, petri_net: PetriNet, initial_marking: Marking, final_mar
             trace, trace_cost_function, activity_key=activity_key
         )
 
+    # Extract clean list of activity labels for the heuristic
     trace_labels = [e[activity_key] for e in trace]
+
+    # Pre-computation for SRLog (Algorithm 8)
+    # This must be done on the Model (petri_net), not the Sync Net.
+    enable_optimizations = exec_utils.get_param_value(Parameters.ENABLE_OPTIMIZATIONS, parameters, True)
+    if enable_optimizations is None:
+        enable_optimizations = True
+    alive_activities_map = None
+
+    if enable_optimizations is True or None:
+        # We need the model decorated to traverse it
+        decorate_transitions_prepostset(petri_net)
+        alive_activities_map = get_alive_activities(petri_net, initial_marking)
 
     alignment = apply_trace_net(
         petri_net,
@@ -214,6 +170,7 @@ def apply(trace: Trace, petri_net: PetriNet, initial_marking: Marking, final_mar
         trace_fm,
         trace_labels,
         parameters,
+        alive_activities_map=alive_activities_map
     )
     return alignment
 
@@ -363,6 +320,7 @@ def apply_trace_net(
     trace_fm,
     trace_labels,
     parameters=None,
+    alive_activities_map=None
 ):
     """
         Performs the basic alignment search, given a trace net and a net.
@@ -392,11 +350,9 @@ def apply_trace_net(
     if parameters is None:
         parameters = {}
 
-
     ret_tuple_as_trans_desc = exec_utils.get_param_value(
         Parameters.PARAM_ALIGNMENT_RESULT_IS_SYNC_PROD_AWARE, parameters, False
     )
-
     trace_cost_function = exec_utils.get_param_value(
         Parameters.PARAM_TRACE_COST_FUNCTION, parameters, None
     )
@@ -410,7 +366,6 @@ def apply_trace_net(
         Parameters.PARAM_TRACE_NET_COSTS, parameters, None
     )
 
-    # keep identical logic to dijkstra_no_heuristics
     if (
         trace_cost_function is None
         or model_cost_function is None
@@ -453,15 +408,12 @@ def apply_trace_net(
                 revised_sync,
             )
         )
-
-        # store per\-transition sync/log costs for the heuristic
         sync_costs = sync_cost_function
         log_costs = trace_cost_function
 
     max_align_time_trace = exec_utils.get_param_value(
         Parameters.PARAM_MAX_ALIGN_TIME_TRACE, parameters, sys.maxsize
     )
-
 
     return apply_sync_prod(
         sync_prod,
@@ -473,20 +425,23 @@ def apply_trace_net(
         ret_tuple_as_trans_desc=ret_tuple_as_trans_desc,
         max_align_time_trace=max_align_time_trace,
         log_costs=log_costs,
+        parameters=parameters,
+        alive_activities_map=alive_activities_map
     )
 
 
 def apply_sync_prod(
-    sync_prod,
-    initial_marking,
-    final_marking,
-    cost_function,
-    skip,
-    trace_labels,
-    ret_tuple_as_trans_desc=False,
-    max_align_time_trace=sys.maxsize,
-    log_costs=None,
-    parameters=None,
+        sync_prod,
+        initial_marking,
+        final_marking,
+        cost_function,
+        skip,
+        trace_labels,
+        ret_tuple_as_trans_desc=False,
+        max_align_time_trace=sys.maxsize,
+        log_costs=None,
+        parameters=None,
+        alive_activities_map=None
 ):
     return __search(
         sync_prod,
@@ -499,223 +454,230 @@ def apply_sync_prod(
         trace_labels=trace_labels,
         log_costs=log_costs,
         parameters=parameters,
+        alive_activities_map=alive_activities_map
     )
 
 
-# --- Heuristic strategy helpers ------------------------------------------------
+# =============================================================================
+# REACH Heuristic Logic (Algorithm 3 & 8 in the paper)
+# =============================================================================
 
-
-def _heuristic_simple_required_activities(
-    marking: Marking,
-    trace_labels: list,
-    trace_len: int,
-    place_to_trace_index: Dict[Any, int],
-    place_to_required_labels: Dict[Any, Set[str]],
-    heuristic_weight: float,
-) -> float:
-    """Current minimal required-activities heuristic.
-
-    This is the original simple design: compare the set of model-required labels
-    for the current marking with the multiset of remaining trace labels and
-    derive a lower bound on non-sync moves.
+def get_required_transitions(marking: Marking) -> Set[PetriNet.Transition]:
     """
-    if trace_len == 0 or not trace_labels:
-        return 0.0
-
-    # 1) Infer current trace index from the marking
-    idx_candidates = [
-        place_to_trace_index[p]
-        for p in marking
-        if p in place_to_trace_index
-    ]
-    if idx_candidates:
-        trace_idx = max(idx_candidates)
-    else:
-        # Safe fallback: assume we are at start (worst case: many events remain)
-        trace_idx = 0
-
-    if trace_idx >= trace_len:
-        return 0.0
-
-    # 2) Remaining trace labels
-    remaining_trace = trace_labels[trace_idx:trace_len]
-    if not remaining_trace:
-        return 0.0
-
-    remaining_counts = Counter(remaining_trace)
-    remaining_label_set = set(remaining_counts.keys())
-
-    # 3) Aggregate required model-side labels from all places in the marking
-    required_labels: Set[str] = set()
-    for p in marking:
-        labels = place_to_required_labels.get(p)
-        if labels:
-            required_labels |= labels
-
-    if not required_labels and not remaining_label_set:
-        return 0.0
-
-    # 4) Lower bound on model-only moves: any required label not present
-    # in the remaining trace
-    lb_model = sum(1 for a in required_labels if a not in remaining_label_set)
-
-    # 5) Lower bound on log-only moves: any remaining trace event whose
-    # label is not required by the model
-    lb_log = 0
-    for lbl, cnt in remaining_counts.items():
-        if lbl not in required_labels:
-            lb_log += cnt
-
-    # 6) Use the maximum of the per-side lower bounds and scale by weight
-    lb_moves = max(lb_model, lb_log)
-    return float(lb_moves)
-
-
-def _precompute_label_depths(sync_net, final_marking) -> Dict[Any, Dict[str, int]]:
-    """Backward label-reachability with depth per place/label."""
-    incoming_transitions: Dict[Any, Set[Any]] = defaultdict(set)
-    for t in sync_net.transitions:
-        for arc in t.out_arcs:
-            incoming_transitions[arc.target].add(t)
-
-    place_label_depth: Dict[Any, Dict[str, int]] = defaultdict(dict)
-    queue = deque(final_marking.keys())
-    visited: Set[Any] = set(final_marking.keys())
-
-    # Depth here is the number of visible model steps remaining until final
-    while queue:
-        place = queue.popleft()
-        for t in incoming_transitions.get(place, ()):  # transitions producing 'place'
-            # identify model-side label
-            if isinstance(t.label, tuple) and len(t.label) == 2:
-                model_label = t.label[1]
-            else:
-                model_label = t.label
-
-            # depth contributed by this transition
-            add_cost = 1 if model_label is not None else 0
-
-            # For successors, take their label depths and add cost
-            succ_depths = place_label_depth.get(place, {})
-
-            for arc in t.in_arcs:
-                p_in = arc.source
-                by_label = place_label_depth[p_in]
-
-                # propagate all successor labels
-                for lbl, d in succ_depths.items():
-                    nd = d + add_cost
-                    if lbl not in by_label or nd < by_label[lbl]:
-                        by_label[lbl] = nd
-
-                # mark this label itself reachable in one step if visible
-                if model_label is not None:
-                    if model_label not in by_label or add_cost < by_label[model_label]:
-                        by_label[model_label] = add_cost
-
-                if p_in not in visited:
-                    visited.add(p_in)
-                    queue.append(p_in)
-
-    return place_label_depth
-
-
-def _precompute_bitset_structures(
-    sync_net,
-    final_marking,
-    trace_labels: list,
-) -> (Dict[Any, int], Dict[int, int]):
-    """Precompute bitsets for required labels per place and per trace suffix."""
-    # 1) Build a label universe from model and trace
-    label_to_bit: Dict[str, int] = {}
-
-    def _ensure_bit(lbl: Optional[str]) -> None:
-        if lbl is None:
-            return
-        if lbl not in label_to_bit:
-            label_to_bit[lbl] = len(label_to_bit)
-
-    # collect from model (sync net transitions)
-    for t in sync_net.transitions:
-        if isinstance(t.label, tuple) and len(t.label) == 2:
-            _ensure_bit(t.label[1])
-        else:
-            _ensure_bit(t.label)
-
-    # collect from trace
-    for lbl in trace_labels:
-        _ensure_bit(lbl)
-
-    # 2) Precompute required label sets per place (like _precompute_required_model_labels)
-    place_to_required: Dict[Any, Set[str]] = _precompute_required_model_labels(sync_net, final_marking)
-
-    place_req_mask: Dict[Any, int] = {}
-    for p, labels in place_to_required.items():
-        mask = 0
-        for lbl in labels:
-            bit = label_to_bit.get(lbl)
-            if bit is not None:
-                mask |= 1 << bit
-        place_req_mask[p] = mask
-
-    # 3) Precompute suffix masks TraceSuffix(i)
-    suffix_masks: Dict[int, int] = {}
-    current = 0
-    for i in range(len(trace_labels) - 1, -1, -1):
-        lbl = trace_labels[i]
-        bit = label_to_bit.get(lbl)
-        if bit is not None:
-            current |= 1 << bit
-        suffix_masks[i] = current
-    # and for i == len(trace_labels) (empty suffix)
-    suffix_masks[len(trace_labels)] = 0
-
-    return place_req_mask, suffix_masks
-
-
-def _precompute_structural_shortest_path(
-    sync_net,
-    final_marking,
-    cost_function: Dict[Any, float],
-) -> Dict[Any, float]:
-    """Backward structural shortest-path on places.
-
-    Approximate minimal non-sync cost from each place to final marking by
-    iterating Bellman-Ford style relaxations over transitions.
+    Algorithm 3: REQUIRED_TRANSITIONS
+    Traverses the process model structurally from the current tokens to find
+    transitions that MUST be executed (no alternative paths).
     """
-    # initialize distances: 0 for places in final marking, inf otherwise
-    dist_place: Dict[Any, float] = {}
-    for p in sync_net.places:
-        dist_place[p] = float("inf")
-    for p in final_marking.keys():
-        dist_place[p] = 0.0
+    required_transitions = set()
 
-    # Build adjacency: for each transition, we need its preset and postset
-    transitions = list(sync_net.transitions)
+    # Queue for places to visit (BFS/Traversal)
+    places_to_visit = list(marking.keys())
+    visited_places = set()
 
-    # perform a bounded number of relaxation rounds (|places| * |transitions| is safe upper bound)
-    max_iters = len(sync_net.places) * max(1, len(transitions))
-    for _ in range(max_iters):
-        improved = False
-        for t in transitions:
-            # cost of this transition (we consider full cost_function; this
-            # remains admissible, just more conservative)
-            c_t = cost_function.get(t, 0.0)
-            # best distance among postset places
-            succ_vals = [dist_place.get(arc.target, float("inf")) for arc in t.out_arcs]
-            if not succ_vals:
-                continue
-            d_out = max(succ_vals)
-            new_val = c_t + d_out
-            for arc in t.in_arcs:
-                p_in = arc.source
-                if new_val < dist_place[p_in]:
-                    dist_place[p_in] = new_val
-                    improved = True
-        if not improved:
-            break
+    while places_to_visit:
+        place = places_to_visit.pop(0)
 
-    return dist_place
+        if place in visited_places:
+            continue
+        visited_places.add(place)
+
+        # Get outgoing transitions
+        transitions = [arc.target for arc in place.out_arcs]
+
+        # Algorithm 3 Line 21: if |transitions| != 1 then continue
+        # If there is a choice (OR-split) or dead-end, we cannot structurally guarantee a transition
+        if len(transitions) != 1:
+            continue
+
+        trans = transitions[0]
+
+        # Algorithm 3 Line 23: if not IsSilent(trans)
+        if trans.label is not None:
+            required_transitions.add(trans)
+
+        # Algorithm 3 Line 25: AddAll(places, transitions[0].out_places)
+        for arc in trans.out_arcs:
+            p_out = arc.target
+            if p_out not in visited_places:
+                places_to_visit.append(p_out)
+
+    return required_transitions
+
+
+def get_heuristic(marking: Marking, remaining_trace_labels: List[str], epsilon=STD_SYNC_COST) -> float:
+    """
+    Algorithm 3: HEURISTIC
+    Calculates the MMR (Model Move Required) heuristic.
+    """
+    # 1. Get structurally required transitions
+    required_trs = get_required_transitions(marking)
+
+    # 2. Extract unique labels
+    required_labels = {t.label for t in required_trs if t.label is not None}
+
+    # 3. Unique activities in remaining trace
+    remaining_labels = set(remaining_trace_labels)
+
+    # 4. Missing: Required by model but NOT in remaining trace (Algorithm 3 Line 5)
+    # These MUST be executed as Model Moves.
+    missing = required_labels - remaining_labels
+
+    # 5. MinCostMoves: Required AND in remaining trace (Algorithm 3 Line 6)
+    # We optimistically assume these will be Synchronous Moves.
+    sync_candidates = required_labels.intersection(remaining_labels)
+
+    # 6. Calculate Cost (Algorithm 3 Line 7)
+    # Cost = |missing| * Cost(Model Move) + |sync_candidates| * Cost(Sync Move)
+    # Admissibility: We use the cheapest possible cost for sync (0) and standard for model.
+    h_val = len(missing) * STD_MODEL_LOG_MOVE_COST + len(sync_candidates) * epsilon
+
+    return h_val
+
+
+def get_alive_activities(net: PetriNet, initial_marking: Marking) -> Dict[Marking, Set[str]]:
+    """
+    Algorithm 8: Initialization for LESSSTATESMODEL (SRLog).
+    Pre-computes the 'alive activities' for every reachable marking in the model (ignoring the log).
+    Returns a map: Marking -> Set[Activity Labels]
+    """
+    # Phase 1: Discovery (BFS to find all reachable markings)
+    rg_nodes = {initial_marking}
+    rg_edges = []  # List of (source_m, target_m, label)
+
+    processing_queue = [initial_marking]
+
+    while processing_queue:
+        m = processing_queue.pop(0)
+        enabled_transitions = utils.semantics.enabled_transitions(net, m)
+
+        for t in enabled_transitions:
+            new_m = utils.semantics.execute(t, net, m)
+            rg_edges.append((m, new_m, t.label))
+
+            if new_m not in rg_nodes:
+                rg_nodes.add(new_m)
+                processing_queue.append(new_m)
+
+    # Phase 2: Compute Alive Activities (Backwards propagation)
+    alive_map = {m: set() for m in rg_nodes}
+
+    # Initialize with directly reachable labels
+    for src, tgt, label in rg_edges:
+        if label is not None:
+            alive_map[src].add(label)
+
+    # Propagate: If I can reach Tgt, I inherit Tgt's alive activities
+    changed = True
+    while changed:
+        changed = False
+        for src, tgt, label in rg_edges:
+            new_alive = alive_map[src].union(alive_map[tgt])
+            if len(new_alive) > len(alive_map[src]):
+                alive_map[src] = new_alive
+                changed = True
+
+    return alive_map
+
+
+# =============================================================================
+# Optimization Checks (Algorithm 6 & 7)
+# =============================================================================
+
+def check_sr_model(net, marking, remaining_trace_labels):
+    """
+    Algorithm 6: LESSSTATESLOG (SRModel)
+    Returns True if we should SKIP Log Moves (i.e., Force Model Moves).
+    Condition: Model has enabled transitions, BUT none of them match any future trace activity.
+    """
+    enabled = utils.semantics.enabled_transitions(net, marking)
+    if not enabled:
+        return False  # Deadlock in model, can't force model move
+
+    enabled_labels = {t.label for t in enabled if t.label is not None}
+    if not enabled_labels:
+        # If only silent transitions are enabled, we rely on standard A* behavior
+        # because SRModel compares with trace labels.
+        pass
+
+    # Intersection with ANY activity in the remaining trace
+    remaining_set = set(remaining_trace_labels)
+
+    if not enabled_labels.isdisjoint(remaining_set):
+        return False  # There is a match, so we shouldn't force model move
+
+    return True  # No match possible in future trace, force Model Move now
+
+
+def check_sr_log(marking, next_trace_label, alive_map):
+    """
+    Algorithm 7: LESSSTATESMODEL (SRLog)
+    Returns True if we should SKIP Model Moves (i.e., Force Log Move).
+    Condition: The next trace activity is NOT alive in the model from current state.
+    """
+    if alive_map is None or marking not in alive_map:
+        return False
+
+    alive_activities = alive_map[marking]
+
+    if next_trace_label not in alive_activities:
+        # The next activity in trace can NEVER be executed from here.
+        return True
+
+    return False
+
+
+# =============================================================================
+# Greedy Upper Bound (Algorithm 9)
+# =============================================================================
+
+def run_greedy_search(sync_net, ini, fin, cost_function, skip, trace_labels):
+    """
+    Algorithm 9: Greedy alignment to find an upper bound cost.
+    """
+    curr_m = ini
+    curr_cost = 0.0
+    trace_idx = 0
+    trace_len = len(trace_labels)
+
+    while True:
+        if curr_m == fin:
+            return curr_cost
+
+        enabled_trans = utils.semantics.enabled_transitions(sync_net, curr_m)
+        candidates = []
+
+        for t in enabled_trans:
+            move_cost = cost_function[t]
+            is_log = utils.__is_log_move(t, skip)
+            is_model = utils.__is_model_move(t, skip)
+
+            new_idx = trace_idx
+            if is_log:
+                new_idx += 1
+            elif not is_model:
+                new_idx += 1  # Sync (assuming non-silent)
+
+            # Simplified heuristic for greedy: Remaining Trace Length * Standard Cost
+            # This pushes the greedy search towards finishing the trace
+            rem_len = trace_len - new_idx if new_idx < trace_len else 0
+            h = rem_len * STD_MODEL_LOG_MOVE_COST
+
+            score = (curr_cost + move_cost) + h
+            new_m = utils.semantics.weak_execute(t, sync_net, curr_m)
+            candidates.append((score, new_m, move_cost, new_idx))
+
+        if not candidates:
+            return float('inf')
+
+        candidates.sort(key=lambda x: x[0])
+        best = candidates[0]
+
+        curr_m = best[1]
+        curr_cost += best[2]
+        trace_idx = best[3]
+
+        if curr_cost > 1000000:  # Safety break
+            return float('inf')
 
 
 def __search(
@@ -729,6 +691,7 @@ def __search(
     trace_labels=None,
     log_costs=None,
     parameters=None,
+    alive_activities_map=None
 ):
     start_time = time.time()
 
@@ -737,78 +700,46 @@ def __search(
 
     if trace_labels is None:
         trace_labels = []
-    trace_len = len(trace_labels)
 
-    # decide which heuristic flavour to use
-    mode_val = exec_utils.get_param_value(
-        Parameters.REQUIRED_ACTIVITIES_MODE, parameters or {}, RequiredActivitiesMode.SIMPLE.value
-    )
-    try:
-        mode = RequiredActivitiesMode(mode_val)
-    except ValueError:
-        # fallback to SIMPLE if unknown
-        mode = RequiredActivitiesMode.SIMPLE
+    enable_optimizations = exec_utils.get_param_value(Parameters.ENABLE_OPTIMIZATIONS, parameters, True)
+    if enable_optimizations is None:
+        enable_optimizations = True
 
-    # per-move weight (for non-sync moves) based on log costs
-    if log_costs:
-        heuristic_weight = min(log_costs)
-    else:
-        heuristic_weight = 1.0
-
-    # shared place -> trace index mapping
+    # Build mapping to identify Model Marking from Sync Marking
     place_to_trace_index = utils.__build_place_to_trace_index(
         sync_net,
-        trace_len=trace_len,
+        trace_len=len(trace_labels),
         infer_source_sink=True,
     )
 
-    # strategy-specific precomputations
-    place_to_required_labels: Dict[Any, Set[str]] = {}
-    place_label_depth: Dict[Any, Dict[str, int]] = {}
-    place_req_mask: Dict[Any, int] = {}
-    suffix_masks: Dict[int, int] = {}
-    dist_place: Dict[Any, float] = {}
+    # Helper to extract Model Marking component from Sync Marking
+    def split_marking(m):
+        model_m = Marking()
+        trace_idx = 0
+        found_idx = False
+        for p, count in m.items():
+            if p in place_to_trace_index:
+                if not found_idx:
+                    trace_idx = place_to_trace_index[p]
+                    found_idx = True
+                else:
+                    trace_idx = max(trace_idx, place_to_trace_index[p])
+            else:
+                model_m[p] = count
+        return model_m, trace_idx
 
-    if mode in {
-        RequiredActivitiesMode.SIMPLE,
-        RequiredActivitiesMode.BITSET,
-    }:
-        place_to_required_labels = _precompute_required_model_labels(sync_net, fin)
+    # Greedy Upper Bound (Algorithm 9)
+    upper_bound_cost = float('inf')
+    if enable_optimizations:
+        try:
+            upper_bound_cost = run_greedy_search(sync_net, ini, fin, cost_function, skip, trace_labels)
+        except:
+            upper_bound_cost = float('inf')
 
-    if mode == RequiredActivitiesMode.LABEL_REACHABILITY:
-        place_label_depth = _precompute_label_depths(sync_net, fin)
+    # Initial State
+    ini_model_m, ini_idx = split_marking(ini)
+    h0 = get_heuristic(ini_model_m, trace_labels[ini_idx:])
 
-    if mode == RequiredActivitiesMode.BITSET:
-        place_req_mask, suffix_masks = _precompute_bitset_structures(
-            sync_net,
-            fin,
-            trace_labels,
-        )
-
-    if mode == RequiredActivitiesMode.STRUCTURAL_SHORTEST_PATH:
-        dist_place = _precompute_structural_shortest_path(
-            sync_net,
-            fin,
-            cost_function,
-        )
-
-    def get_heuristic(marking: Marking) -> float:
-        if mode == RequiredActivitiesMode.SIMPLE:
-            return _heuristic_simple_required_activities(
-                marking,
-                trace_labels,
-                trace_len,
-                place_to_trace_index,
-                place_to_required_labels,
-                heuristic_weight,
-            )
-        # fallback
-        return 0.0
-
-    # A* algorithm
-    closed = set()
-
-    h0 = get_heuristic(ini)
     ini_state = utils.SearchTuple(0 + h0, 0, h0, ini, None, None, None, True)
     open_set = [ini_state]
     heapq.heapify(open_set)
@@ -817,6 +748,7 @@ def __search(
     queued = 0
     traversed = 0
 
+    closed = set()
     trans_empty_preset = set(
         t for t in sync_net.transitions if len(t.in_arcs) == 0
     )
@@ -827,6 +759,11 @@ def __search(
 
         curr = heapq.heappop(open_set)
         current_marking = curr.m
+
+        # Optimization: Upper Bound Pruning
+        if enable_optimizations and (curr.g + curr.h > upper_bound_cost):
+            continue
+
         if current_marking in closed:
             continue
 
@@ -843,23 +780,51 @@ def __search(
         closed.add(current_marking)
         visited += 1
 
+        # Context for Optimizations
+        curr_model_m, curr_trace_idx = split_marking(current_marking)
+        rem_trace = trace_labels[curr_trace_idx:]
+
+        # Optimization: SRModel (Alg 6) - Force Model Moves?
+        force_model_move = False
+        if enable_optimizations:
+            # Check on SyncNet but using model logic (enabled transitions)
+            # We map Sync Marking -> Enabled Transitions -> Labels
+            force_model_move = check_sr_model(sync_net, current_marking, rem_trace)
+
+        # Optimization: SRLog (Alg 7) - Force Log Moves?
+        force_log_move = False
+        if enable_optimizations and alive_activities_map and rem_trace:
+            # Check if next trace activity is alive in current model state
+            next_act = rem_trace[0]
+            force_log_move = check_sr_log(curr_model_m, next_act, alive_activities_map)
+
         enabled_trans = copy(trans_empty_preset)
         for p in current_marking:
             for t in p.ass_trans:
                 if t.sub_marking <= current_marking:
                     enabled_trans.add(t)
 
-        trans_to_visit_with_cost = [
-            (t, cost_function[t])
-            for t in enabled_trans
-            if not (
-                t is not None
-                and utils.__is_log_move(t, skip)
-                and utils.__is_model_move(t, skip)
-            )
-        ]
+        for t in enabled_trans:
+            # Determine move type
+            is_log = utils.__is_log_move(t, skip)
+            is_model = utils.__is_model_move(t, skip)
+            is_sync = not is_log and not is_model
 
-        for t, cost in trans_to_visit_with_cost:
+            # Apply SRModel: If forced to move model, skip Log Moves
+            if force_model_move and is_log:
+                continue
+
+            # Apply SRLog: If forced to move log, skip Model Moves (and Sync, as Sync implies model move valid)
+            # SRLog says: Next trace activity is DEAD. So we MUST skip it (Log Move).
+            # Model cannot possibly match it now or later.
+            if force_log_move:
+                # We only allow Log Moves that consume the 'dead' activity?
+                # Actually, standard A* generates all neighbors.
+                # If we force log move, we should SKIP Model and Sync moves.
+                if is_model or is_sync:
+                    continue
+
+            cost = cost_function[t]
             traversed += 1
             new_marking = utils.add_markings(
                 current_marking, t.add_marking
@@ -869,8 +834,17 @@ def __search(
                 continue
 
             g = curr.g + cost
-            h = get_heuristic(new_marking)
+
+            # Calculate Heuristic
+            new_model_m, new_trace_idx = split_marking(new_marking)
+            new_rem_trace = trace_labels[new_trace_idx:]
+
+            h = get_heuristic(new_model_m, new_rem_trace)
             new_f = g + h
+
+            # Early Pruning
+            if enable_optimizations and (new_f > upper_bound_cost):
+                continue
 
             queued += 1
             tp = utils.SearchTuple(new_f, g, h, new_marking, curr, t, None, True)
