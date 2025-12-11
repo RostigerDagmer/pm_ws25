@@ -27,14 +27,26 @@ git branch  # Should show: * train_evaluate_ML
 
 ### Step 0: Profile Resources (~5-10 minutes)
 
-Before running the full pipeline on datasets, profile a single dataset to determine optimal Slurm resource allocation.
+Before running the full pipeline on datasets, profile a representative dataset to determine optimal Slurm resource allocation.
+
+**⚠️ Important:** If your datasets vary significantly in size, profile the **largest** dataset to avoid resource allocation failures. The Slurm configuration will apply the same resources to all jobs, so you need to allocate for the worst case.
 
 #### 0.1: Run the Profiling Script
+
+##### if you don't know which is largest, check first:
+```bash
+for dataset in data/*/*.xes; do
+    echo "$dataset: $(grep -c "trace" $dataset) traces"
+done | sort -t: -k2 -n
+```
+
+##### Profile the LARGEST dataset to get upper-bound resource requirements
+bash scripts/profile_job.sh
 
 ```bash
 cd ~/pm_ws25
 source .venv/bin/activate
-bash scripts/profile_job.sh
+bash scripts/profile_job.sh data/<uuid>/your-largest-dataset.xes
 ```
 
 **What happens:**
@@ -114,7 +126,7 @@ The `%N` suffix limits concurrent jobs. For example, `--array=0-15%8` means "run
 
 ### Step 1: Generate Training Labels (~2-4 hours)
 
-After profiling and configuring resources, submit the job array to generate training data from all 16 datasets.
+After profiling and configuring resources, submit the job array to generate training data from all datasets.
 
 #### 1.1: Submit Job Array
 
@@ -508,8 +520,3 @@ ML Classifier Training (aggregate all datasets)
     ↓
 Performance Evaluation
 ```
-
-**Current configuration produces:**
-- 800 models per dataset (4 thresholds × 2 samplers × 100 subsets)
-- ~584 unique models after deduplication
-- 20 traces × 5 runs = 100 alignments per model
