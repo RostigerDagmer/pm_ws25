@@ -7,7 +7,7 @@
 ```
 Step 0: Profile (one-time)  →  Step 1: Generate Labels  →  Step 2: Train Classifier
    ~5-10 minutes                   ~2-4 hours (parallel)        ~1 hour
-   Optimize resources               16 datasets → CSV files      CSV → trained model
+   Optimize resources               N datasets → CSV files       CSV → trained model
 ```
 
 ---
@@ -124,16 +124,17 @@ sbatch lrz-cluster/run_create_labels.slurm
 ```
 
 **What happens:**
-1. **Job Submission**: Slurm creates 16 separate jobs (array indices 0-15)
+1. **Job Submission**: Slurm creates N separate jobs (one per dataset in DATASETS array)
 2. **Parallel Processing**: Jobs run in parallel based on your throttle setting
 3. **Per-Job Workflow**:
    - Loads one XES event log
-   - Discovers process models using inductive miner with noise thresholds [0.0, 0.1, 0.2, 0.3]
-   - Samples trace variants using configured distributions (2 samplers × 100 subsets each)
-   - Generates up to 800 process models per dataset (4 thresholds × 2 samplers × 100 models)
-   - Runs alignment benchmarks (20 traces × 5 runs each)
+   - Discovers process models using inductive miner with configured noise thresholds
+   - Samples trace variants using configured distributions
+   - Generates models: `num_thresholds × num_samplers × n_subsets` per dataset
+     - Current config: 4 thresholds × 2 samplers × 100 subsets = 800 models
+   - Runs alignment benchmarks with configured traces and runs
    - Saves results to CSV files in `data/runs/<dataset_hash>/`
-4. **Deduplication**: Removes duplicate models (typically reduces ~800 → ~584 unique)
+4. **Deduplication**: Removes duplicate models (typically ~70% unique models remain)
 5. **Caching**: Automatically skips datasets with existing CSV files
 
 **Expected output:** Each job creates 3 CSV files (train/test/eval) containing features and timing labels for ML training.
@@ -160,7 +161,7 @@ tail -f logs/create_labels_*.out  # Live output from all jobs
 
 **Count completed datasets:**
 ```bash
-find data/runs -name "*.train.csv" | wc -l  # Should reach 16
+find data/runs -name "*.train.csv" | wc -l  # Should match number of datasets in DATASETS array
 ```
 
 **Check for errors:**
@@ -176,19 +177,18 @@ cat logs/create_labels_<jobid>_<taskid>.err      # View specific error
 **Before proceeding to Step 2, ensure all datasets completed successfully:**
 
 ```bash
-# Should show 16 training files
+# Count training files (should match number of datasets)
+find data/runs -name "*.train.csv" | wc -l
+
+# List all generated files
 ls -lh data/runs/*/run_*.train.csv
-
-# Should show 16 test files
 ls -lh data/runs/*/run_*.test.csv
-
-# Should show 16 evaluation files
 ls -lh data/runs/*/run_*.eval.csv
 ```
 
 **If any files are missing:** Check the error logs for that specific job and re-run if necessary (see Troubleshooting section).
 
-**⚠️ Do not proceed to Step 2 until all 16 CSV file sets exist!**
+**⚠️ Do not proceed to Step 2 until all CSV file sets exist (one per dataset)!**
 
 ---
 
@@ -267,11 +267,11 @@ pm_ws25/
 ├── results/                              # Step 0: Profiling output
 │   └── profile_output.txt                # Resource usage and recommendations
 │
-├── data/runs/                            # Step 1: Generated training data (per dataset)
+├── data/runs/                            # Step 1: Generated training data
 │   ├── <hash1>.pkl                       # Each hash = one unique dataset
 │   ├── <hash2>.pkl                       # Contains: process models + alignments
-│   ├── ...                               # Total: 16 .pkl files (one per dataset)
-│   └── <hash16>.pkl
+│   ├── ...                               # One .pkl file per dataset in DATASETS array
+│   └── <hashN>.pkl
 │
 ├── outputs/evaluate_classifier/          # Step 2: ML classifier results
 │   ├── summary.txt                       # Human-readable performance report
@@ -283,7 +283,7 @@ pm_ws25/
     ├── create_labels_<jobid>_0.err       # Job array task 0 errors
     ├── create_labels_<jobid>_1.out       # Job array task 1 output
     ├── ...
-    ├── create_labels_<jobid>_15.err      # Job array task 15 errors
+    ├── create_labels_<jobid>_N.err       # Job array task N errors
     ├── eval_classifier_<jobid>.out       # Classifier training output
     └── eval_classifier_<jobid>.err       # Classifier training errors
 ```
@@ -330,7 +330,7 @@ cat results/profile_output.txt
 
 **Count generated datasets (Step 1):**
 ```bash
-# Should show 16 .pkl files (one per dataset)
+# Count .pkl files (should match DATASETS array length)
 ls -1 data/runs/*.pkl | wc -l
 
 # Show file sizes
@@ -427,7 +427,7 @@ nano lrz-cluster/run_create_labels.slurm
 
 # 3. Generate labels
 sbatch lrz-cluster/run_create_labels.slurm
-find data/runs -name "*.train.csv" | wc -l  # Wait for 16
+find data/runs -name "*.train.csv" | wc -l  # Wait until count matches DATASETS array
 
 # 4. Train classifier
 sbatch lrz-cluster/run_evaluate_classifier.slurm
@@ -438,40 +438,86 @@ cat outputs/evaluate_classifier/summary.txt
 
 ---
 
-## Scaling to More Datasets
+## Configuration
 
-**Add new datasets:**
+### Change Which Datasets to Process
 
-1. Edit `lrz-cluster/run_create_labels.slurm`
-2. Add to DATASETS array (lines 63-80):
+**File:** `lrz-cluster/run_create_labels.slurm` (lines 63-80, 22)
+
 ```bash
-DATASETS+=(
-    "data/your-uuid/your-dataset.xes"
+# 1. Edit DATASETS array (add/remove paths)
+DATASETS=(
+    "data/uuid1/dataset1.xes"
+    "data/uuid2/dataset2.xes"
+    # ... add more datasets
 )
-```
-3. Update array size (line 22): `#SBATCH --array=0-17%8` (for 18 total)
 
-**Re-profile if:**
-- Dataset size changes significantly
-- Switching to synthetic data
-- Resource requirements different
+# 2. Update array size (line 22): --array=0-(N-1)%throttle
+# Formula: If you have N datasets, use 0-(N-1)
+# Examples:
+#   10 datasets: --array=0-9%8
+#   16 datasets: --array=0-15%16
+#   20 datasets: --array=0-19%8
+```
+
+**Re-profile if new dataset is significantly different:**
+```bash
+# Profile default dataset (BPIC15_1.xes)
+bash scripts/profile_job.sh
+
+# OR profile a specific new dataset
+bash scripts/profile_job.sh data/your-uuid/your-large-dataset.xes
+```
+
+### Change Train/Test/Eval Split
+
+**File:** `lrz-cluster/run_create_labels.slurm` (lines 117-118)
 
 ```bash
-bash scripts/profile_job.sh data/path/to/new_dataset.xes
+python scripts/create_labels.py \
+    --train 0.6 \  # Training: 60% (default: 0.7)
+    --test 0.3 \   # Test: 30% (default: 0.2)
+    # Eval: 10% (automatic: 1.0 - train - test)
 ```
+
+### Change Model Generation
+
+**File:** `configs/default.yaml`
+
+```yaml
+discovery:
+  params:
+    noise_threshold: [0.0, 0.2, 0.4]  # More/fewer thresholds → more/fewer models
+
+  samplers:
+    - name: variant1
+      n_subsets: 150  # Increase for more models (default: 100)
+
+alignment:
+  runs: 10         # More runs → more stable timing (default: 5)
+  sampler:
+    slice:
+      to: 50     # More traces → better features (default: 20)
+```
+
+**Effect on training data:**
+- `noise_threshold: [0.0, 0.2, 0.4]` → 3 thresholds × 2 samplers × 150 = 900 models
+- `n_subsets: 150` → 50% more models per sampler
+- `runs: 10` → 2× more alignment measurements
+- `to: 50` → 2.5× more traces aligned per model
 
 ---
 
 ## Data Flow
 
 ```
-XES Event Logs (16 files)
+XES Event Logs (N files from DATASETS array)
     ↓
-Process Discovery (~800 models per dataset)
+Process Discovery (num_thresholds × num_samplers × n_subsets models)
     ↓
-Deduplication (~584 unique models per dataset)
+Deduplication (~70% unique models remain)
     ↓
-Alignment Benchmarks (20 traces × 5 runs per model)
+Alignment Benchmarks (configurable traces × runs per model)
     ↓
 CSV Datasets (train/test/eval split per dataset)
     ↓
@@ -479,3 +525,8 @@ ML Classifier Training (aggregate all datasets)
     ↓
 Performance Evaluation
 ```
+
+**Current configuration produces:**
+- 800 models per dataset (4 thresholds × 2 samplers × 100 subsets)
+- ~584 unique models after deduplication
+- 20 traces × 5 runs = 100 alignments per model
