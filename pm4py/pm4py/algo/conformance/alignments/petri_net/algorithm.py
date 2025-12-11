@@ -53,6 +53,7 @@ class Variants(Enum):
     VERSION_INCREMENTAL_A_STAR = variants.incremental_a_star
     VERSION_REMAINING_TRACE = variants.remaining_trace
     VERSION_REQUIRED_MODEL_MOVE = variants.required_model_move
+    VERSION_REQUIRED_ACTIVITIES = variants.required_activities
 
 class Parameters(Enum):
     PARAM_TRACE_COST_FUNCTION = "trace_cost_function"
