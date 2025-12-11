@@ -1,4 +1,4 @@
-from util.distributions import DistParam
+from util.distributions import DistParam, make_distribution
 from dataloaders.unique_net import UniqueProcessModelDataset
 from dataloaders.net import ProcessModelDataset
 from pydantic import BaseModel, field_validator, Field, ValidationInfo
@@ -48,8 +48,11 @@ class SamplerConfig(BaseModel):
         return v
 
     def build(self) -> VariantRandomDistributionSampler:
-        len_dist = self.len_distribution.build()
-        freq_dist = self.freq_distribution.build()
+        len_dist_spec = self.len_distribution.build()
+        freq_dist_spec = self.freq_distribution.build()
+        # Convert Spec objects to actual distributions with .sample() method
+        len_dist = make_distribution(len_dist_spec)
+        freq_dist = make_distribution(freq_dist_spec)
         sampler = VariantRandomDistributionSampler(
             seed=RNG.get_seed(),
             n_subsets=self.n_subsets,

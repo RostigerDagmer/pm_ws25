@@ -10,3 +10,4 @@ data
 *.err
 *.out
 *.json
+results/

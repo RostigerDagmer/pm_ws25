@@ -30,7 +30,7 @@ echo "Running label generation with tracking..."
     --train 0.7 \
     --test 0.2 \
     --workers $WORKERS \
-    2>&1 | tee profile_output.txt
+    2>&1 | tee results/profile_output.txt
 
 echo ""
 echo "============================================"
@@ -38,9 +38,9 @@ echo "PROFILING RESULTS"
 echo "============================================"
 
 # Extract metrics
-MAX_RSS=$(grep "Maximum resident set size" profile_output.txt | awk '{print $6}')
-ELAPSED=$(grep "Elapsed (wall clock) time" profile_output.txt | awk '{print $8}')
-CPU_PCT=$(grep "Percent of CPU" profile_output.txt | awk '{print $7}' | tr -d '%')
+MAX_RSS=$(grep "Maximum resident set size" results/profile_output.txt | awk '{print $6}')
+ELAPSED=$(grep "Elapsed (wall clock) time" results/profile_output.txt | awk '{print $8}')
+CPU_PCT=$(grep "Percent of CPU" results/profile_output.txt | awk '{print $7}' | tr -d '%')
 
 # Convert memory to GB
 MEM_GB=$((MAX_RSS / 1024 / 1024))
@@ -120,4 +120,4 @@ echo "============================================"
 echo "Finished: $(date)"
 echo "============================================"
 echo ""
-echo "Full output saved to: profile_output.txt"
+echo "Full output saved to: results/profile_output.txt"

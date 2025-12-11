@@ -33,15 +33,15 @@ def build_pipeline(cfg: PipelineConfig, skip_init: bool = False) -> RunDataset:
             force_recompute=cfg.deduplication.force_recompute,
         )
 
+    # Build trace sampler instance first
+    trace_sampler_instance = cfg.alignment.sampler.build(ds=pm_dataset)
+
+    # Pass a lambda that returns the instance (RunDataset expects a callable)
     return RunDataset(
         base_path=cfg.alignment.cache_path or Path("data/runs"),
         process_model_dataset=pm_dataset,
         aligners=cfg.alignment.resolve(),
-        trace_sampler=cfg.alignment.sampler.build(ds=pm_dataset),
-        n_runs=cfg.alignment.runs,
-        n_workers=cfg.alignment.workers,
-        write_batch_size=cfg.alignment.write_batch_size,
-        skip_init=skip_init,
+        trace_sampler=lambda ds, seed, slice: trace_sampler_instance,
     )
 
 
@@ -67,9 +67,8 @@ if __name__ == "__main__":
         cfg.seed = args.seed
 
     cfg.log_path = args.path
-    rng = RNG()
-    rng.initialize(cfg.seed)
+    RNG.initialize(cfg.seed)
 
     logging.info(cfg)
 
-    dataset = build_pipeline(cfg, rng)
+    dataset = build_pipeline(cfg)

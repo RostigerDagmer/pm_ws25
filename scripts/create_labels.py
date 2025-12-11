@@ -30,29 +30,23 @@ DF_SCHEMA = [
 ]
 
 
-def get_stats(stats: list[PerfCounter]) -> dict[str, float]:
-    durations = [s.duration for s in stats if s.duration is not None]
-    ms = [s.extract_metrics() for s in stats]
-    search_times = [s["search_time"] for s in ms]
-    lp_times = [s["lp_time"] for s in ms]
-
-    def compute_metrics(data: list[float]) -> dict[str, float]:
-        return {
-            "mean": float(np.mean(data)) if data else 0.0,
-            "std": float(np.std(data)) if data else 0.0,
-            "median": float(np.median(data)) if data else 0.0,
-        }
+def get_stats(perf: PerfCounter) -> dict[str, float]:
+    # Handle single PerfCounter object (not a list)
+    duration = perf.duration if perf.duration is not None else 0.0
+    metrics = perf.extract_metrics()
+    search_time = metrics.get("search_time", 0.0)
+    lp_time = metrics.get("lp_time", 0.0)
 
     return {
-        "mean_total": compute_metrics(durations)["mean"],
-        "std_total": compute_metrics(durations)["std"],
-        "median_total": compute_metrics(durations)["median"],
-        "mean_search": compute_metrics(search_times)["mean"],
-        "std_search": compute_metrics(search_times)["std"],
-        "median_search": compute_metrics(search_times)["median"],
-        "mean_lp": compute_metrics(lp_times)["mean"],
-        "std_lp": compute_metrics(lp_times)["std"],
-        "median_lp": compute_metrics(lp_times)["median"],
+        "mean_total": float(duration),
+        "std_total": 0.0,  # No std for single measurement
+        "median_total": float(duration),
+        "mean_search": float(search_time),
+        "std_search": 0.0,
+        "median_search": float(search_time),
+        "mean_lp": float(lp_time),
+        "std_lp": 0.0,
+        "median_lp": float(lp_time),
     }
 
 
@@ -80,11 +74,11 @@ def format_row(
     )
 
 
-def collate(batch: list[RunDataset.SerializedItemType]) -> pd.DataFrame:
+def collate(batch: list[RunDataset.ItemType]) -> pd.DataFrame:
     df_local = pd.DataFrame(columns=DF_SCHEMA)
     fe = CompositeFeatureExtractor()
     for run in batch:
-        run = run.deserialize()
+        # Run is already ItemType (not SerializedItemType), so no need to deserialize
         model, trace, item, perf, algo = (
             run.model,
             run.trace,
@@ -192,7 +186,7 @@ if __name__ == "__main__":
     df = pd.DataFrame(columns=DF_SCHEMA)
 
     dataloader = DataLoader(
-        run_dataset.serialized,
+        run_dataset,
         batch_size=512,
         shuffle=False,
         num_workers=4,  # cfg.alignment.workers if cfg.alignment.workers > 0 else os.cpu_count(),

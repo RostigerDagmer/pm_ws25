@@ -60,9 +60,8 @@ alignment:
   write_batch_size: 100 # number of alignments to buffer before writing to disk
   variants: A_STAR # either a AlignerSpec variant or a list of pm4py.algo.conformance.alignments.variants.Variants variants
   sampler:
-    type: SubsetAwarePerturbedTraceSampler # class name of the trace sampler used during alignment runs
+    type: SimplePerturbedTraceSampler # class name of the trace sampler used during alignment runs
     slice: # optional slice of traces to align (for testing/debugging)
       from: 0
       to: 20
-    args:
-      pick_random: true
+    args: {}
