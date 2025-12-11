@@ -307,19 +307,32 @@ pm_ws25/
 }
 ```
 
-### Detailed File Descriptions
+### What Each Step Produces
 
-| File | Purpose | Created By | Size (Approx) |
-|------|---------|------------|---------------|
-| `results/profile_output.txt` | Resource profiling results and Slurm recommendations | Step 0 | 20 KB |
-| `data/runs/<hash>.pkl` | All data for one dataset (models + alignments + CSV paths) | Step 1 | 50-200 MB each |
-| `outputs/evaluate_classifier/summary.txt` | ML model performance summary | Step 2 | 2-5 KB |
-| `outputs/evaluate_classifier/metrics.json` | Detailed performance metrics | Step 2 | 1-2 KB |
-| `outputs/evaluate_classifier/model.pkl` | Trained classifier | Step 2 | 10-50 MB |
-| `logs/create_labels_<job>_<task>.out` | Standard output for each dataset processing job | Step 1 | 10-100 KB |
-| `logs/create_labels_<job>_<task>.err` | Error output for each dataset processing job | Step 1 | 0-10 KB |
-| `logs/eval_classifier_<job>.out` | Classifier training standard output | Step 2 | 10-50 KB |
-| `logs/eval_classifier_<job>.err` | Classifier training errors | Step 2 | 0-5 KB |
+**Step 0: Profile**
+```
+Input:  data/<uuid>/<dataset>.xes (one test dataset)
+Output: results/profile_output.txt (resource recommendations)
+```
+
+**Step 1: Generate Labels** (runs on all datasets in parallel)
+```
+Input:  data/<uuid>/<dataset>.xes (N datasets from DATASETS array)
+Output: data/runs/<hash>.pkl (models + alignments, ~100 MB each)
+        logs/create_labels_<job>_<task>.out (job output)
+        logs/create_labels_<job>_<task>.err (job errors)
+```
+
+**Step 2: Train & Evaluate Classifier**
+```
+Input:  data/runs/*.pkl (all generated datasets)
+Output: outputs/evaluate_classifier/
+        ├── model.pkl (trained classifier, ~20 MB)
+        ├── summary.txt (human-readable results)
+        └── metrics.json (detailed metrics)
+        logs/eval_classifier_<job>.out (training output)
+        logs/eval_classifier_<job>.err (training errors)
+```
 
 ### Quick Access Commands
 
