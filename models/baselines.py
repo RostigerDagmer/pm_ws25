@@ -63,24 +63,34 @@ class RandomClassifier(ClassificationModel):
     def _default_hyperparameters(self) -> Dict[str, Any]:
         return {'random_state': 42}
 
-    def _train_classifier(self, X_train: np.ndarray, y_train: np.ndarray) -> Dict[int, float]:
-        """Compute label frequency distribution."""
+    def _train_classifier(self, X_train: np.ndarray, y_train: np.ndarray) -> Dict[str, Any]:
+        """Compute label frequency distribution and initialize RNG."""
         counter = Counter(y_train)
         total = len(y_train)
 
         # Store distribution as {class_idx: probability}
         distribution = {cls: count / total for cls, count in counter.items()}
-        return distribution
+
+        rng = np.random.RandomState(self.hyperparameters['random_state'])
+
+        return {'distribution': distribution, 'rng': rng}
 
     def _predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """Return training label distribution for all samples."""
+        """ Sample randomly from the training distribution for each sample. """
         n_samples = X.shape[0]
         n_classes = len(self.label_encoder.classes_)
 
-        # Create probability matrix based on training distribution
+        rng = self.model['rng']
+
+        classes = list(self.model['distribution'].keys())
+        probs = [self.model['distribution'][cls] for cls in classes]
+
+        # Instead of assigning probabilities, we sample one class per instance
+        #   because predict_heuristics always picks the argmax.
         proba = np.zeros((n_samples, n_classes))
-        for cls_idx, prob in self.model.items():
-            proba[:, cls_idx] = prob
+        for i in range(n_samples):
+            sampled_class = rng.choice(classes, p=probs)
+            proba[i, sampled_class] = 1.0
 
         return proba
     

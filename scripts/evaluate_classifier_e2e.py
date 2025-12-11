@@ -50,28 +50,28 @@ OUTPUT_DIR = Path("outputs") / "evaluate_classifier"
 
 TRAIN_DATASETS = {
     'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
-    '63a8435a-077d-4ece-97cd-2c76d394d99c': ['BPIC15_2.xes'],
-    'ed445cdd-27d5-4d77-a1f7-59fe7360cfbe': ['BPIC15_3.xes'],
-    '679b11cf-47cd-459e-a6de-9ca614e25985': ['BPIC15_4.xes'],
-    '3301445f-95e8-4ff0-98a4-901f1f204972': ['BPI%20Challenge%202018.xes'],
-    '3926db30-f712-4394-aebc-75976070e91f': ['BPI_Challenge_2012.xes'],
-    'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
-    '6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd': [
-        'Hospital%20Billing%20-%20Event%20Log.xes'
-    ],
-    '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
-        'Sepsis%20Cases%20-%20Event%20Log.xes'
-    ],
-    'd06aff4b-79f0-45e6-8ec8-e19730c248f1': ['BPI_Challenge_2019.xes'],
-    '3537c19d-6c64-4b1d-815d-915ab0e479da': [
-        'BPI_Challenge_2013_open_problems.xes'
-    ],
-    '500573e6-accc-4b0c-9576-aa5468b10cee': [
-        'BPI_Challenge_2013_incidents.xes'
-    ],
-    '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
-    'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
-    '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
+    # '63a8435a-077d-4ece-97cd-2c76d394d99c': ['BPIC15_2.xes'],
+    # 'ed445cdd-27d5-4d77-a1f7-59fe7360cfbe': ['BPIC15_3.xes'],
+    # '679b11cf-47cd-459e-a6de-9ca614e25985': ['BPIC15_4.xes'],
+    # '3301445f-95e8-4ff0-98a4-901f1f204972': ['BPI%20Challenge%202018.xes'],
+    # '3926db30-f712-4394-aebc-75976070e91f': ['BPI_Challenge_2012.xes'],
+    # 'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
+    # '6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd': [
+    #     'Hospital%20Billing%20-%20Event%20Log.xes'
+    # ],
+    # '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
+    #     'Sepsis%20Cases%20-%20Event%20Log.xes'
+    # ],
+    # 'd06aff4b-79f0-45e6-8ec8-e19730c248f1': ['BPI_Challenge_2019.xes'],
+    # '3537c19d-6c64-4b1d-815d-915ab0e479da': [
+    #     'BPI_Challenge_2013_open_problems.xes'
+    # ],
+    # '500573e6-accc-4b0c-9576-aa5468b10cee': [
+    #     'BPI_Challenge_2013_incidents.xes'
+    # ],
+    # '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
+    # 'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
+    # '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
 }
 
 TEST_DATASETS = {
@@ -84,47 +84,6 @@ TEST_DATASETS = {
     #     'BPI_Challenge_2013_closed_problems.xes'
     # ],
 }
-
-
-def convert_to_serializable(obj):
-    """Convert numpy types to Python native types for JSON serialization."""
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, dict):
-        return {
-            key: convert_to_serializable(value) for key, value in obj.items()
-        }
-    elif isinstance(obj, list):
-        return [convert_to_serializable(item) for item in obj]
-    return obj
-
-
-def save_results(metrics, comparison_df, train_count: int, test_count: int):
-    """Save evaluation results to output directory."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    with open(OUTPUT_DIR / "metrics.json", 'w') as f:
-        metrics_dict = convert_to_serializable(metrics.to_dict())
-        json.dump(metrics_dict, f, indent=2)
-
-    comparison_df.to_csv(OUTPUT_DIR / "baseline_comparison.csv", index=False)
-
-    with open(OUTPUT_DIR / "summary.txt", 'w') as f:
-        f.write("ML CLASSIFIER EVALUATION SUMMARY\n")
-        f.write("=" * 80 + "\n\n")
-        f.write(f"Train datasets: {train_count}\n")
-        f.write(f"Test datasets: {test_count}\n\n")
-        f.write("=" * 80 + "\n\n")
-        f.write(metrics.summary())
-        f.write("\n\n" + "=" * 80 + "\n\n")
-        f.write("Baseline Comparison:\n")
-        f.write(comparison_df.to_string())
-
-    logging.info(f"Results saved to: {OUTPUT_DIR}")
 
 
 def find_existing_tables(
@@ -242,6 +201,10 @@ if __name__ == "__main__":
     comparison_df = evaluator.compare_with_baselines([single_best, random_clf])
     logging.info("\n" + comparison_df.to_string())
 
-    save_results(
-        metrics, comparison_df, len(train_tables), len(test_run_datasets)
+    RecommenderEvaluator.save_results(
+        metrics=metrics,
+        comparison_df=comparison_df,
+        output_dir=OUTPUT_DIR,
+        train_count=len(train_tables),
+        test_count=len(test_run_datasets)
     )
