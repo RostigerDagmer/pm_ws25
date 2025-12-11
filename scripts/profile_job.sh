@@ -25,7 +25,7 @@ set -e
 
 DATASET="${1:-data/a0addfda-2044-4541-a450-fdcc9fe16d17/BPIC15_1.xes}"
 CONFIG="configs/default.yaml"
-WORKERS="${2:-8}"
+WORKERS="${2:-32}"
 RUNS="${3:-100}"  # Number of alignment runs (default: 100)
 
 echo "============================================"
@@ -38,6 +38,7 @@ echo "Started: $(date)"
 echo ""
 
 # Setup environment
+module load python/3.13.7
 source ~/pm_ws25/.venv/bin/activate
 export PYTHONPATH="${PYTHONPATH}:${HOME}/pm_ws25"
 cd ~/pm_ws25

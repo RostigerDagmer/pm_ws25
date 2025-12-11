@@ -1,5 +1,3 @@
-**Branch:** `train_evaluate_ML`
-
 # ML Classifier Training Pipeline
 
 ## Overview
@@ -19,17 +17,6 @@ Step 0: Profile (one-time)  →  Step 1: Generate Labels  →  Step 2: Train & E
 ---
 
 ## Complete Step-by-Step Guide
-
-### Prerequisites
-
-Ensure you're on the correct branch:
-
-```bash
-cd ~/pm_ws25
-git branch  # Should show: * train_evaluate_ML
-```
-
----
 
 ### Step 0: Profile Resources (~5-10 minutes)
 
@@ -51,15 +38,7 @@ done | sort -t: -k2 -n
 ```bash
 cd ~/pm_ws25
 source .venv/bin/activate
-
-# Basic profiling with default settings (8 workers, 100 runs)
 bash scripts/profile_job.sh data/<uuid>/your-largest-dataset.xes
-
-# OR: Quick profiling with fewer runs (faster, for estimates)
-bash scripts/profile_job.sh data/<uuid>/your-largest-dataset.xes 8 50
-
-# OR: Profile with specific worker count
-bash scripts/profile_job.sh data/<uuid>/your-largest-dataset.xes 4 100
 ```
 
 **What happens:**
@@ -91,7 +70,7 @@ RECOMMENDATIONS FOR SLURM CONFIG
 
 Edit lrz-cluster/run_create_labels.slurm:
 
-  #SBATCH --cpus-per-task=8
+  #SBATCH --cpus-per-task=16
   #SBATCH --mem=32G
   #SBATCH --time=03:00:00
 ```
@@ -117,7 +96,7 @@ nano lrz-cluster/run_create_labels.slurm
 |------|-----------|----------------|---------------|
 | 22 | `--array` | Job array and throttle | `#SBATCH --array=0-15%8` |
 | 23 | `--time` | Maximum runtime | `#SBATCH --time=03:00:00` |
-| 25 | `--cpus-per-task` | CPU cores per job | `#SBATCH --cpus-per-task=8` |
+| 25 | `--cpus-per-task` | CPU cores per job | `#SBATCH --cpus-per-task=16` |
 | 26 | `--mem` | Memory per job | `#SBATCH --mem=32G` |
 
 **Setting the throttle (line 22):**
@@ -580,6 +559,28 @@ python scripts/create_labels.py \
 - Changed `configs/default.yaml` settings
 - Suspect corrupted cache
 - Otherwise: Leave commented (saves hours!)
+
+### Change Number of Workers (CPU Cores)
+
+**Default: 16 workers** (good balance for most clusters)
+
+Workers control parallel processing speed. More workers = faster processing per dataset.
+
+**To change workers:**
+
+1. **Profile with your chosen worker count:**
+   ```bash
+   bash scripts/profile_job.sh data/<uuid>/dataset.xes 16 100
+   ```
+
+2. **Edit both Slurm files:**
+   - `lrz-cluster/run_create_labels.slurm` line 25: `--cpus-per-task=16`
+   - `lrz-cluster/run_evaluate_classifier.slurm` line 7: `--cpus-per-task=16`
+
+**Choose workers based on cluster size:**
+- Small cluster (< 64 CPUs): Use 8 workers
+- Medium cluster (64-128 CPUs): Use 16 workers ← **Recommended**
+- Large cluster (> 128 CPUs): Use 32 workers
 
 ### Change Model Generation
 

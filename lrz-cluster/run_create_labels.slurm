@@ -22,7 +22,7 @@
 #SBATCH --array=0-15%16                  # 16 datasets, 8 concurrent (BALANCED PROFILE)
 #SBATCH --time=02:00:00                 # 4 hours per dataset
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4               # 8 CPUs per job
+#SBATCH --cpus-per-task=16              # 16 CPUs per job (workers)
 #SBATCH --mem=24G                       # 32GB per job
 #SBATCH -o logs/create_labels_%A_%a.out
 #SBATCH -e logs/create_labels_%A_%a.err
@@ -46,7 +46,7 @@
 mkdir -p logs data/runs
 
 module load slurm_setup
-module load python/3.10.12-extended
+module load python/3.13.7
 
 source ~/pm_ws25/.venv/bin/activate
 export PYTHONPATH="${PYTHONPATH}:${HOME}/pm_ws25"

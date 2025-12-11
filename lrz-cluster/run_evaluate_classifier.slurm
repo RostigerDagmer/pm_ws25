@@ -22,7 +22,7 @@ mkdir -p cache/models
 
 # Load modules
 module load slurm_setup
-module load python/3.10.12-extended
+module load python/3.13.7
 
 # Activate virtual environment
 source ~/pm_ws25/.venv/bin/activate

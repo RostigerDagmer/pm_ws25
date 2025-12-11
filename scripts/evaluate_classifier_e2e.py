@@ -19,6 +19,7 @@ import json
 import logging
 from pathlib import Path
 import numpy as np
+import os
 
 from dataloaders.runs import RunDataset
 from features.extractors import CompositeFeatureExtractor
@@ -74,47 +75,6 @@ TEST_DATASETS = {
 }
 
 
-def convert_to_serializable(obj):
-    """Convert numpy types to Python native types for JSON serialization."""
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, dict):
-        return {
-            key: convert_to_serializable(value) for key, value in obj.items()
-        }
-    elif isinstance(obj, list):
-        return [convert_to_serializable(item) for item in obj]
-    return obj
-
-
-def save_results(metrics, comparison_df, train_count: int, test_count: int):
-    """Save evaluation results to output directory."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    with open(OUTPUT_DIR / "metrics.json", 'w') as f:
-        metrics_dict = convert_to_serializable(metrics.to_dict())
-        json.dump(metrics_dict, f, indent=2)
-
-    comparison_df.to_csv(OUTPUT_DIR / "baseline_comparison.csv", index=False)
-
-    with open(OUTPUT_DIR / "summary.txt", 'w') as f:
-        f.write("ML CLASSIFIER EVALUATION SUMMARY\n")
-        f.write("=" * 80 + "\n\n")
-        f.write(f"Train datasets: {train_count}\n")
-        f.write(f"Test datasets: {test_count}\n\n")
-        f.write("=" * 80 + "\n\n")
-        f.write(metrics.summary())
-        f.write("\n\n" + "=" * 80 + "\n\n")
-        f.write("Baseline Comparison:\n")
-        f.write(comparison_df.to_string())
-
-    logging.info(f"Results saved to: {OUTPUT_DIR}")
-
-
 def find_existing_tables(
     root: Path,
 ):
@@ -149,7 +109,8 @@ def get_natural_dataset(
     cfg.alignment.cache_path = base_path
 
     cfg.seed = SEED
-    cfg.alignment.workers = 16
+    # Use SLURM_CPUS_PER_TASK if available, otherwise default to 16
+    cfg.alignment.workers = int(os.environ.get('SLURM_CPUS_PER_TASK', 16))
 
     # Skip config <-> cache check
     # (This is unsafe if process models are being referenced in the cache that are not included in the current config)
@@ -242,6 +203,10 @@ if __name__ == "__main__":
     comparison_df = evaluator.compare_with_baselines([single_best, random_clf])
     logging.info("\n" + comparison_df.to_string())
 
-    save_results(
-        metrics, comparison_df, len(train_run_datasets), len(test_run_datasets)
+    RecommenderEvaluator.save_results(
+        metrics=metrics,
+        comparison_df=comparison_df,
+        output_dir=OUTPUT_DIR,
+        train_count=len(train_run_datasets),
+        test_count=len(test_run_datasets),
     )
