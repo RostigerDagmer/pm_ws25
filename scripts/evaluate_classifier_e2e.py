@@ -18,6 +18,7 @@ import json
 import logging
 from pathlib import Path
 import numpy as np
+import os
 
 from dataloaders.xes_log import XESEventLogDataset
 from dataloaders.net import (
@@ -161,7 +162,8 @@ def get_natural_dataset(
     cfg.alignment.cache_path = base_path
 
     cfg.seed = SEED
-    cfg.alignment.workers = 16
+    # Use SLURM_CPUS_PER_TASK if available, otherwise default to 16
+    cfg.alignment.workers = int(os.environ.get('SLURM_CPUS_PER_TASK', 16))
 
     # Use cached RunDatasets by default (skip_init=True)
     # This dramatically speeds up evaluation when alignment runs already exist

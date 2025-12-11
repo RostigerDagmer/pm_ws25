@@ -38,6 +38,7 @@ echo "Started: $(date)"
 echo ""
 
 # Setup environment
+module load python/3.13.7
 source ~/pm_ws25/.venv/bin/activate
 export PYTHONPATH="${PYTHONPATH}:${HOME}/pm_ws25"
 cd ~/pm_ws25
