@@ -258,36 +258,6 @@ cat outputs/evaluate_classifier/metrics.json
 
 ---
 
-## Output Locations
-
-### Directory Structure Overview
-
-```
-pm_ws25/
-├── results/                              # Step 0: Profiling output
-│   └── profile_output.txt                # Resource usage and recommendations
-│
-├── data/runs/                            # Step 1: Generated training data
-│   ├── <hash1>.pkl                       # Each hash = one unique dataset
-│   ├── <hash2>.pkl                       # Contains: process models + alignments
-│   ├── ...                               # One .pkl file per dataset in DATASETS array
-│   └── <hashN>.pkl
-│
-├── outputs/evaluate_classifier/          # Step 2: ML classifier results
-│   ├── summary.txt                       # Human-readable performance report
-│   ├── metrics.json                      # Detailed metrics (accuracy, F1, etc.)
-│   └── model.pkl                         # Trained classifier (serialized)
-│
-└── logs/                                 # Slurm job logs
-    ├── create_labels_<jobid>_0.out       # Job array task 0 output
-    ├── create_labels_<jobid>_0.err       # Job array task 0 errors
-    ├── create_labels_<jobid>_1.out       # Job array task 1 output
-    ├── ...
-    ├── create_labels_<jobid>_N.err       # Job array task N errors
-    ├── eval_classifier_<jobid>.out       # Classifier training output
-    └── eval_classifier_<jobid>.err       # Classifier training errors
-```
-
 ### Understanding the Hash Files
 
 **What is a hash?** Each `.pkl` file in `data/runs/` represents one dataset, identified by a SHA-1 hash of the dataset path.
