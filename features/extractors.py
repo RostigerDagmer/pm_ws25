@@ -319,26 +319,32 @@ class StateSpaceSizeExtractor(BaseFeatureExtractor):
         """Extract state space size feature."""
         try:
             tree = convert_to_process_tree(net, im, fm)
-
-            # Print warning, if tree contains other Operators than SEQ, AND, XOR, LOOP
-            for node in tree.iterate():
-                if node.operator not in {
-                    Operator.SEQUENCE,
-                    Operator.PARALLEL,
-                    Operator.XOR,
-                    Operator.LOOP,
-                }:
-                    logging.warning(
-                        f"Process Tree contains unsupported operator {node.operator} for state space size calculation."
-                    )
-
+            self._check_unsupported_operators(tree)
             size = self._calculate_state_space(tree)
+            
             return {'state_space_size': float(size)}
         except Exception as e:
             traceback.print_exc()
             logging.error(f"Conversion failed: {repr(e)}")
             # Return -1.0 if conversion fails
             return {'state_space_size': -1.0}
+
+    def _check_unsupported_operators(self, node: ProcessTree):
+        """Recursively check for unsupported operators in the process tree."""
+        if node.operator not in {
+            Operator.SEQUENCE,
+            Operator.PARALLEL,
+            Operator.XOR,
+            Operator.LOOP,
+            None, # Leaf nodes
+        }:
+            logging.warning(
+                f"Process Tree contains unsupported operator {node.operator} for state space size calculation."
+            )
+
+        # Recursively check children
+        for child in node.children:
+            self._check_unsupported_operators(child)
 
     def _calculate_state_space(self, node: ProcessTree) -> float:
         if not node.children:
