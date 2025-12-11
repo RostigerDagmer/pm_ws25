@@ -1,18 +1,39 @@
 #!/bin/bash
 # Profile a single dataset to determine optimal Slurm resources
 # Run this BEFORE submitting the full job array
+#
+# USAGE:
+#   bash scripts/profile_job.sh [DATASET] [WORKERS] [RUNS]
+#
+# EXAMPLES:
+#   # Profile with defaults (8 workers, 100 runs)
+#   bash scripts/profile_job.sh
+#
+#   # Profile specific dataset with 4 workers
+#   bash scripts/profile_job.sh data/d9769f3d-0ab0-4fb8-803b-0d1120ffcf54/Hospital_log.xes 4
+#
+#   # Profile with 8 workers and 50 runs (faster profiling)
+#   bash scripts/profile_job.sh data/d9769f3d-0ab0-4fb8-803b-0d1120ffcf54/Hospital_log.xes 8 50
+#
+# OUTPUT:
+#   - Real-time output to console
+#   - Detailed report in results/profile_output.txt
+#   - SLURM configuration recommendations
+#
 
 set -e
 
 DATASET="${1:-data/a0addfda-2044-4541-a450-fdcc9fe16d17/BPIC15_1.xes}"
 CONFIG="configs/default.yaml"
 WORKERS="${2:-8}"
+RUNS="${3:-100}"  # Number of alignment runs (default: 100)
 
 echo "============================================"
 echo "Job Profiling"
 echo "============================================"
 echo "Dataset: $DATASET"
 echo "Workers: $WORKERS"
+echo "Runs:    $RUNS"
 echo "Started: $(date)"
 echo ""
 
@@ -26,13 +47,18 @@ mkdir -p results
 
 # Run with resource tracking
 echo "Running label generation with tracking..."
+echo "NOTE: Using --force-recompute to ensure fresh profiling data"
+echo ""
 /usr/bin/time -v python scripts/create_labels.py \
     --config "$CONFIG" \
     --path "$DATASET" \
     --seed 1 \
     --train 0.7 \
     --test 0.2 \
+    --eval 0.1 \
+    --runs $RUNS \
     --workers $WORKERS \
+    --force-recompute \
     2>&1 | tee results/profile_output.txt
 
 # Function to print and append to file

@@ -54,7 +54,42 @@ echo "======================================"
 echo ""
 
 # ====================================
+# Pre-flight Checks
+# ====================================
+
+echo "Checking for required data files..."
+TRAIN_FILES=$(find data/runs -name "*.train.csv" 2>/dev/null | wc -l)
+TEST_FILES=$(find data/runs -name "*.test.csv" 2>/dev/null | wc -l)
+EVAL_FILES=$(find data/runs -name "*.eval.csv" 2>/dev/null | wc -l)
+
+echo "Found:"
+echo "  - Train files: $TRAIN_FILES"
+echo "  - Test files:  $TEST_FILES"
+echo "  - Eval files:  $EVAL_FILES"
+echo ""
+
+if [ "$TRAIN_FILES" -eq 0 ] || [ "$TEST_FILES" -eq 0 ]; then
+    echo "ERROR: No training/test data found in data/runs/"
+    echo "Please run create_labels job array first to generate labeled datasets."
+    echo "Expected files: data/runs/**/*.{train,test,eval}.csv"
+    exit 1
+fi
+
+echo "Data files check passed!"
+echo ""
+
+# ====================================
 # Run Evaluation
+# ====================================
+#
+# CACHING BEHAVIOR:
+# - Automatically uses cached alignment runs from data/runs/
+# - Only regenerates alignments if cache is missing
+# - Train data: Loaded from pre-computed *.train.csv files
+# - Test data: Loaded from cached RunDataset pickle files
+#
+# This makes evaluation MUCH faster (hours → minutes)
+#
 # ====================================
 
 echo "Starting classifier evaluation..."

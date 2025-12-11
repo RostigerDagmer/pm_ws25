@@ -8,7 +8,13 @@
 Step 0: Profile (one-time)  →  Step 1: Generate Labels  →  Step 2: Train & Evaluate Classifier
    ~5-10 minutes                   ~2-4 hours (parallel)        ~1 hour
    Optimize resources               N datasets → CSV files       CSV → trained model + metrics
+                                    ⚡ Re-runs: instant (cache)  ⚡ Uses cached data
 ```
+
+**🆕 Intelligent Caching:**
+- **First run:** Full pipeline execution (~2-4 hours for label generation)
+- **Re-runs:** Near-instant completion if cache exists (~1-2 minutes)
+- **Control:** Use `--force-recompute` flag to regenerate data
 
 ---
 
@@ -33,7 +39,7 @@ Before running the full pipeline on datasets, profile a representative dataset t
 
 #### 0.1: Run the Profiling Script
 
-##### if you don't know which is largest, check first:
+##### If you don't know which is largest, check first:
 ```bash
 for dataset in data/*/*.xes; do
     echo "$dataset: $(grep -c "trace" $dataset) traces"
@@ -41,22 +47,31 @@ done | sort -t: -k2 -n
 ```
 
 ##### Profile the LARGEST dataset to get upper-bound resource requirements
-bash scripts/profile_job.sh
 
 ```bash
 cd ~/pm_ws25
 source .venv/bin/activate
+
+# Basic profiling with default settings (8 workers, 100 runs)
 bash scripts/profile_job.sh data/<uuid>/your-largest-dataset.xes
+
+# OR: Quick profiling with fewer runs (faster, for estimates)
+bash scripts/profile_job.sh data/<uuid>/your-largest-dataset.xes 8 50
+
+# OR: Profile with specific worker count
+bash scripts/profile_job.sh data/<uuid>/your-largest-dataset.xes 4 100
 ```
 
 **What happens:**
 - Activates Python virtual environment
-- Runs `create_labels.py` on one dataset
+- Runs `create_labels.py` on one dataset with `--force-recompute` (ensures fresh profiling)
 - Uses `/usr/bin/time -v` to track:
   - Maximum memory usage (RSS)
   - Total runtime (wall clock)
   - CPU utilization percentage
 - Saves complete output to `results/profile_output.txt`
+
+**Note:** The script uses `--force-recompute` to bypass caching and get accurate resource measurements.
 
 ---
 
@@ -138,7 +153,12 @@ sbatch lrz-cluster/run_create_labels.slurm
 **What happens:**
 1. **Job Submission**: Slurm creates N separate jobs (one per dataset in DATASETS array)
 2. **Parallel Processing**: Jobs run in parallel based on your throttle setting
-3. **Per-Job Workflow**:
+3. **Smart Caching** (NEW):
+   - **Alignment cache**: Uses cached alignment runs (`.pkl` files) if available
+   - **Output cache**: Skips entire job if CSV files already exist
+   - **Cache location**: `data/runs/<hash>.pkl` and `data/runs/<hash>.{train,test,eval}.csv`
+   - ⚡ **Re-runs complete instantly** if cache exists!
+4. **Per-Job Workflow** (only if not cached):
    - Loads one XES event log
    - Discovers process models using inductive miner with configured noise thresholds
    - Samples trace variants using configured distributions
@@ -146,10 +166,12 @@ sbatch lrz-cluster/run_create_labels.slurm
      - Current config: 4 thresholds × 2 samplers × 100 subsets = 800 models
    - Runs alignment benchmarks with configured traces and runs
    - Saves results to CSV files in `data/runs/<dataset_hash>/`
-4. **Deduplication**: Removes duplicate models (typically ~70% unique models remain)
-5. **Caching**: Automatically skips datasets with existing CSV files
+5. **Deduplication**: Removes duplicate models (typically ~70% unique models remain)
 
-**Expected output:** Each job creates 3 CSV files (train/test/eval) containing features and timing labels for ML training.
+**Expected output:** Each job creates:
+- 1 pickle file: `<hash>.pkl` (cached alignment runs, ~100MB)
+- 3 CSV files: `<hash>.{train,test,eval}.csv` (features + labels, ~10MB each)
+- 2 additional CSV files: `<hash>.{runs,labels}.csv` (detailed data)
 
 ---
 
@@ -216,16 +238,21 @@ sbatch lrz-cluster/run_evaluate_classifier.slurm
 ```
 
 **What happens:**
-1. **Data Loading**: Scans `data/runs/` for all `.train.csv` and `.test.csv` files
-2. **Feature Engineering**: Combines process model features with historical timing data
-3. **Model Training**:
-   - Trains gradient boosting classifier on aggregated training data
-   - Uses cross-validation for hyperparameter tuning
-   - Saves trained model to disk
-4. **Evaluation**: Tests prediction accuracy on held-out evaluation sets
-5. **Reporting**: Generates summary statistics and comparison to baseline methods
+1. **Pre-flight Check**: Verifies that required `.train.csv` and `.test.csv` files exist
+2. **Data Loading**:
+   - Loads all `.train.csv` files from `data/runs/` for training
+   - **Uses cached RunDatasets** from `.pkl` files for test datasets (very fast!)
+3. **Feature Engineering**: Combines process model features with historical timing data
+4. **Model Training**:
+   - Trains XGBoost classifier on aggregated training data
+   - Also trains baseline models (SingleBest, Random) for comparison
+   - Saves trained models to `cache/models/`
+5. **Evaluation**: Tests prediction accuracy on held-out test datasets
+6. **Reporting**: Generates summary statistics and comparison to baseline methods
 
 **Expected output:** Performance metrics showing how accurately the classifier predicts which algorithm will be fastest for a given process model.
+
+**Performance:** Thanks to caching, test dataset loading is near-instant (~10 seconds vs ~2 hours without cache).
 
 ---
 
@@ -300,18 +327,25 @@ Output: results/profile_output.txt (resource recommendations)
 **Step 1: Generate Labels** (runs on all datasets in parallel)
 ```
 Input:  data/<uuid>/<dataset>.xes (N datasets from DATASETS array)
-Output: data/runs/<hash>.pkl (models + alignments, ~100 MB each)
+Output: data/runs/<hash>.pkl (cached alignment runs, ~100 MB each)
+        data/runs/<hash>.train.csv (training split, ~10 MB)
+        data/runs/<hash>.test.csv (test split, ~3 MB)
+        data/runs/<hash>.eval.csv (eval split, ~2 MB)
+        data/runs/<hash>.runs.csv (all runs, ~50 MB)
+        data/runs/<hash>.labels.csv (best aligners, ~15 MB)
         logs/create_labels_<job>_<task>.out (job output)
         logs/create_labels_<job>_<task>.err (job errors)
 ```
 
 **Step 2: Train & Evaluate Classifier**
 ```
-Input:  data/runs/*.pkl (all generated datasets)
+Input:  data/runs/*.train.csv (training data from Step 1)
+        data/runs/*.pkl (cached test datasets, reused from Step 1)
 Output: outputs/evaluate_classifier/
-        ├── model.pkl (trained classifier, ~20 MB)
         ├── summary.txt (human-readable results)
-        └── metrics.json (detailed metrics)
+        ├── metrics.json (detailed metrics)
+        └── baseline_comparison.csv (comparison with baselines)
+        cache/models/*.pkl (trained classifier models, ~20 MB)
         logs/eval_classifier_<job>.out (training output)
         logs/eval_classifier_<job>.err (training errors)
 ```
@@ -325,11 +359,14 @@ cat results/profile_output.txt
 
 **Count generated datasets (Step 1):**
 ```bash
-# Count .pkl files (should match DATASETS array length)
-ls -1 data/runs/*.pkl | wc -l
+# Count training CSV files (should match DATASETS array length)
+find data/runs -name "*.train.csv" | wc -l
 
-# Show file sizes
-ls -lh data/runs/*.pkl
+# Show all generated files for a dataset
+ls -lh data/runs/*.{pkl,train.csv,test.csv,eval.csv,runs.csv,labels.csv} 2>/dev/null | head -20
+
+# Show file sizes summary
+du -sh data/runs/
 ```
 
 **Inspect a specific dataset:**
@@ -398,13 +435,34 @@ cat logs/create_labels_<jobid>_<taskid>.err   # View error details
 | Out of memory | Increase `--mem` in Slurm config based on profiling |
 | "No valid training samples" | Run Step 1 first - CSV files missing |
 | Job fails | Check error log: `cat logs/create_labels_*_*.err` |
+| Need to regenerate data | Use `--force-recompute` flag (see below) |
+| Cache seems corrupted | Delete `.pkl` file and re-run with `--force-recompute` |
 
-**Re-run single dataset:**
+**Re-run single dataset (uses cache if available):**
 ```bash
 python scripts/create_labels.py \
     --config configs/default.yaml \
     --path data/<uuid>/<file>.xes \
-    --workers 8 --seed 1
+    --seed 1 \
+    --train 0.7 \
+    --test 0.2 \
+    --eval 0.1 \
+    --runs 100 \
+    --workers 8
+```
+
+**Force regenerate (bypass all caches):**
+```bash
+python scripts/create_labels.py \
+    --config configs/default.yaml \
+    --path data/<uuid>/<file>.xes \
+    --seed 1 \
+    --train 0.7 \
+    --test 0.2 \
+    --eval 0.1 \
+    --runs 100 \
+    --workers 8 \
+    --force-recompute
 ```
 
 ---
@@ -412,30 +470,37 @@ python scripts/create_labels.py \
 ## Quick Start Summary
 
 ```bash
-# 1. Profile (once)
-bash scripts/profile_job.sh
+# 1. Profile (once) - Use --force-recompute for accurate measurements
+bash scripts/profile_job.sh data/<uuid>/largest-dataset.xes
 cat results/profile_output.txt
 
 # 2. Apply recommendations
 nano lrz-cluster/run_create_labels.slurm
 # Update lines 22-26 with profile values
 
-# 3. Generate labels
+# 3. Generate labels (uses cache by default for fast re-runs)
 sbatch lrz-cluster/run_create_labels.slurm
 find data/runs -name "*.train.csv" | wc -l  # Wait until count matches DATASETS array
 
-# 4. Train classifier
+# 4. Train classifier (uses cached RunDatasets automatically)
 sbatch lrz-cluster/run_evaluate_classifier.slurm
 
 # 5. View results
 cat outputs/evaluate_classifier/summary.txt
+
+# Optional: Force regeneration after config changes
+# Edit run_create_labels.slurm and add --force-recompute flag
 ```
+
+**⚡ Pro Tip:** After the first successful run, re-running the same datasets completes in seconds thanks to intelligent caching!
 
 ---
 
 ## Configuration
 
 ### Change Which Datasets to Process
+
+**For Label Generation (Step 1):**
 
 **File:** `lrz-cluster/run_create_labels.slurm` (lines 63-80, 22)
 
@@ -464,16 +529,57 @@ bash scripts/profile_job.sh
 bash scripts/profile_job.sh data/your-uuid/your-large-dataset.xes
 ```
 
+**For Classifier Training/Evaluation (Step 2):**
+
+**File:** `scripts/evaluate_classifier_e2e.py` (lines 51-86)
+
+```python
+# Edit TRAIN_DATASETS dictionary to add/remove training datasets
+TRAIN_DATASETS = {
+    'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
+    '63a8435a-077d-4ece-97cd-2c76d394d99c': ['BPIC15_2.xes'],
+    # ... add more training datasets
+}
+
+# Edit TEST_DATASETS dictionary to add/remove test datasets
+TEST_DATASETS = {
+    'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
+    # Uncomment to enable more test datasets:
+    # 'b32c6fe5-f212-4286-9774-58dd53511cf8': ['BPIC15_5.xes'],
+}
+```
+
+**Important:** Keep these in sync with `run_create_labels.slurm` to ensure all datasets have generated labels before training!
+
 ### Change Train/Test/Eval Split
 
-**File:** `lrz-cluster/run_create_labels.slurm` (lines 117-118)
+**File:** `lrz-cluster/run_create_labels.slurm` (around lines 123-131)
 
 ```bash
 python scripts/create_labels.py \
     --train 0.6 \  # Training: 60% (default: 0.7)
     --test 0.3 \   # Test: 30% (default: 0.2)
-    # Eval: 10% (automatic: 1.0 - train - test)
+    --eval 0.1 \   # Eval: 10% (default: 0.1)
+    # Note: train + test + eval must equal 1.0
 ```
+
+### Control Caching Behavior
+
+**Default:** Uses cache (fast, ~1-2 minutes)
+**Force regenerate:** Uncomment line 132 in `lrz-cluster/run_create_labels.slurm`
+
+```bash
+# Change this line from:
+    # --force-recompute  # Uncomment to regenerate all data (bypasses cache)
+
+# To this:
+    --force-recompute  # Uncomment to regenerate all data (bypasses cache)
+```
+
+**Use `--force-recompute` when:**
+- Changed `configs/default.yaml` settings
+- Suspect corrupted cache
+- Otherwise: Leave commented (saves hours!)
 
 ### Change Model Generation
 

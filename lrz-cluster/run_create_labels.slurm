@@ -109,6 +109,16 @@ echo ""
 # ====================================
 # Run Label Generation
 # ====================================
+#
+# CACHING BEHAVIOR:
+# - By default, uses cached alignment runs if available (FAST)
+# - Skips feature extraction if output .csv files already exist
+# - To regenerate everything, add: --force-recompute
+#
+# Example for force recompute:
+#   python scripts/create_labels.py ... --force-recompute
+#
+# ====================================
 
 python scripts/create_labels.py \
     --config configs/default.yaml \
@@ -116,7 +126,10 @@ python scripts/create_labels.py \
     --seed 1 \
     --train 0.7 \
     --test 0.2 \
-    --workers $SLURM_CPUS_PER_TASK
+    --eval 0.1 \
+    --runs 100 \
+    --workers $SLURM_CPUS_PER_TASK \
+    # --force-recompute  # Uncomment to regenerate all data (bypasses cache)
 
 EXIT_CODE=$?
 

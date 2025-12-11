@@ -143,6 +143,11 @@ if __name__ == "__main__":
     parser.add_argument("--train", type=float, default=0.7)
     parser.add_argument("--test", type=float, default=0.2)
     parser.add_argument("--eval", type=float, default=0.1)
+    parser.add_argument(
+        "--force-recompute",
+        action="store_true",
+        help="Force recomputation of alignment runs even if cached data exists",
+    )
 
     args = parser.parse_args()
     # load config
@@ -162,7 +167,25 @@ if __name__ == "__main__":
 
     logging.info(cfg)
 
-    run_dataset = build_pipeline(cfg)
+    # Use cached data unless --force-recompute is specified
+    skip_init = not args.force_recompute
+    if skip_init:
+        logging.info("Cache mode enabled: Will use cached alignment runs if available")
+    else:
+        logging.info("Force recompute mode: Will regenerate all alignment runs")
+
+    run_dataset = build_pipeline(cfg, skip_init=skip_init)
+
+    # Check if output files already exist (for resuming interrupted jobs)
+    base = run_dataset.save_path().with_suffix('')
+    train_csv = f"{base}.train.csv"
+    test_csv = f"{base}.test.csv"
+    eval_csv = f"{base}.eval.csv"
+
+    if not args.force_recompute and all(os.path.exists(f) for f in [train_csv, test_csv, eval_csv]):
+        logging.info(f"Output files already exist at {base}.*.csv - skipping feature extraction")
+        logging.info("Use --force-recompute to regenerate")
+        exit(0)
 
     df = pd.DataFrame(columns=DF_SCHEMA)
 
