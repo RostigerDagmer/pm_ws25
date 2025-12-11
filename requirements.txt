@@ -1,10 +1,28 @@
+# Core dependencies
 numpy
-cvxopt
+pandas
+scipy
+tqdm
+pydantic
+pebble
+
+# PM4PY dependencies
+deprecation
+networkx
+graphviz
+intervaltree
+lxml
+matplotlib
+pydotplus
+pytz
 cvxopt;python_version<'3.14'
+
+# ML dependencies
+torch
+xgboost
+scikit-learn
+
+# Additional tools
 pulp-cli
 jupyterlab
 aiohttp
-torch
-pydantic
-xgboost
-scikit-learn

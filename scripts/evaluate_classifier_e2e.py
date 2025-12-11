@@ -18,6 +18,7 @@ import json
 import logging
 from pathlib import Path
 import numpy as np
+import os
 
 from dataloaders.xes_log import XESEventLogDataset
 from dataloaders.net import (
@@ -111,6 +112,7 @@ def get_natural_dataset(
     log_path: str,
     config: str,
     base_path: Optional[str] = None,
+    use_cache: bool = True,
 ) -> RunDataset:
     RNG.initialize(SEED)
     cfg_dict = yaml.safe_load(open(config))
@@ -119,8 +121,12 @@ def get_natural_dataset(
     cfg.alignment.cache_path = base_path
 
     cfg.seed = SEED
-    cfg.alignment.workers = 16
-    return build_pipeline(cfg)
+    # Use SLURM_CPUS_PER_TASK if available, otherwise default to 16
+    cfg.alignment.workers = int(os.environ.get('SLURM_CPUS_PER_TASK', 16))
+
+    # Use cached RunDatasets by default (skip_init=True)
+    # This dramatically speeds up evaluation when alignment runs already exist
+    return build_pipeline(cfg, skip_init=use_cache)
 
 
 if __name__ == "__main__":
@@ -177,16 +183,20 @@ if __name__ == "__main__":
         force_retrain=True,
     )
 
+    logging.info("\nLoading test RunDatasets (using cached alignment runs)...")
     test_run_datasets = []
     for dataset_uuid, files in TEST_DATASETS.items():
         for filename in files:
+            logging.info(f"Loading: {filename}")
             run_dataset = get_natural_dataset(
                 str(Path("data") / dataset_uuid / filename),
                 config_path,
                 cache_path,
+                use_cache=True,  # Use cached alignment runs for speed
             )
             if run_dataset is not None:
                 test_run_datasets.append(run_dataset)
+                logging.info(f"  ✓ Loaded {len(run_dataset)} runs from cache")
 
     # Evaluate
     logging.info("\nEvaluating on test datasets...")
