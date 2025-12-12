@@ -4,7 +4,7 @@
 #SBATCH --partition=serial_std
 #SBATCH --time=04:00:00                 # 4 hours for full evaluation
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64              # 64 CPUs for parallel alignment workers
+#SBATCH --cpus-per-task=32              # 32 CPUs for XGBoost training
 #SBATCH --mem=128G                       # 128GB RAM for large datasets and model training
 #SBATCH -o logs/eval_classifier_%j.out  # %j = Job ID
 #SBATCH -e logs/eval_classifier_%j.err  # Error logs
