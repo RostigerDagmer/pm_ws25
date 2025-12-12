@@ -124,33 +124,34 @@ if __name__ == "__main__":
 
     # Create train RunDatasets
     # This is too heavy for now
-    logging.info(
-        f"\nCreating {sum(len(f) for f in TRAIN_DATASETS.values())} train RunDatasets..."
-    )
-    train_run_datasets = []
-    for dataset_uuid, files in TRAIN_DATASETS.items():
-        for filename in files:
-            run_dataset = get_natural_dataset(
-                str(Path("data") / dataset_uuid / filename),
-                config_path,
-                cache_path,
-            )
-            if run_dataset is not None:
-                train_run_datasets.append(run_dataset)
-
-    train_run_datasets.append(
-        get_synthetic_dataset(Path(cache_path), seed=SEED, count=50)
-    )
+    # logging.info(
+    #     f"\nCreating {sum(len(f) for f in TRAIN_DATASETS.values())} train RunDatasets..."
+    # )
+    # train_run_datasets = []
+    # for dataset_uuid, files in TRAIN_DATASETS.items():
+    #     for filename in files:
+    #         run_dataset = get_natural_dataset(
+    #             str(Path("data") / dataset_uuid / filename),
+    #             config_path,
+    #             cache_path,
+    #         )
+    #         if run_dataset is not None:
+    #             train_run_datasets.append(run_dataset)
+    #
+    # train_run_datasets.append(
+    #     get_synthetic_dataset(Path(cache_path), seed=SEED, count=50)
+    # )
 
     # Can merge individually extracted tables with precomputed features
-    # train_tables, test_tables, eval_tables = find_existing_tables(Path(cache_path))
+    logging.info("\nLoading pre-computed CSV tables...")
+    train_tables, test_tables, eval_tables = find_existing_tables(Path(cache_path))
 
     logging.info("\nCreating feature extractor...")
     feature_extractor = CompositeFeatureExtractor(use_cache=True)
 
     logging.info("\nTraining XGBoostClassifier...")
     classifier = XGBoostClassifier(
-        run_datasets=train_run_datasets,
+        tables=train_tables,
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
@@ -159,14 +160,14 @@ if __name__ == "__main__":
     # Train baselines
     logging.info("\nTraining baseline classifiers...")
     single_best = SingleBestSolver(
-        run_datasets=train_run_datasets,
+        tables=train_tables,
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
     )
 
     random_clf = RandomClassifier(
-        run_datasets=train_run_datasets,
+        tables=train_tables,
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
@@ -207,6 +208,6 @@ if __name__ == "__main__":
         metrics=metrics,
         comparison_df=comparison_df,
         output_dir=OUTPUT_DIR,
-        train_count=len(train_run_datasets),
+        train_count=len(train_tables),
         test_count=len(test_run_datasets),
     )
