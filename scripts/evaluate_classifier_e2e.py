@@ -144,7 +144,14 @@ if __name__ == "__main__":
 
     # Can merge individually extracted tables with precomputed features
     logging.info("\nLoading pre-computed CSV tables...")
-    train_tables, test_tables, eval_tables = find_existing_tables(Path(cache_path))
+    # Search in both cache/.runs and data/runs_synthetic for CSV files
+    train_tables, test_tables, eval_tables = [], [], []
+    for search_path in [Path(cache_path), Path("data/runs_synthetic")]:
+        if search_path.exists():
+            t_train, t_test, t_eval = find_existing_tables(search_path)
+            train_tables.extend(t_train)
+            test_tables.extend(t_test)
+            eval_tables.extend(t_eval)
 
     logging.info("\nCreating feature extractor...")
     feature_extractor = CompositeFeatureExtractor(use_cache=True)
