@@ -168,7 +168,7 @@ if __name__ == "__main__":
         run_dataset.serialized,
         batch_size=512,
         shuffle=False,
-        num_workers=min(cfg.alignment.workers, 16),  # Use more workers for faster feature extraction
+        num_workers=cfg.alignment.workers,  # Use all available workers for faster feature extraction
         persistent_workers=True,
         collate_fn=collate,
     )
