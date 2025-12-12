@@ -7,6 +7,34 @@ This guide shows you how to:
 2. Combine it with real XES-based data for training
 3. Improve classifier performance with hybrid training data
 
+## Data Overview
+
+### What Data Will Be Used?
+
+When you run `sbatch lrz-cluster/run_evaluate_classifier.slurm`, the classifier **automatically finds and combines** all CSV files:
+
+| Data Source | Script | Training | Testing | Location |
+|-------------|--------|----------|---------|----------|
+| **Real Data** | `create_labels.py` | ~53,000 | ~15,000 | `data/runs/` |
+| **Synthetic Data** | `create_labels_synthetic.py` | ~29,000 | ~8,000 | `data/runs_synthetic/` |
+| **TOTAL (Hybrid)** | - | **~82,000** | **~23,000** | - |
+
+✅ **No configuration needed** - just place CSV files in the directories above!
+
+### How Data Is Generated:
+
+**`create_labels.py`** (Real Data):
+- Input: XES event log files from real process executions
+- Process: Discovers models using Inductive Miner → Runs alignment algorithms
+- Output: Train/test/eval CSV splits with extracted features
+
+**`create_labels_synthetic.py`** (Synthetic Data):
+- Input: Parameters (n_models=200, n_traces=50, runs=10)
+- Process: Generates Petri nets programmatically → Simulates traces → Runs alignments
+- Output: Train/test/eval CSV splits with same format as real data
+
+---
+
 ## Quick Start
 
 ```bash
