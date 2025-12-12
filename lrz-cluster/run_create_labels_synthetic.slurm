@@ -47,8 +47,8 @@ python scripts/create_labels_synthetic.py \
     --workers $SLURM_CPUS_PER_TASK \
     --train 0.7 \
     --test 0.2 \
-    --eval 0.1 \
-    --force-recompute  # Generate alignment runs (required for first run)
+    --eval 0.1
+    # --force-recompute  # Uncomment to regenerate alignment runs from scratch (required for first run or when changing parameters)
 
 EXIT_CODE=$?
 

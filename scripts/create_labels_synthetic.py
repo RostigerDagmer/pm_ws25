@@ -153,7 +153,7 @@ if __name__ == "__main__":
     )
 
     # Check cache
-    base = run_dataset.save_path().with_suffix('')
+    base = run_dataset.save_path.with_suffix('')
     if not args.force_recompute and all(
         Path(f"{base}.{split}.csv").exists() for split in ["train", "test", "eval"]
     ):
