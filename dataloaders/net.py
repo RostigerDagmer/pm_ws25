@@ -1,3 +1,4 @@
+import pebble
 from util.distributions import deserialize
 from dataclasses import asdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -35,6 +36,7 @@ from dataloaders.serializable import (
     Serializable,
     Deserializable,
 )
+from io import BufferedWriter
 
 from pm4py.objects.log.obj import EventLog, Trace
 from pm4py.objects.petri_net.obj import Marking, PetriNet
@@ -265,12 +267,15 @@ class ItemType(Serializable["SerializedItemType"]):
     trace_indices: list[int] | None
 
     def hash(self) -> str:
-        d = {
-            str(k): str(v)
-            for k, v in self.__dict__.items()
-            if k != "pm" and k != "fm" and k != "im"
-        }
-        return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()
+        if not isinstance(self.sampler, dict):
+            self.sampler = self.sampler.serialize()
+        return ProcessModelDataset._config_hash(
+            self.variant,
+            self.parameters,
+            self.sampler,
+            self.subset_idx,
+            self.trace_indices,
+        )
 
     def serialize(self) -> "SerializedItemType":
         serialized: str = pnml_exporter.serialize(self.pm, self.im, self.fm)
@@ -294,8 +299,13 @@ class SerializedItemType(Deserializable[ItemType]):
     trace_indices: list[int] | None
 
     def hash(self) -> str:
-        d = {str(k): str(v) for k, v in self.__dict__.items() if k != "pm"}
-        return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()
+        return ProcessModelDataset._config_hash(
+            self.variant,
+            self.parameters,
+            self.sampler,
+            self.subset_idx,
+            self.trace_indices,
+        )
 
     def deserialize(self) -> ItemType:
         pm, im, fm = pnml_importer.deserialize(self.pm.decode('utf-8'))
@@ -333,6 +343,7 @@ class ProcessModelDataset(
         cache_dir=None,
         num_workers=None,
         timeout: float = 60.0,
+        write_batch_size: int = 100,
         **kwargs,
     ):
         """
@@ -347,6 +358,7 @@ class ProcessModelDataset(
         """
         super().__init__()
         self.log = getattr(log_dataset, "log", log_dataset)
+        self.log_uuid = log_dataset.log_uuid
 
         if hasattr(discovery_methods, "value"):
             discovery_methods = discovery_methods.value
@@ -361,6 +373,7 @@ class ProcessModelDataset(
             raise ValueError("sampler_specs must be provided.")
         self.sampler_specs = sampler_specs
         self.max_models = max_models
+        self.write_batch_size = write_batch_size
         self.cached = cached
         self.num_workers = num_workers or os.cpu_count()
         self.timeout = timeout
@@ -368,74 +381,86 @@ class ProcessModelDataset(
             self.cache_dir = (
                 Path(cache_dir)
                 if cache_dir
-                else Path('/'.join(log_dataset.source_path.split('/')[:-1]))
-                / Path(".cache_process_models")
+                else Path('./cache/.cache_process_models')
             )
-
-        self.configurations = self._generate_configurations()
+        self.items = {}
+        self.configurations = {}
+        self._generate_configurations()
 
         if self.cached:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             self._populate_cache_parallel()
-
-    def hash(self) -> str:
-        log_path = self.cache_dir
-        log_id = log_path.parts[-2]
-        base = {
-            "log_id": log_id,
-            "methods": list(self.discovery_methods.keys()),
-            "param_grid": self.param_grid,
-            "sampler_specs": {
-                k: v.hash() for k, v in self.sampler_specs.items()
-            },
-        }
-        return hashlib.sha1(
-            json.dumps(base, sort_keys=True).encode()
-        ).hexdigest()
 
     def __iter__(self):
         for i in range(len(self)):
             yield self[i]
 
     # --- helper: deterministic key per configuration ---
+    @staticmethod
     def _config_hash(
-        self,
-        method_name: str,
+        variant: str,
         params: dict[str, Any],
-        sampler_serialized: dict[str, Any],
+        sampler: dict[str, Any],
         subset_idx: int,
-        subset: TraceSubset,
+        subset: TraceSubset | list[int],
     ) -> str:
         base = {
-            "method": method_name,
+            "variant": variant,
             "params": params,
-            "sampler": sampler_serialized,
+            "sampler": sampler,
             "subset_idx": subset_idx,
-            "indices": getattr(subset, "indices", None),
+            "indices": (
+                subset.indices if isinstance(subset, TraceSubset) else subset
+            ),
         }
         return hashlib.sha1(
             json.dumps(base, sort_keys=True).encode()
         ).hexdigest()
 
-    def _cache_path(self, key):
-        return self.cache_dir / f"{key}.pkl"
+    def save_path(self):
+        return self.cache_dir / f"{self.log_uuid}.pkl"
 
-    # --- caching logic ---
+    def _tryload(self):
+        path = self.save_path()
+        if not os.path.exists(path):
+            return
+        self.items = {}
+
+        with open(path, "rb") as f:
+            while True:
+                try:
+                    chunk = pickle.load(f)  # each chunk = dict of N items
+                    self.items.update(chunk)
+                except EOFError:
+                    break
+        self.index = list(self.items.keys())
+        logging.info("Loaded %d models from cache.", len(self.items))
+
     @staticmethod
-    def _worker_target(queue, args):
-        try:
-            cfg, save_path = args
-            ProcessModelDataset._discover_and_save(cfg, save_path)
-            queue.put(("success", save_path))
-        except Exception as e:
-            traceback.print_exc()
-            queue.put(("error", (save_path, str(e))))
+    def _flush_batch(
+        f: BufferedWriter,
+        batch: dict[str, "ProcessModelDataset.SerializedItemType"],
+    ):
+        pickle.dump(batch, f, protocol=pickle.HIGHEST_PROTOCOL)
+        f.flush()
+        os.fsync(f.fileno())
 
     def _populate_cache_parallel(self):
+        self._tryload()
         logging.info("Populating process model cache...")
-        with ProcessPoolExecutor(max_workers=self.num_workers) as pool:
+        os.makedirs(self.save_path().parent, exist_ok=True)
+        with (
+            pebble.ProcessPool(max_workers=self.num_workers) as pool,
+            open(self.save_path(), "ab") as f,
+        ):
+            new_items = {}
             futures = {}
-            for cfg in self.configurations:
+            batch = {}
+            seen_hashes = set(self.items.keys())
+            scheduled = tqdm(total=len(self.configurations), desc="Scheduled")
+            discovered = tqdm(total=0, desc="Discovered")
+            written = tqdm(total=0, desc="Written")
+            for key, cfg in self.configurations.items():
                 (
                     method_name,
                     fn,
@@ -444,41 +469,55 @@ class ProcessModelDataset(
                     subset_idx,
                     subset,
                 ) = cfg
-                key = self._config_hash(
-                    method_name, params, sampler_serialized, subset_idx, subset
+                if key in seen_hashes:
+                    scheduled.total -= 1
+                    scheduled.update(0)
+                    continue
+                seen_hashes.add(key)
+                fut = pool.schedule(
+                    ProcessModelDataset._process_item,
+                    args=(cfg,),
+                    timeout=self.timeout,
                 )
-                path = self._cache_path(key)
-                if not path.exists():
-                    futures[
-                        pool.submit(
-                            ProcessModelDataset._discover_and_save, cfg, path
-                        )
-                    ] = (
-                        key,
-                        cfg,
-                    )
+                futures[fut] = (
+                    key,
+                    cfg,
+                )
+                discovered.total += 1
+                written.total += 1
+                scheduled.update(1)
 
-            for f in tqdm(
-                as_completed(futures),
-                total=len(futures),
-                desc="Caching discovered models",
-            ):
-                key, cfg = futures[f]
+            for fut in as_completed(futures):
+                key, cfg = futures[fut]
                 try:
-                    f.result()
-                    logging.debug("Cached model %s", key)
+                    item = fut.result()
+                    assert (
+                        item.hash() == key
+                    ), f"Hash mismatch: {item.hash()} != {key}: {item}"
+                    new_items[key] = item
+                    batch[key] = item
+                    discovered.update(1)
                 except Exception as e:
                     traceback.print_exc()
                     logging.error("Failed to cache %s: %s", key, e, cfg)
+                if len(batch) >= self.write_batch_size:
+                    ProcessModelDataset._flush_batch(f, batch)
+                    written.update(len(batch))
+                    batch.clear()
+            if batch:
+                ProcessModelDataset._flush_batch(f, batch)
+                written.update(len(batch))
+                batch.clear()
+
+        self.items.update(new_items)
+        self.index = list(self.items.keys())
 
         logging.info(
             "Cache population done (%d models).",
-            len(os.listdir(self.cache_dir)),
+            len(self.items),
         )
 
-    def _generate_configurations(self) -> dict[str, Any]:
-        configs = []
-        seen = set()
+    def _generate_configurations(self) -> None:
 
         # precompute sampler outputs once (they only depend on the log)
         precomputed_subsets = {
@@ -489,7 +528,7 @@ class ProcessModelDataset(
         precomputed_samplers = {
             s_name: sampler for s_name, sampler in self.sampler_specs.items()
         }
-
+        num_models = 0
         for method_name, fn in self.discovery_methods.items():
             # pick method-specific grid when present, else global grid
             method_grid = (
@@ -533,38 +572,40 @@ class ProcessModelDataset(
                 combos = [dict(zip(keys, vals)) for vals in product(*lists)]
 
             for params in combos:
-                params_key = tuple(sorted(params.items()))
                 for sampler_name, subsets in precomputed_subsets.items():
                     for subset_idx, subset in enumerate(subsets):
-                        sampler = precomputed_samplers[sampler_name]
-                        key = (
+                        if (
+                            self.max_models is not None
+                            and num_models >= self.max_models
+                        ):
+                            break
+                        sampler_serialized = precomputed_samplers[
+                            sampler_name
+                        ].serialize()
+                        key = ProcessModelDataset._config_hash(
                             method_name,
-                            sampler.hash(),
+                            params,
+                            sampler_serialized,
                             subset_idx,
-                            params_key,
+                            subset,
                         )
                         logging.debug(key)
-                        if key in seen:
+                        if key in self.configurations:
                             continue
-                        seen.add(key)
-                        configs.append(
-                            (
-                                method_name,
-                                fn,
-                                params,
-                                sampler.serialize(),
-                                subset_idx,
-                                subset,
-                            )
+                        num_models += 1
+                        self.configurations[key] = (
+                            method_name,
+                            fn,
+                            params,
+                            sampler_serialized,
+                            subset_idx,
+                            subset,
                         )
 
-        if self.max_models:
-            configs = configs[: self.max_models]
-
         logging.info(
-            "Total discovery configurations generated: %d", len(configs)
+            "Total discovery configurations generated: %d",
+            len(self.configurations),
         )
-        return configs
 
     @staticmethod
     def _safe_discover(
@@ -581,7 +622,7 @@ class ProcessModelDataset(
         return fn(log, **filtered)
 
     @staticmethod
-    def _discover_and_save(
+    def _process_item(
         cfg: tuple[
             str,
             Callable[..., tuple[PetriNet, Marking, Marking]],
@@ -590,12 +631,12 @@ class ProcessModelDataset(
             int,
             EventLog | Trace | pd.DataFrame,
         ],
-        save_path: Path,
-        return_item: bool = False,
-    ) -> SerializedItemType | None:
+    ) -> SerializedItemType:
         method_name, fn, params, sampler, subset_idx, subset = cfg
-        subset = _normalize_log_input(subset)
-        net, im, fm = ProcessModelDataset._safe_discover(fn, subset, params)
+        subset_log = _normalize_log_input(subset)
+        net, im, fm = ProcessModelDataset._safe_discover(
+            fn, subset_log, params
+        )
 
         item = ItemType(
             pm=net,
@@ -605,37 +646,26 @@ class ProcessModelDataset(
             parameters=params,
             sampler=sampler,
             subset_idx=subset_idx,
-            trace_indices=getattr(subset, "indices", None),
+            trace_indices=subset.indices,
         )
-        with open(save_path, "wb") as f:
-            pickle.dump(item.serialize(), f)
-        if return_item:
-            return item.serialize()
-        return None
+        return item.serialize()
 
     def __len__(self):
         return len(self.configurations)
 
     # --- skips deserialization for faster access ---
-    def _get_serialized(self, idx: int) -> SerializedItemType:
-        method_name, fn, params, sampler, subset_idx, subset = (
-            self.configurations[idx]
-        )
-        key = self._config_hash(
-            method_name, params, sampler, subset_idx, subset
-        )
-        path = self._cache_path(key)
+    def _get_serialized(self, idx: int | str) -> SerializedItemType:
+        if isinstance(idx, int):
+            key = self.index[idx]
+        else:
+            key = idx
+        if key in self.items:
+            return self.items[key]
+        print("keys: ", self.items.keys())
+        raise KeyError(key)
+        return self._process_item(self.configurations[key])
 
-        if self.cached and path.exists():
-            with open(path, "rb") as f:
-                data = pickle.load(f)
-                return data
-
-        return self._discover_and_save(
-            self.configurations[idx], path, return_item=True
-        )
-
-    def __getitem__(self, idx: int) -> ItemType:
+    def __getitem__(self, idx: int | str) -> ItemType:
         serialized_item = self._get_serialized(idx)
         return serialized_item.deserialize()
 
@@ -716,7 +746,7 @@ if __name__ == "__main__":
         sampler_specs={
             "variant_random": VariantRandomDistributionSampler(
                 seed=RNG.get_seed(),
-                n_subsets=1000,  # number of subsets: defines how often the log is sampled... basically
+                n_subsets=100,  # number of subsets: defines how often the log is sampled... basically
                 max_len_subset=100,
                 min_len_subset=10,  # max_length_subset: limits the possible length of each sample (what is fed to the discovery algorithm)
                 len_distribution=ExponentialSpec(

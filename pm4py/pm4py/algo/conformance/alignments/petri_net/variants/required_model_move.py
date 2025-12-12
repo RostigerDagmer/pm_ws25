@@ -504,7 +504,38 @@ def get_required_transitions(marking: Marking) -> Set[PetriNet.Transition]:
     return required_transitions
 
 
-def get_heuristic(marking: Marking, remaining_trace_labels: List[str], epsilon=STD_SYNC_COST) -> float:
+def get_label_from_sync_transition(t: PetriNet.Transition) -> Optional[str]:
+    """ Extracts the model activity label from a SyncNet transition label tuple/string. """
+    # SyncNet transition labels are typically: (ModelAct, >>), (ModelAct, LogAct), or just 'ModelAct' if manually set.
+    # construct_cost_aware uses: label = (t.label, skip) or (t1.label, t2.label)
+    lbl = t.label
+    if isinstance(lbl, tuple):
+        # Index 0 is usually the model transition label in PM4Py sync product construction
+        # (t1.name, t2.name) -> (t1.label, t2.label)
+        # Usually t1 is Model, t2 is Trace (or vice versa depending on args).
+        # Standard: construct(trace_net, ..., model_net, ...) might flip them.
+        # But 'construct' docs say: construct(pn1 (trace), ..., pn2 (model)).
+        # Actually PM4Py construct docs: pn1 is typically trace, pn2 is model?
+        # Let's rely on content. Skip is '>>'.
+
+        l1, l2 = lbl
+        if l1 == utils.SKIP and l2 == utils.SKIP: return None  # Tau
+        if l1 != utils.SKIP: return l1  # Assume pos 0 is Model?
+        # CAUTION: If pn1 is TraceNet, l1 is Trace Label.
+        # Check standard construction: construct(trace_net, ..., petri_net).
+        # pn1=Trace, pn2=Model.
+        # So l1=TraceLabel, l2=ModelLabel.
+        # IF t is Model Move: (>>, t_model). l1=>>, l2=ModelLabel.
+        # IF t is Sync: (t_trace, t_model). l1=Trace, l2=Model.
+
+        # We want the MODEL label for "Required Activities".
+        # If the transition is required in the MODEL, we need its Model Label.
+        if l2 != utils.SKIP: return l2
+        return None  # Only trace side? Shouldn't happen for model net traversal
+    return lbl
+
+
+def get_heuristic(marking: Marking, remaining_trace_labels: List[str], model_cost=10000, sync_cost=0) -> float:
     """
     Algorithm 3: HEURISTIC
     Calculates the MMR (Model Move Required) heuristic.
@@ -513,7 +544,19 @@ def get_heuristic(marking: Marking, remaining_trace_labels: List[str], epsilon=S
     required_trs = get_required_transitions(marking)
 
     # 2. Extract unique labels
-    required_labels = {t.label for t in required_trs if t.label is not None}
+    #required_labels = {t.label for t in required_trs if t.label is not None}
+    # EXTRACT MODEL LABELS correctly
+    required_labels = set()
+    for t in required_trs:
+        # These transitions come from SyncNet. We need their Model Activity.
+        # Based on standard construction: Label is (TraceLabel, ModelLabel).
+        # Model moves are (>>, ModelLabel). Sync are (TraceLabel, ModelLabel).
+        if isinstance(t.label, tuple) and len(t.label) == 2:
+            model_lbl = t.label[1]  # Assuming pos 1 is model
+            if model_lbl != utils.SKIP and model_lbl is not None:
+                required_labels.add(model_lbl)
+        elif isinstance(t.label, str) and t.label != utils.SKIP:
+            required_labels.add(t.label)
 
     # 3. Unique activities in remaining trace
     remaining_labels = set(remaining_trace_labels)
@@ -529,8 +572,7 @@ def get_heuristic(marking: Marking, remaining_trace_labels: List[str], epsilon=S
     # 6. Calculate Cost (Algorithm 3 Line 7)
     # Cost = |missing| * Cost(Model Move) + |sync_candidates| * Cost(Sync Move)
     # Admissibility: We use the cheapest possible cost for sync (0) and standard for model.
-    h_val = len(missing) * STD_MODEL_LOG_MOVE_COST + len(sync_candidates) * epsilon
-
+    h_val = len(missing) * model_cost + len(sync_candidates) * sync_cost
     return h_val
 
 
@@ -576,7 +618,7 @@ def get_alive_activities(net: PetriNet, initial_marking: Marking) -> Dict[Markin
                 alive_map[src] = new_alive
                 changed = True
 
-    return alive_map
+    return {str(m): alive for m, alive in alive_map.items()}
 
 
 # =============================================================================
@@ -593,36 +635,33 @@ def check_sr_model(net, marking, remaining_trace_labels):
     if not enabled:
         return False  # Deadlock in model, can't force model move
 
-    enabled_labels = {t.label for t in enabled if t.label is not None}
-    if not enabled_labels:
-        # If only silent transitions are enabled, we rely on standard A* behavior
-        # because SRModel compares with trace labels.
-        pass
+    enabled_model_labels = set()
+    for t in enabled:
+        # Extract Model Label from Sync Transition
+        if isinstance(t.label, tuple) and len(t.label) == 2:
+            lbl = t.label[1]  # Assuming pos 1 is Model
+            if lbl != utils.SKIP and lbl is not None:
+                enabled_model_labels.add(lbl)
 
-    # Intersection with ANY activity in the remaining trace
-    remaining_set = set(remaining_trace_labels)
+    if not enabled_model_labels: return False  # Only silent enabled, don't force
 
-    if not enabled_labels.isdisjoint(remaining_set):
-        return False  # There is a match, so we shouldn't force model move
+    # If NO enabled model activity appears ANYWHERE in remaining trace -> Force Model Move
+    if enabled_model_labels.isdisjoint(set(remaining_trace_labels)):
+        return True
+    return False
 
-    return True  # No match possible in future trace, force Model Move now
-
-
-def check_sr_log(marking, next_trace_label, alive_map):
+def check_sr_log(model_marking_str, next_trace_label, alive_activities_map):
     """
     Algorithm 7: LESSSTATESMODEL (SRLog)
     Returns True if we should SKIP Model Moves (i.e., Force Log Move).
     Condition: The next trace activity is NOT alive in the model from current state.
     """
-    if alive_map is None or marking not in alive_map:
+    if alive_activities_map is None or model_marking_str not in alive_activities_map:
         return False
 
-    alive_activities = alive_map[marking]
-
-    if next_trace_label not in alive_activities:
-        # The next activity in trace can NEVER be executed from here.
+        # If next trace activity is NOT alive in current model state -> Force Log Move
+    if next_trace_label not in alive_activities_map[model_marking_str]:
         return True
-
     return False
 
 
@@ -639,15 +678,17 @@ def run_greedy_search(sync_net, ini, fin, cost_function, skip, trace_labels):
     trace_idx = 0
     trace_len = len(trace_labels)
 
-    while True:
-        if curr_m == fin:
-            return curr_cost
+    for _ in range(len(sync_net.transitions) * 2 + trace_len):  # Safety limit
+        if curr_m == fin: return curr_cost
 
-        enabled_trans = utils.semantics.enabled_transitions(sync_net, curr_m)
-        candidates = []
+        enabled = utils.semantics.enabled_transitions(sync_net, curr_m)
+        if not enabled: return float('inf')
 
-        for t in enabled_trans:
-            move_cost = cost_function[t]
+        best = None
+        best_score = float('inf')
+
+        for t in enabled:
+            cost = cost_function[t]
             is_log = utils.__is_log_move(t, skip)
             is_model = utils.__is_model_move(t, skip)
 
@@ -655,29 +696,24 @@ def run_greedy_search(sync_net, ini, fin, cost_function, skip, trace_labels):
             if is_log:
                 new_idx += 1
             elif not is_model:
-                new_idx += 1  # Sync (assuming non-silent)
+                new_idx += 1
 
-            # Simplified heuristic for greedy: Remaining Trace Length * Standard Cost
-            # This pushes the greedy search towards finishing the trace
-            rem_len = trace_len - new_idx if new_idx < trace_len else 0
-            h = rem_len * STD_MODEL_LOG_MOVE_COST
+            # Greedy Score: Cost + (RemainingTrace * Penalty)
+            rem = trace_len - new_idx if new_idx < trace_len else 0
+            score = curr_cost + cost + (rem * 1000)
 
-            score = (curr_cost + move_cost) + h
-            new_m = utils.semantics.weak_execute(t, sync_net, curr_m)
-            candidates.append((score, new_m, move_cost, new_idx))
+            if score < best_score:
+                best_score = score
+                best = (t, new_idx, cost)
 
-        if not candidates:
+        if best:
+            t, new_idx, cost = best
+            curr_m = utils.semantics.weak_execute(t, sync_net, curr_m)
+            curr_cost += cost
+            trace_idx = new_idx
+        else:
             return float('inf')
-
-        candidates.sort(key=lambda x: x[0])
-        best = candidates[0]
-
-        curr_m = best[1]
-        curr_cost += best[2]
-        trace_idx = best[3]
-
-        if curr_cost > 1000000:  # Safety break
-            return float('inf')
+    return float('inf')
 
 
 def __search(
@@ -705,6 +741,13 @@ def __search(
     if enable_optimizations is None:
         enable_optimizations = True
 
+    h_model_cost = STD_MODEL_LOG_MOVE_COST
+    h_sync_cost = STD_SYNC_COST
+
+    # Try to infer real costs from cost_function sample
+    model_moves = [c for t, c in cost_function.items() if utils.__is_model_move(t, skip)]
+    if model_moves: h_model_cost = min(model_moves)
+
     # Build mapping to identify Model Marking from Sync Marking
     place_to_trace_index = utils.__build_place_to_trace_index(
         sync_net,
@@ -725,8 +768,10 @@ def __search(
                 else:
                     trace_idx = max(trace_idx, place_to_trace_index[p])
             else:
+                p_name = p.name
+                if isinstance(p.name, tuple): p_name = p.name[0]
                 model_m[p] = count
-        return model_m, trace_idx
+        return str(model_m), trace_idx, model_m
 
     # Greedy Upper Bound (Algorithm 9)
     upper_bound_cost = float('inf')
@@ -737,8 +782,8 @@ def __search(
             upper_bound_cost = float('inf')
 
     # Initial State
-    ini_model_m, ini_idx = split_marking(ini)
-    h0 = get_heuristic(ini_model_m, trace_labels[ini_idx:])
+    ini_m_str, ini_idx, ini_m_obj = split_marking(ini)
+    h0 = get_heuristic(ini_m_obj, trace_labels[ini_idx:], h_model_cost, h_sync_cost)
 
     ini_state = utils.SearchTuple(0 + h0, 0, h0, ini, None, None, None, True)
     open_set = [ini_state]
@@ -781,22 +826,25 @@ def __search(
         visited += 1
 
         # Context for Optimizations
-        curr_model_m, curr_trace_idx = split_marking(current_marking)
-        rem_trace = trace_labels[curr_trace_idx:]
+        curr_m_str, curr_idx, curr_m_obj = split_marking(curr.m)
+        rem_trace = trace_labels[curr_idx:]
 
         # Optimization: SRModel (Alg 6) - Force Model Moves?
-        force_model_move = False
+        force_model = False
+        force_log = False
         if enable_optimizations:
+            force_model = check_sr_model(sync_net, curr.m, rem_trace)
+            # Optimization: SRLog (Alg 7) - Force Log Moves?
+            if alive_activities_map and rem_trace:
+                # Check if next trace activity is alive in current model state
+                force_log = check_sr_log(curr_m_str, rem_trace[0], alive_activities_map)
             # Check on SyncNet but using model logic (enabled transitions)
             # We map Sync Marking -> Enabled Transitions -> Labels
-            force_model_move = check_sr_model(sync_net, current_marking, rem_trace)
 
-        # Optimization: SRLog (Alg 7) - Force Log Moves?
-        force_log_move = False
-        if enable_optimizations and alive_activities_map and rem_trace:
-            # Check if next trace activity is alive in current model state
-            next_act = rem_trace[0]
-            force_log_move = check_sr_log(curr_model_m, next_act, alive_activities_map)
+        # CONFLICT RESOLUTION: If both force, neither wins (fallback to A*)
+        if force_model and force_log:
+            force_model = False
+            force_log = False
 
         enabled_trans = copy(trans_empty_preset)
         for p in current_marking:
@@ -811,18 +859,10 @@ def __search(
             is_sync = not is_log and not is_model
 
             # Apply SRModel: If forced to move model, skip Log Moves
-            if force_model_move and is_log:
-                continue
+            if force_model and is_log: continue
 
-            # Apply SRLog: If forced to move log, skip Model Moves (and Sync, as Sync implies model move valid)
-            # SRLog says: Next trace activity is DEAD. So we MUST skip it (Log Move).
-            # Model cannot possibly match it now or later.
-            if force_log_move:
-                # We only allow Log Moves that consume the 'dead' activity?
-                # Actually, standard A* generates all neighbors.
-                # If we force log move, we should SKIP Model and Sync moves.
-                if is_model or is_sync:
-                    continue
+            # Apply SRLog: If forcing log move, skip model/sync
+            if force_log and (is_model or is_sync): continue
 
             cost = cost_function[t]
             traversed += 1
@@ -836,10 +876,9 @@ def __search(
             g = curr.g + cost
 
             # Calculate Heuristic
-            new_model_m, new_trace_idx = split_marking(new_marking)
-            new_rem_trace = trace_labels[new_trace_idx:]
+            new_m_str, new_idx, new_m_obj = split_marking(new_marking)
+            h = get_heuristic(new_m_obj, trace_labels[new_idx:], h_model_cost, h_sync_cost)
 
-            h = get_heuristic(new_model_m, new_rem_trace)
             new_f = g + h
 
             # Early Pruning

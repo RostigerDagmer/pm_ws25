@@ -37,6 +37,21 @@ discovery:
         args:
           mean: 5.0
           std: 2.0
+    - name: variant3
+      n_subsets: 20 # number of subsets to sample -> number of models that discovery can produce (per unique set of discovery parameters)
+      min_len_subset: 200 # minimum length of each subset
+      max_len_subset: 1000 # maximum length of each subset
+
+      len_distribution: # distribution prior for the length of each subset
+        type: Exponential
+        args:
+          rate: 0.0005
+
+      freq_distribution: # distribution prior for the frequency of each variant within a subset
+        type: Normal
+        args:
+          mean: 5.0
+          std: 2.0
     
   
 deduplication:
@@ -66,3 +81,7 @@ alignment:
       to: 20
     args:
       pick_random: true
+      noise_params:
+        p_insert: 0.05
+        p_delete: 0.02
+        p_swap: 0.05

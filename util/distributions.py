@@ -95,7 +95,13 @@ class WrappedExponential:
         ).exponential_(self.rate, generator=generator)
 
 
-DistParam = Union[CategoricalSpec, PoissonSpec, BernoulliDepthLinearSpec]
+DistParam = Union[
+    ExponentialSpec,
+    NormalSpec,
+    CategoricalSpec,
+    PoissonSpec,
+    BernoulliDepthLinearSpec,
+]
 
 
 def make_distribution(spec: DistParam, *, depth=None):
