@@ -4,16 +4,26 @@ Evaluation framework for alignment heuristic recommenders.
 
 from typing import Dict, Any, List, Union
 from dataclasses import dataclass, field
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import logging
+import json
 from collections import defaultdict
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support,
+    confusion_matrix,
+)
 
 from models.base import ClassificationModel
 from dataloaders.runs import RunDataset
-from models.utils import normalize_datasets, validate_aligner_consistency, iter_combined_datasets
+from models.utils import (
+    normalize_datasets,
+    validate_aligner_consistency,
+    iter_combined_datasets,
+)
 
 
 @dataclass
@@ -27,8 +37,12 @@ class EvaluationMetrics:
     class_labels: List[str]
 
     # Time performance metrics
-    mean_alignment_time_only: float  # Alignment time only (predicted heuristic)
-    mean_alignment_time_with_prediction: float  # Total: feature extraction + classification + alignment
+    mean_alignment_time_only: (
+        float  # Alignment time only (predicted heuristic)
+    )
+    mean_alignment_time_with_prediction: (
+        float  # Total: feature extraction + classification + alignment
+    )
     mean_optimal_alignment_time: float  # Fastest heuristic alignment time
     performance_ratio_alignment_only: float  # alignment_only / optimal
     performance_ratio_with_prediction: float  # with_prediction / optimal
@@ -94,20 +108,32 @@ class EvaluationMetrics:
                 f"F1={self.f1_per_class.get(label, 0):.2%}"
             )
 
-        lines.extend([
-            "",
-            "Prediction Timing:",
-            f"  Mean Total: {self.mean_prediction_time * 1000:.3f}ms",
-            f"  Mean Feature Extraction: {self.mean_feature_extraction_time * 1000:.3f}ms",
-            f"  Mean Classification: {self.mean_classification_time * 1000:.3f}ms",
-            "",
-            "Top 5 Important Features:",
-        ])
+        lines.extend(
+            [
+                "",
+                "Confusion Matrix:",
+                "(Rows: Actual/True labels, Columns: Predicted labels)",
+                "",
+            ]
+        )
+
+        # Format confusion matrix
+        lines.append(self._format_confusion_matrix())
+
+        lines.extend(
+            [
+                "",
+                "Prediction Timing:",
+                f"  Mean Total: {self.mean_prediction_time * 1000:.3f}ms",
+                f"  Mean Feature Extraction: {self.mean_feature_extraction_time * 1000:.3f}ms",
+                f"  Mean Classification: {self.mean_classification_time * 1000:.3f}ms",
+                "",
+                "Top 5 Important Features:",
+            ]
+        )
 
         sorted_features = sorted(
-            self.feature_importance.items(),
-            key=lambda x: x[1],
-            reverse=True
+            self.feature_importance.items(), key=lambda x: x[1], reverse=True
         )[:5]
         for fname, importance in sorted_features:
             lines.append(f"  {fname}: {importance:.4f}")
@@ -115,21 +141,66 @@ class EvaluationMetrics:
         lines.append("=" * 80)
         return "\n".join(lines)
 
+    def _format_confusion_matrix(self) -> str:
+        """Format confusion matrix as a readable table."""
+
+        def clean_and_abbreviate(label: str, max_len: int = 25) -> str:
+            cleaned = label.replace("VERSION_", "")
+            if len(cleaned) <= max_len:
+                return cleaned
+            return cleaned[:max_len]
+
+        labels = [clean_and_abbreviate(label) for label in self.class_labels]
+
+        # Calculate column widths
+        max_label_width = max(len(label) for label in labels)
+        col_width = max(max_label_width, 8)
+
+        # Header row
+        header = " " * max_label_width + "  "
+        header += "  ".join(f"{label:>{col_width}}" for label in labels)
+        header += "  " + f"{'TOTAL':>{col_width}}"
+
+        lines = [header]
+
+        # Data rows
+        for i, row_label in enumerate(labels):
+            row_sum = self.confusion_matrix[i].sum()
+            row = f"{row_label:<{max_label_width}}  "
+            row += "  ".join(
+                f"{self.confusion_matrix[i, j]:>{col_width}}"
+                for j in range(len(labels))
+            )
+            row += "  " + f"{row_sum:>{col_width}}"
+            lines.append(row)
+
+        # Total row
+        col_sums = self.confusion_matrix.sum(axis=0)
+        total_sum = self.confusion_matrix.sum()
+        total_row = f"{'TOTAL':<{max_label_width}}  "
+        total_row += "  ".join(
+            f"{col_sums[j]:>{col_width}}" for j in range(len(labels))
+        )
+        total_row += "  " + f"{total_sum:>{col_width}}"
+        lines.append(total_row)
+
+        return "\n".join(lines)
+
 
 class RecommenderEvaluator:
-    """ Evaluator for alignment heuristic recommenders."""
+    """Evaluator for alignment heuristic recommenders."""
 
     def __init__(
         self,
         classifier: ClassificationModel,
-        run_datasets: Union[RunDataset, List[RunDataset]]
+        run_datasets: Union[RunDataset, List[RunDataset]],
     ):
         self.classifier = classifier
         self.run_datasets = normalize_datasets(run_datasets)
         validate_aligner_consistency(self.run_datasets)
 
     def evaluate(self) -> EvaluationMetrics:
-        """ Evaluate classifier on run_datasets. """
+        """Evaluate classifier on run_datasets."""
         logging.info("Starting evaluation...")
 
         # Collect predictions and ground truth
@@ -146,8 +217,7 @@ class RecommenderEvaluator:
         heuristic_runs = defaultdict(list)
 
         for model, trace, results_dict in tqdm(
-            iter_combined_datasets(self.run_datasets),
-            desc="Evaluating"
+            iter_combined_datasets(self.run_datasets), desc="Evaluating"
         ):
             prediction = self.classifier.predict_heuristic(
                 model.pm, model.im, model.fm, trace
@@ -166,7 +236,12 @@ class RecommenderEvaluator:
             heuristic_times = {}
 
             for algo_name, (algo, item, perf_list) in results_dict.items():
-                durations = [p.duration for p in perf_list if p.duration is not None and p.duration != float('inf')]
+                durations = [
+                    p.duration for p in perf_list if p.duration is not None
+                ]
+                durations = [
+                    20.0 if dur == float('inf') else dur for dur in durations
+                ]  # set to timeout value. TODO: read this from the dataset
                 if durations:
                     mean_time = np.mean(durations)
                     heuristic_times[algo_name] = mean_time
@@ -187,7 +262,7 @@ class RecommenderEvaluator:
             actual_times.append(actual_time)
 
         accuracy = accuracy_score(y_true, y_pred)
-        
+
         unique_labels = sorted(set(y_true) | set(y_pred))
         precision, recall, f1, support = precision_recall_fscore_support(
             y_true, y_pred, labels=unique_labels, average=None, zero_division=0
@@ -207,9 +282,21 @@ class RecommenderEvaluator:
         mean_optimal = np.mean(optimal_times)
         mean_worst = np.mean(worst_times)
 
-        performance_ratio_alignment_only = mean_alignment_only / mean_optimal if mean_optimal > 0 else float('inf')
-        performance_ratio_with_pred = mean_alignment_with_pred / mean_optimal if mean_optimal > 0 else float('inf')
-        time_savings = (mean_worst - mean_alignment_only) / (mean_worst - mean_optimal) if (mean_worst - mean_optimal) > 0 else 0.0
+        performance_ratio_alignment_only = (
+            mean_alignment_only / mean_optimal
+            if mean_optimal > 0
+            else float('inf')
+        )
+        performance_ratio_with_pred = (
+            mean_alignment_with_pred / mean_optimal
+            if mean_optimal > 0
+            else float('inf')
+        )
+        time_savings = (
+            (mean_worst - mean_alignment_only) / (mean_worst - mean_optimal)
+            if (mean_worst - mean_optimal) > 0
+            else 0.0
+        )
 
         # Compute per-heuristic timing statistics
         heuristic_timings = {}
@@ -220,7 +307,7 @@ class RecommenderEvaluator:
                 'median': np.median(times),
                 'min': np.min(times),
                 'max': np.max(times),
-                'count': len(times)
+                'count': len(times),
             }
 
         # Get feature importance
@@ -252,43 +339,108 @@ class RecommenderEvaluator:
         return metrics
 
     def compare_with_baselines(
-        self,
-        baselines: List[ClassificationModel]
+        self, baselines: List[ClassificationModel]
     ) -> pd.DataFrame:
-        """ Compare classifier with baseline models."""
+        """Compare classifier with baseline models."""
         results = []
 
         main_metrics = self.evaluate()
-        results.append({
-            'model': self.classifier.__class__.__name__,
-            'accuracy': main_metrics.accuracy,
-            'performance_ratio_alignment_only': main_metrics.performance_ratio_alignment_only,
-            'performance_ratio_with_prediction': main_metrics.performance_ratio_with_prediction,
-            'mean_alignment_time_only': main_metrics.mean_alignment_time_only,
-            'mean_alignment_time_with_prediction': main_metrics.mean_alignment_time_with_prediction,
-            'mean_prediction_time': main_metrics.mean_prediction_time,
-        })
+        results.append(
+            {
+                'model': self.classifier.__class__.__name__,
+                'accuracy': main_metrics.accuracy,
+                'performance_ratio_alignment_only': main_metrics.performance_ratio_alignment_only,
+                'performance_ratio_with_prediction': main_metrics.performance_ratio_with_prediction,
+                'mean_alignment_time_only': main_metrics.mean_alignment_time_only,
+                'mean_alignment_time_with_prediction': main_metrics.mean_alignment_time_with_prediction,
+                'mean_prediction_time': main_metrics.mean_prediction_time,
+            }
+        )
 
         # Evaluate baselines
         for baseline in baselines:
-            logging.info(f"\nEvaluating baseline: {baseline.__class__.__name__}")
+            logging.info(
+                f"\nEvaluating baseline: {baseline.__class__.__name__}"
+            )
             evaluator = RecommenderEvaluator(baseline, self.run_datasets)
             baseline_metrics = evaluator.evaluate()
 
-            results.append({
-                'model': baseline.__class__.__name__,
-                'accuracy': baseline_metrics.accuracy,
-                'performance_ratio_alignment_only': baseline_metrics.performance_ratio_alignment_only,
-                'performance_ratio_with_prediction': baseline_metrics.performance_ratio_with_prediction,
-                'mean_alignment_time_only': baseline_metrics.mean_alignment_time_only,
-                'mean_alignment_time_with_prediction': baseline_metrics.mean_alignment_time_with_prediction,
-                'mean_prediction_time': baseline_metrics.mean_prediction_time,
-            })
+            results.append(
+                {
+                    'model': baseline.__class__.__name__,
+                    'accuracy': baseline_metrics.accuracy,
+                    'performance_ratio_alignment_only': baseline_metrics.performance_ratio_alignment_only,
+                    'performance_ratio_with_prediction': baseline_metrics.performance_ratio_with_prediction,
+                    'mean_alignment_time_only': baseline_metrics.mean_alignment_time_only,
+                    'mean_alignment_time_with_prediction': baseline_metrics.mean_alignment_time_with_prediction,
+                    'mean_prediction_time': baseline_metrics.mean_prediction_time,
+                }
+            )
 
         df = pd.DataFrame(results)
 
         # Add relative performance columns
-        df['relative_to_best_alignment_only'] = df['performance_ratio_alignment_only'] / df['performance_ratio_alignment_only'].min()
-        df['relative_to_best_with_prediction'] = df['performance_ratio_with_prediction'] / df['performance_ratio_with_prediction'].min()
+        df['relative_to_best_alignment_only'] = (
+            df['performance_ratio_alignment_only']
+            / df['performance_ratio_alignment_only'].min()
+        )
+        df['relative_to_best_with_prediction'] = (
+            df['performance_ratio_with_prediction']
+            / df['performance_ratio_with_prediction'].min()
+        )
 
         return df
+
+    @staticmethod
+    def save_results(
+        metrics: EvaluationMetrics,
+        comparison_df: pd.DataFrame,
+        output_dir: Path,
+        train_count: int,
+        test_count: int,
+    ):
+        """Save evaluation results to output directory."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save metrics as JSON
+        with open(output_dir / "metrics.json", 'w') as f:
+            metrics_dict = RecommenderEvaluator._convert_to_serializable(
+                metrics.to_dict()
+            )
+            json.dump(metrics_dict, f, indent=2)
+
+        # Save summary as txt
+        with open(output_dir / "summary.txt", 'w') as f:
+            f.write("ML CLASSIFIER EVALUATION SUMMARY\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(f"Train datasets: {train_count}\n")
+            f.write(f"Test datasets: {test_count}\n\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(metrics.summary())
+            f.write("\n\n" + "=" * 80 + "\n\n")
+            f.write("Baseline Comparison:\n")
+            f.write(comparison_df.to_string())
+
+        logging.info(f"Results saved to: {output_dir}")
+
+    @staticmethod
+    def _convert_to_serializable(obj):
+        """Convert numpy types to Python native types for JSON serialization."""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {
+                key: RecommenderEvaluator._convert_to_serializable(value)
+                for key, value in obj.items()
+            }
+        elif isinstance(obj, list):
+            return [
+                RecommenderEvaluator._convert_to_serializable(item)
+                for item in obj
+            ]
+        return obj

@@ -161,7 +161,7 @@ class ClassificationModel(ABC):
         """Compute cache key from datasets, feature extractor, and hyperparameters."""
         key_data = {
             'dataset_hashes': (
-                sorted([ds.hash() for ds in self.run_datasets])
+                sorted([ds.log_uuid for ds in self.run_datasets])
                 if self.run_datasets
                 else []
             ),

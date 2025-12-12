@@ -30,6 +30,10 @@ class BaseEventLogDataset(Dataset):
             self.log, variant=log_converter.Variants.TO_EVENT_LOG
         )
 
+    @property
+    def log_uuid(self) -> str:
+        return self.source_path.split("/")[-2]
+
     def _load_log(self, source_path, **kwargs):
         raise NotImplementedError
 

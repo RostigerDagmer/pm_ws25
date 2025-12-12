@@ -83,23 +83,19 @@ class ItemType(Serializable["SerializedItemType"]):
         return self.stnet.fm
 
     def hash(self) -> str:
-        return hashlib.sha1(
-            json.dumps(self.params, sort_keys=True, default=asdict).encode()
-        ).hexdigest()
+        return SyntheticProcessModelDataset._hash_config(self.params)
 
     def serialize(self) -> "SerializedItemType":
-        return SerializedItemType(self.params, self.stnet.to_tensor())
+        return SerializedItemType(self.stnet.to_tensor(), self.params)
 
 
 @dataclass
 class SerializedItemType(Deserializable[ItemType]):
-    params: dict
     net: TensorNet
+    params: dict
 
     def hash(self) -> str:
-        return hashlib.sha1(
-            json.dumps(self.params, sort_keys=True, default=asdict).encode()
-        ).hexdigest()
+        return SyntheticProcessModelDataset._hash_config(self.params)
 
     def deserialize(self) -> ItemType:
         stnet = StructuredNet.from_tensor(self.net)
@@ -127,6 +123,10 @@ class SyntheticProcessModelDataset(
             for params, reps in param_grid
             for i, p in enumerate([params] * reps)
         ]
+        self.index = {
+            self._hash_config(cfg): i
+            for i, cfg in enumerate(self.configurations)
+        }
         self.max_models = max_models
         self.cached = cached
         self.cache_dir = cache_dir
@@ -135,6 +135,16 @@ class SyntheticProcessModelDataset(
             num_workers if num_workers > 0 else os.cpu_count() or 1
         )
 
+    @property
+    def log_uuid(self) -> str:
+        return "synthetic"
+
+    @staticmethod
+    def _hash_config(cfg: dict) -> str:
+        return hashlib.sha1(
+            json.dumps(cfg, sort_keys=True, default=asdict).encode()
+        ).hexdigest()
+
     def __len__(self):
         return len(self.configurations)
 
@@ -142,24 +152,24 @@ class SyntheticProcessModelDataset(
         for i in range(len(self)):
             yield self[i]
 
-    def _get_serialized(self, idx: int) -> SerializedItemType:
+    def _get_serialized(self, idx: int | str) -> SerializedItemType:
         return self[idx].serialize()
 
-    def __getitem__(self, idx: int) -> ItemType:
-        cfg = {
-            k: v for k, v in self.configurations[idx].items() if k != 'index'
-        }
+    def __getitem__(self, idx: int | str) -> ItemType:
+        if isinstance(idx, str):
+            config_hash = idx
+            idx = self.index[idx]
+        else:
+            config_hash = self._hash_config(self.configurations[idx])
+
+        config = self.configurations[idx]
+        cfg = {k: v for k, v in config.items() if k != 'index'}
         # combine seed from rng and index
-        config_hash = hashlib.sha1(
-            json.dumps(
-                self.configurations[idx], sort_keys=True, default=asdict
-            ).encode()
-        ).hexdigest()
         sample_seed = (RNG.get_seed() + int(config_hash, 16)) % 2**32
         model = models.sample_net(
             generator=torch.Generator().manual_seed(sample_seed), **cfg
         )
-        return ItemType(model, self.configurations[idx])
+        return ItemType(model, config)
 
     def hash(self) -> str:
         # global hash of all params

@@ -170,7 +170,7 @@ if __name__ == "__main__":
         run_dataset.serialized,
         batch_size=512,
         shuffle=False,
-        num_workers=4,  # cfg.alignment.workers if cfg.alignment.workers > 0 else os.cpu_count(),
+        num_workers=4,
         persistent_workers=True,
         collate_fn=collate,
     )
@@ -199,7 +199,7 @@ if __name__ == "__main__":
     if not np.isclose(total_ratio, 1.0):
         raise ValueError(f"Split ratios must sum to 1.0 (got {total_ratio})")
 
-    base = run_dataset.save_path().with_suffix('')
+    base = run_dataset.save_path.with_suffix('')
     train_df, test_df, eval_df = split_dataframes(
         labels, args.train, args.test
     )
