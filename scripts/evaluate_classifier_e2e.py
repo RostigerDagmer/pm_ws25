@@ -182,28 +182,31 @@ if __name__ == "__main__":
         force_retrain=True,
     )
 
-    logging.info("\nLoading test RunDatasets (using cached alignment runs)...")
-    test_run_datasets = []
-    for dataset_uuid, files in TEST_DATASETS.items():
-        for filename in files:
-            logging.info(f"Loading: {filename}")
-            run_dataset = get_natural_dataset(
-                str(Path("data") / dataset_uuid / filename),
-                config_path,
-                cache_path,
-                use_cache=True,  # Use cached alignment runs for speed
-            )
-            if run_dataset is not None:
-                test_run_datasets.append(run_dataset)
-                logging.info(f"  ✓ Loaded {len(run_dataset)} runs from cache")
+    # Test data now uses pre-computed CSV files (loaded in test_tables above)
+    # Old approach (loading from XES files) is commented out:
+    # logging.info("\nLoading test RunDatasets (using cached alignment runs)...")
+    # test_run_datasets = []
+    # for dataset_uuid, files in TEST_DATASETS.items():
+    #     for filename in files:
+    #         logging.info(f"Loading: {filename}")
+    #         run_dataset = get_natural_dataset(
+    #             str(Path("data") / dataset_uuid / filename),
+    #             config_path,
+    #             cache_path,
+    #             use_cache=True,  # Use cached alignment runs for speed
+    #         )
+    #         if run_dataset is not None:
+    #             test_run_datasets.append(run_dataset)
+    #             logging.info(f"  ✓ Loaded {len(run_dataset)} runs from cache")
+    #
+    # test_run_datasets.append(
+    #     get_synthetic_dataset(Path(cache_path), seed=SEED + 1, count=4)
+    # )
 
-    test_run_datasets.append(
-        get_synthetic_dataset(Path(cache_path), seed=SEED + 1, count=4)
-    )
-    # Evaluate
-    logging.info("\nEvaluating on test datasets...")
+    # Evaluate using test tables (CSV files)
+    logging.info(f"\nEvaluating on {len(test_tables)} test datasets...")
     evaluator = RecommenderEvaluator(
-        classifier=classifier, run_datasets=test_run_datasets
+        classifier=classifier, tables=test_tables
     )
 
     metrics = evaluator.evaluate()
@@ -218,5 +221,5 @@ if __name__ == "__main__":
         comparison_df=comparison_df,
         output_dir=OUTPUT_DIR,
         train_count=len(train_tables),
-        test_count=len(test_run_datasets),
+        test_count=len(test_tables),
     )

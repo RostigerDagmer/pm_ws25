@@ -14,8 +14,7 @@ This guide shows you how to:
 cd ~/pm_ws25
 sbatch lrz-cluster/run_create_labels_synthetic.slurm
 
-# Step 2: Combine with real data and train classifier
-# (Edit scripts/evaluate_classifier_e2e.py first - see below)
+# Step 2: Train classifier (automatic hybrid training - no config needed!)
 sbatch lrz-cluster/run_evaluate_classifier.slurm
 ```
 
@@ -83,90 +82,113 @@ python scripts/create_labels_synthetic.py \
 
 ---
 
-## Step 2: Combine Synthetic + Real Data for Training
+## Step 2: Train Classifier with Hybrid Data
 
-The synthetic CSV files use the **same format** as real XES-based CSV files, so you can mix them!
+### 2.1: Generate CSV Files First!
 
-### 2.1: Find Your CSV File Paths
+**You need CSV files before training.** Two scripts available:
 
-**Real data** (already exists):
+**A) For Synthetic Data (already done in Step 1):**
 ```bash
-ls ~/pm_ws25/data/runs/*.train.csv
+python scripts/create_labels_synthetic.py \
+    --config configs/default.yaml \
+    --n-models 200 \
+    --n-traces 50 \
+    --runs 10 \
+    --workers 64
+
+# Output → data/runs_synthetic/*.csv
 ```
 
-**Synthetic data** (after Step 1):
+**B) For Real Data (from XES files):**
 ```bash
-ls ~/pm_ws25/data/runs_synthetic/*.train.csv
+# Convert your XES event logs to CSV format
+sbatch lrz-cluster/run_create_labels.slurm
+
+# Output → data/runs/*.csv
 ```
 
-### 2.2: Edit the Training Script
+### 2.2: Verify Your Data
 
-Open [scripts/evaluate_classifier_e2e.py](scripts/evaluate_classifier_e2e.py) and find the `TRAIN_DATASETS` section (around lines 51-86):
+Check what CSV files you have:
 
-**Before (real data only):**
-```python
-TRAIN_DATASETS = {
-    'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
-    '63a8435a-077d-4ece-97cd-2c76d394d99c': ['BPIC15_2.xes'],
-    # ... more real datasets
-}
-```
-
-**After (hybrid: real + synthetic):**
-```python
-TRAIN_DATASETS = {
-    # Real XES-based datasets
-    'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
-    '63a8435a-077d-4ece-97cd-2c76d394d99c': ['BPIC15_2.xes'],
-
-    # Synthetic datasets (add the hash from your data/runs_synthetic/)
-    'runs_synthetic': ['<your_synthetic_hash>'],  # e.g., '3ae76aaddcd2...'
-}
-```
-
-**To find the synthetic hash:**
 ```bash
-cd ~/pm_ws25/data/runs_synthetic
-ls *.train.csv | cut -d'.' -f1
-# Copy the hash that appears (e.g., 3ae76aaddcd2a994b31497c8196e88630295c1ef)
+# Real data (if generated)
+ls -lh data/runs/*.train.csv
+ls -lh data/runs/*.test.csv
+
+# Synthetic data (from Step 1)
+ls -lh data/runs_synthetic/*.train.csv
+ls -lh data/runs_synthetic/*.test.csv
 ```
 
-### 2.3: Update the Data Loading Logic
-
-In the same file, find the data loading section and ensure it can handle the `runs_synthetic` directory:
-
-```python
-# Around line 120-140
-def load_training_data():
-    all_train_dfs = []
-
-    for dataset_dir, filenames in TRAIN_DATASETS.items():
-        for filename in filenames:
-            # Handle both regular and synthetic data paths
-            if dataset_dir == 'runs_synthetic':
-                base_path = Path(f"data/runs_synthetic")
-            else:
-                base_path = Path(f"data/runs")
-
-            # Find the CSV file
-            csv_file = list(base_path.glob(f"*{filename.replace('.xes', '')}*.train.csv"))
-            if csv_file:
-                df = pd.read_csv(csv_file[0])
-                all_train_dfs.append(df)
-
-    return pd.concat(all_train_dfs, ignore_index=True)
+**Example:**
+```
+data/runs/3ae76aa...train.csv           5.1M  (52,896 samples)
+data/runs/3ae76aa...test.csv            1.5M  (15,226 samples)
+data/runs_synthetic/synthetic.train.csv  39K     (61 samples)
+data/runs_synthetic/synthetic.test.csv   11K     (17 samples)
 ```
 
-### 2.4: Train the Classifier
+### 2.3: Train the Classifier - No Configuration Needed! 🎉
+
+**Automatic hybrid training** - just run:
 
 ```bash
 sbatch lrz-cluster/run_evaluate_classifier.slurm
 ```
 
-**The classifier will now train on:**
-- Real process models from XES files
-- Synthetic process models
-- Combined feature space
+**What happens automatically:**
+
+1. **Searches 3 locations** for CSV files:
+   - `cache/.runs/` (alternative cache)
+   - `data/runs/` (real data from XES)
+   - `data/runs_synthetic/` (synthetic data)
+
+2. **Loads and combines** all `*.train.csv` and `*.test.csv` files
+
+3. **Trains on combined dataset** - real + synthetic together!
+
+**Example log output:**
+```
+INFO: Loading pre-computed CSV tables...
+INFO:   Searching in: cache/.runs
+INFO:     Found: 0 train, 0 test, 0 eval tables
+INFO:   Searching in: data/runs
+INFO:     Found: 1 train, 1 test, 1 eval tables
+INFO:   Searching in: data/runs_synthetic
+INFO:     Found: 1 train, 1 test, 1 eval tables
+INFO: Training XGBoostClassifier...
+INFO: Total: 52,957 training samples (52,896 real + 61 synthetic)
+INFO: Evaluating on 2 test datasets...
+```
+
+### 2.4: Training Scenarios
+
+**Scenario A: Synthetic Only**
+- Run: `create_labels_synthetic.py` only
+- Training: ~61 samples
+- Use case: Quick testing, pipeline validation
+
+**Scenario B: Real Only**
+- Run: `create_labels.py` only
+- Training: ~52,896 samples
+- Use case: Standard training on real data
+
+**Scenario C: Hybrid (Recommended)** ✅
+- Run: Both scripts
+- Training: ~52,957 samples (52,896 + 61)
+- Use case: Best generalization, combines real patterns + synthetic diversity
+
+### 2.5: Important Notes
+
+⚠️ **No manual configuration needed!** The old `TRAIN_DATASETS` and `TEST_DATASETS` dictionaries in [scripts/evaluate_classifier_e2e.py](scripts/evaluate_classifier_e2e.py) are **no longer used**.
+
+✅ **Fully automatic discovery** - just place CSV files in:
+- `data/runs/` (for real data)
+- `data/runs_synthetic/` (for synthetic data)
+
+✅ **Both train and test data** use CSV files now - no more loading from XES during evaluation
 
 ---
 
@@ -193,22 +215,24 @@ Training on hybrid data:         → 5,678 samples, 85% accuracy ✓
 pm_ws25/
 ├── scripts/
 │   ├── create_labels_synthetic.py           # Generate synthetic data
-│   └── evaluate_classifier_e2e.py           # Train classifier (edit this!)
+│   ├── create_labels.py                     # Generate real data from XES
+│   └── evaluate_classifier_e2e.py           # Train classifier (automatic discovery!)
 │
 ├── lrz-cluster/
 │   ├── run_create_labels_synthetic.slurm    # Synthetic generation job (64 CPUs)
+│   ├── run_create_labels.slurm              # Real data generation job
 │   └── run_evaluate_classifier.slurm        # Training job
 │
 └── data/
-    ├── runs/                                 # Real XES-based data
-    │   ├── <hash>.train.csv
+    ├── runs/                                 # Real XES-based data (from create_labels.py)
+    │   ├── <hash>.train.csv                  # ← Automatically discovered!
     │   ├── <hash>.test.csv
     │   └── <hash>.eval.csv
     │
-    └── runs_synthetic/                       # Synthetic data
-        ├── <hash>.train.csv                  # ← Add this to TRAIN_DATASETS!
-        ├── <hash>.test.csv
-        └── <hash>.eval.csv
+    └── runs_synthetic/                       # Synthetic data (from create_labels_synthetic.py)
+        ├── synthetic.train.csv               # ← Automatically discovered!
+        ├── synthetic.test.csv
+        └── synthetic.eval.csv
 ```
 
 ---
@@ -251,17 +275,20 @@ sbatch lrz-cluster/run_create_labels_synthetic.slurm  # ✓
 #SBATCH --cpus-per-task=96   # Use more CPUs if available
 ```
 
-### Problem: Can't find synthetic CSV hash
+### Problem: CSV files not found by classifier
 
-**Solution:**
+**Solution:** Check that CSV files are in the correct locations:
 ```bash
-# List all synthetic hashes:
-ls data/runs_synthetic/*.train.csv | xargs -n1 basename | cut -d'.' -f1
+# Check real data:
+ls -lh data/runs/*.train.csv
 
-# Or just use the whole path in TRAIN_DATASETS:
-TRAIN_DATASETS = {
-    'runs_synthetic': ['any_identifier'],  # The script will find it
-}
+# Check synthetic data:
+ls -lh data/runs_synthetic/*.train.csv
+
+# Classifier searches these 3 locations automatically:
+# - cache/.runs/
+# - data/runs/
+# - data/runs_synthetic/
 ```
 
 ---
@@ -332,14 +359,14 @@ After generating hybrid data:
 
 **Complete workflow:**
 ```bash
-# 1. Generate synthetic data (~75-80 min with 64 CPUs)
+# 1. Generate synthetic data (~1 min with cache, ~75-80 min without)
 cd ~/pm_ws25
 sbatch lrz-cluster/run_create_labels_synthetic.slurm
 
-# 2. Edit evaluate_classifier_e2e.py to include synthetic CSV
-# Add synthetic hash to TRAIN_DATASETS (see Step 2.2)
+# 2. (Optional) Generate real data CSV if not already done
+sbatch lrz-cluster/run_create_labels.slurm
 
-# 3. Train with hybrid data (1 hour)
+# 3. Train with automatic hybrid data discovery
 sbatch lrz-cluster/run_evaluate_classifier.slurm
 
 # 4. Compare results
