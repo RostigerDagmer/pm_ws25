@@ -10,7 +10,7 @@ This guide shows you how to:
 ## Quick Start
 
 ```bash
-# Step 1: Generate synthetic training data (~15-20 minutes with 64 CPUs)
+# Step 1: Generate synthetic training data (~75-80 minutes with 64 CPUs)
 cd ~/pm_ws25
 sbatch lrz-cluster/run_create_labels_synthetic.slurm
 
@@ -37,7 +37,7 @@ sbatch lrz-cluster/run_create_labels_synthetic.slurm
 - Uses 64 parallel workers for fast processing
 - Creates train/test/eval CSV splits
 - Saves to `data/runs_synthetic/`
-- **Estimated time: 15-20 minutes**
+- **Estimated time: 75-80 minutes (~1.3 hours)**
 
 **Expected output:**
 ```
@@ -72,7 +72,7 @@ python scripts/create_labels_synthetic.py \
     --n-traces 100 \        # More traces → better coverage
     --min-depth 2 \         # Deeper models → more complex
     --max-depth 4 \
-    --runs 20 \             # More runs → more stable timing
+    --runs 10 \             # More runs → more stable timing (default: 10)
     --workers 64            # Use all 64 CPUs for maximum speed
 ```
 
@@ -332,7 +332,7 @@ After generating hybrid data:
 
 **Complete workflow:**
 ```bash
-# 1. Generate synthetic data (15-20 min with 64 CPUs)
+# 1. Generate synthetic data (~75-80 min with 64 CPUs)
 cd ~/pm_ws25
 sbatch lrz-cluster/run_create_labels_synthetic.slurm
 
