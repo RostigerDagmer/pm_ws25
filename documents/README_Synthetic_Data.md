@@ -10,47 +10,20 @@ This guide shows you how to:
 ## Quick Start
 
 ```bash
-# Step 1: Test that synthetic data generation works (10 minutes)
-sbatch lrz-cluster/test_synthetic.slurm
-
-# Step 2: Generate synthetic training data (2-4 hours)
+# Step 1: Generate synthetic training data (~15-20 minutes with 64 CPUs)
+cd ~/pm_ws25
 sbatch lrz-cluster/run_create_labels_synthetic.slurm
 
-# Step 3: Combine with real data and train classifier
+# Step 2: Combine with real data and train classifier
 # (Edit scripts/evaluate_classifier_e2e.py first - see below)
 sbatch lrz-cluster/run_evaluate_classifier.slurm
 ```
 
 ---
 
-## Step 1: Test Synthetic Data Generation
+## Step 1: Generate Synthetic Training Data
 
-Before generating the full dataset, verify your environment works:
-
-```bash
-cd ~/pm_ws25
-sbatch lrz-cluster/test_synthetic.slurm
-```
-
-**Check the output:**
-```bash
-cat logs/test_synthetic_<jobid>.out
-```
-
-You should see:
-```
-✓ All imports successful
-✓ RNG initialized with seed 42
-✓ Created synthetic model
-✓ Created dataset with 10 models
-✓ All tests passed!
-```
-
----
-
-## Step 2: Generate Synthetic Training Data
-
-### 2.1: Submit the Job
+### 1.1: Submit the Job
 
 ```bash
 cd ~/pm_ws25
@@ -60,9 +33,11 @@ sbatch lrz-cluster/run_create_labels_synthetic.slurm
 **What it does:**
 - Generates 200 synthetic process models (3 configurations)
 - Simulates 50 traces per model
-- Runs alignment benchmarks (100 runs per model-trace combo)
+- Runs alignment benchmarks (10 runs per model-trace combo)
+- Uses 64 parallel workers for fast processing
 - Creates train/test/eval CSV splits
 - Saves to `data/runs_synthetic/`
+- **Estimated time: 15-20 minutes**
 
 **Expected output:**
 ```
@@ -74,7 +49,7 @@ data/runs_synthetic/
   └── <hash>.labels.csv (best aligners, ~5 MB)
 ```
 
-### 2.2: Monitor Progress
+### 1.2: Monitor Progress
 
 ```bash
 # Check job status
@@ -87,7 +62,7 @@ tail -f logs/create_labels_synthetic_*.out
 ls -lh data/runs_synthetic/*.train.csv
 ```
 
-### 2.3: Customize Parameters (Optional)
+### 1.3: Customize Parameters (Optional)
 
 Edit [lrz-cluster/run_create_labels_synthetic.slurm](lrz-cluster/run_create_labels_synthetic.slurm):
 
@@ -97,8 +72,8 @@ python scripts/create_labels_synthetic.py \
     --n-traces 100 \        # More traces → better coverage
     --min-depth 2 \         # Deeper models → more complex
     --max-depth 4 \
-    --runs 200 \            # More runs → more stable timing
-    --workers 16
+    --runs 20 \             # More runs → more stable timing
+    --workers 64            # Use all 64 CPUs for maximum speed
 ```
 
 **Trade-offs:**
@@ -108,23 +83,23 @@ python scripts/create_labels_synthetic.py \
 
 ---
 
-## Step 3: Combine Synthetic + Real Data for Training
+## Step 2: Combine Synthetic + Real Data for Training
 
 The synthetic CSV files use the **same format** as real XES-based CSV files, so you can mix them!
 
-### 3.1: Find Your CSV File Paths
+### 2.1: Find Your CSV File Paths
 
 **Real data** (already exists):
 ```bash
 ls ~/pm_ws25/data/runs/*.train.csv
 ```
 
-**Synthetic data** (after Step 2):
+**Synthetic data** (after Step 1):
 ```bash
 ls ~/pm_ws25/data/runs_synthetic/*.train.csv
 ```
 
-### 3.2: Edit the Training Script
+### 2.2: Edit the Training Script
 
 Open [scripts/evaluate_classifier_e2e.py](scripts/evaluate_classifier_e2e.py) and find the `TRAIN_DATASETS` section (around lines 51-86):
 
@@ -156,7 +131,7 @@ ls *.train.csv | cut -d'.' -f1
 # Copy the hash that appears (e.g., 3ae76aaddcd2a994b31497c8196e88630295c1ef)
 ```
 
-### 3.3: Update the Data Loading Logic
+### 2.3: Update the Data Loading Logic
 
 In the same file, find the data loading section and ensure it can handle the `runs_synthetic` directory:
 
@@ -182,7 +157,7 @@ def load_training_data():
     return pd.concat(all_train_dfs, ignore_index=True)
 ```
 
-### 3.4: Train the Classifier
+### 2.4: Train the Classifier
 
 ```bash
 sbatch lrz-cluster/run_evaluate_classifier.slurm
@@ -217,13 +192,11 @@ Training on hybrid data:         → 5,678 samples, 85% accuracy ✓
 ```
 pm_ws25/
 ├── scripts/
-│   ├── test_synthetic.py                    # Test script
 │   ├── create_labels_synthetic.py           # Generate synthetic data
 │   └── evaluate_classifier_e2e.py           # Train classifier (edit this!)
 │
 ├── lrz-cluster/
-│   ├── test_synthetic.slurm                 # Test job
-│   ├── run_create_labels_synthetic.slurm    # Synthetic generation job
+│   ├── run_create_labels_synthetic.slurm    # Synthetic generation job (64 CPUs)
 │   └── run_evaluate_classifier.slurm        # Training job
 │
 └── data/
@@ -258,7 +231,7 @@ sbatch lrz-cluster/run_create_labels_synthetic.slurm  # ✓
 **Solution:** Reduce models or increase memory:
 ```bash
 # In run_create_labels_synthetic.slurm:
-#SBATCH --mem=64G  # Increase from 32G
+#SBATCH --mem=256G  # Increase from 128G
 
 # Or reduce data size:
 --n-models 100 \   # Reduce from 200
@@ -267,11 +240,15 @@ sbatch lrz-cluster/run_create_labels_synthetic.slurm  # ✓
 
 ### Problem: Synthetic data generation too slow
 
-**Solution:** Reduce complexity:
+**Solution:** Reduce complexity or increase workers:
 ```bash
+# Reduce complexity:
 --max-depth 2 \    # Simpler models
---runs 50 \        # Fewer alignment runs
+--runs 5 \         # Fewer alignment runs (currently 10)
 --n-traces 20      # Fewer traces
+
+# Or increase parallelism:
+#SBATCH --cpus-per-task=96   # Use more CPUs if available
 ```
 
 ### Problem: Can't find synthetic CSV hash
@@ -355,18 +332,17 @@ After generating hybrid data:
 
 **Complete workflow:**
 ```bash
-# 1. Test (10 min)
-sbatch lrz-cluster/test_synthetic.slurm
-
-# 2. Generate synthetic data (2-4 hours)
+# 1. Generate synthetic data (15-20 min with 64 CPUs)
+cd ~/pm_ws25
 sbatch lrz-cluster/run_create_labels_synthetic.slurm
 
-# 3. Edit evaluate_classifier_e2e.py to include synthetic CSV
+# 2. Edit evaluate_classifier_e2e.py to include synthetic CSV
+# Add synthetic hash to TRAIN_DATASETS (see Step 2.2)
 
-# 4. Train with hybrid data (1 hour)
+# 3. Train with hybrid data (1 hour)
 sbatch lrz-cluster/run_evaluate_classifier.slurm
 
-# 5. Compare results
+# 4. Compare results
 cat outputs/evaluate_classifier/summary.txt
 ```
 
