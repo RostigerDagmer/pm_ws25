@@ -4,8 +4,8 @@
 #SBATCH --partition=serial_std
 #SBATCH --time=04:00:00                 # 4 hours for full evaluation
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16              # 16 CPUs for parallel alignment workers
-#SBATCH --mem=64G                       # 64GB RAM for large datasets and model training
+#SBATCH --cpus-per-task=64              # 64 CPUs for parallel alignment workers
+#SBATCH --mem=128G                       # 128GB RAM for large datasets and model training
 #SBATCH -o logs/eval_classifier_%j.out  # %j = Job ID
 #SBATCH -e logs/eval_classifier_%j.err  # Error logs
 # SBATCH --mail-type=END,FAIL           # Email notification (optional)
