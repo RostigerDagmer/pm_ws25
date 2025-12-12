@@ -58,20 +58,26 @@ echo ""
 # ====================================
 
 echo "Checking for required data files..."
-TRAIN_FILES=$(find data/runs -name "*.train.csv" 2>/dev/null | wc -l)
-TEST_FILES=$(find data/runs -name "*.test.csv" 2>/dev/null | wc -l)
-EVAL_FILES=$(find data/runs -name "*.eval.csv" 2>/dev/null | wc -l)
+# Search in all 3 locations that the Python script uses
+TRAIN_FILES=$(find cache/.runs data/runs data/runs_synthetic -name "*.train.csv" 2>/dev/null | wc -l)
+TEST_FILES=$(find cache/.runs data/runs data/runs_synthetic -name "*.test.csv" 2>/dev/null | wc -l)
+EVAL_FILES=$(find cache/.runs data/runs data/runs_synthetic -name "*.eval.csv" 2>/dev/null | wc -l)
 
-echo "Found:"
-echo "  - Train files: $TRAIN_FILES"
+# Count by location for detailed reporting
+REAL_TRAIN=$(find data/runs -name "*.train.csv" 2>/dev/null | wc -l)
+SYNTHETIC_TRAIN=$(find data/runs_synthetic -name "*.train.csv" 2>/dev/null | wc -l)
+
+echo "Found (across cache/.runs, data/runs, data/runs_synthetic):"
+echo "  - Train files: $TRAIN_FILES ($REAL_TRAIN real + $SYNTHETIC_TRAIN synthetic)"
 echo "  - Test files:  $TEST_FILES"
 echo "  - Eval files:  $EVAL_FILES"
 echo ""
 
 if [ "$TRAIN_FILES" -eq 0 ] || [ "$TEST_FILES" -eq 0 ]; then
-    echo "ERROR: No training/test data found in data/runs/"
-    echo "Please run create_labels job array first to generate labeled datasets."
-    echo "Expected files: data/runs/**/*.{train,test,eval}.csv"
+    echo "ERROR: No training/test data found!"
+    echo "Please run one or both:"
+    echo "  - sbatch lrz-cluster/run_create_labels.slurm (for real data)"
+    echo "  - sbatch lrz-cluster/run_create_labels_synthetic.slurm (for synthetic data)"
     exit 1
 fi
 
