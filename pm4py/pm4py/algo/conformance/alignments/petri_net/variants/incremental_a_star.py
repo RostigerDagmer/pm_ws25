@@ -37,6 +37,7 @@ References
 import heapq
 import sys
 import time
+import logging
 from copy import copy
 from enum import Enum
 from typing import Optional, Dict, Any, Union, Tuple
@@ -70,6 +71,8 @@ from pm4py.util import variants_util
 from pm4py.util.constants import PARAMETER_CONSTANT_ACTIVITY_KEY
 from pm4py.util.lp import solver as lp_solver
 from pm4py.util.xes_constants import DEFAULT_NAME_KEY
+
+logger = logging.getLogger(__name__)
 
 
 class Parameters(Enum):
@@ -668,12 +671,14 @@ def _eme_solve_inner(
 
         # 5. Solve directly using GLPK (Lean LP)
         if use_ilp:
+            logger.debug("Using ILP solver for EME heuristic computation.")
             # Identify integer variable indices
             size = Aub.size[1]
-            I = list(range(size))
+            I = set(range(size))
             status, x = glpk.ilp(c_cvx, Aub_cvx, bub_cvx, Aeq_cvx, beq_cvx, I=I)
-
-        status, x, y, z = glpk.lp(c_cvx, Aub_cvx, bub_cvx, Aeq_cvx, beq_cvx)
+        else:
+            logger.debug("Using LP solver for EME heuristic computation.")
+            status, x, y, z = glpk.lp(c_cvx, Aub_cvx, bub_cvx, Aeq_cvx, beq_cvx)
 
         # 6. Map statuses to clearer identifiers
         # cvxopt.glpk uses: 'optimal', 'primal infeasible', 'dual infeasible', 'unknown'
@@ -804,6 +809,7 @@ def __search(
 
             h, x, is_feasible, status = _eme_solve_inner(eme_solver, ini, use_ilp=use_ilp)
             if status != "optimal":
+                logger.debug(f"Root LP failed with status '{status}'. Falling back to h=0.")
                 # root LP must be solvable: otherwise no alignment via this decomposition
                 return None
             _maybe_update_max_explained(x)
@@ -856,6 +862,7 @@ def __search(
 
                     # We are at a split point -> solve LP for curr.m
                     h, x, is_feasible, status = _eme_solve_inner(eme_solver, curr.m, use_ilp=False)
+                    logger.debug(f"Solved LP at marking {current_marking} (trace idx {curr_trace_idx}) with status '{status}' and h={h}.")
                     # Only update max_explained if we received an actual x
                     _maybe_update_max_explained(x)
 
