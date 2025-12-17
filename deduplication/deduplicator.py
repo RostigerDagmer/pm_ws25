@@ -15,7 +15,7 @@ from deduplication.comparators import (
     DualScoreFeatureComparator,
     CombinedComparator
 )
-from features.extractors import ModelFeatureExtractor
+from features.base_extractor import ModelFeatureExtractor
 
 
 logger = logging.getLogger(__name__)

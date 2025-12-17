@@ -22,7 +22,7 @@ import numpy as np
 import os
 
 from dataloaders.runs import RunDataset
-from features.extractors import CompositeFeatureExtractor
+from features import CompositeFeatureExtractor
 from models import (
     XGBoostClassifier,
     SingleBestSolver,

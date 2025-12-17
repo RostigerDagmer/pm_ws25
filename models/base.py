@@ -16,7 +16,7 @@ from tqdm import tqdm
 from sklearn.preprocessing import LabelEncoder
 
 from dataloaders.runs import RunDataset
-from features.extractors import BaseFeatureExtractor
+from features.base_extractor import BaseFeatureExtractor
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.objects.log.obj import Trace
 from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net

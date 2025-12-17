@@ -11,7 +11,7 @@ from util.distributions import (
 )
 from experiments.simulation.models import sample_net
 from experiments.simulation.simulate import simulate_batch, apply_labels
-from features.extractors import SpectralFeatureExtractor
+from features.base_extractor import SpectralFeatureExtractor
 from experiments.model.spectral_model import SpectralModel
 
 logging.basicConfig(level=logging.INFO)

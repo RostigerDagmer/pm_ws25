@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from features.extractors import CompositeFeatureExtractor
+from features import CompositeFeatureExtractor
 from util.rng import RNG
 
 DF_SCHEMA = [

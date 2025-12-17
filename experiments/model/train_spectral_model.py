@@ -22,7 +22,7 @@ from collections import defaultdict
 
 from dataloaders.runs import RunDataset, AlignerSpec, SyntheticTraceSampler
 from dataloaders.synthetic import SyntheticProcessModelDataset
-from features.extractors import SpectralFeatureExtractor
+from features.base_extractor import SpectralFeatureExtractor
 from experiments.model.spectral_model import SpectralModel
 from util.rng import RNG
 from util.distributions import (

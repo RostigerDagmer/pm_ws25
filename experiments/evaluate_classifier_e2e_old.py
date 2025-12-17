@@ -20,7 +20,7 @@ from dataloaders.net import ProcessModelDataset, VariantRandomDistributionSample
 from dataloaders.unique_net import UniqueProcessModelDataset
 from dataloaders.runs import RunDataset, AlignerSpec, SimplePerturbedTraceSampler
 from deduplication.deduplicator import DeduplicationConfig
-from features.extractors import CompositeFeatureExtractor
+from features import CompositeFeatureExtractor
 from models import (
     XGBoostClassifier,
     SingleBestSolver,
