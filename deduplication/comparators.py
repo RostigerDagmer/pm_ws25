@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from collections import Counter, deque
 import numpy as np
 from pm4py.objects.petri_net.obj import PetriNet, Marking
-from features.base_extractor import BaseFeatureExtractor, ModelFeatureExtractor
+from features import ModelFeatureExtractor
 from typing import *
 
 class BaseComparator(ABC):
