@@ -4,6 +4,7 @@ from features.base_extractor import BaseFeatureExtractor
 from features.model_extractor import ModelFeatureExtractor
 from features.trace_extractor import TraceFeatureExtractor
 from features.state_space_size_extractor import StateSpaceSizeExtractor
+from features.token_replay_extractor import TokenReplayFitnessExtractor
 
 
 class CompositeFeatureExtractor(BaseFeatureExtractor):
@@ -19,6 +20,7 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
         self.model_extractor = ModelFeatureExtractor(use_cache=use_cache)
         self.trace_extractor = TraceFeatureExtractor(use_cache=use_cache)
         self.state_space_extractor = StateSpaceSizeExtractor(use_cache=use_cache)
+        self.token_replay_extractor = TokenReplayFitnessExtractor(use_cache=use_cache)
 
     def _compute_cache_key(
         self,
@@ -42,6 +44,7 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
                 'interaction_n_activity_present_in_model',  # e.g. model has A,B,C and trace has A,B,A,D -> 3
                 'interaction_n_activity_not_in_model',
             ]  # e.g. model has A,B,C and trace has A,B,A,D -> 1
+            + self.token_replay_extractor.feature_names
         )
 
     def _extract_features_internal(
@@ -65,11 +68,22 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
         )
         interaction_features = self._extract_interactions(petri_net, trace_net)
 
+        token_replay_features = self.token_replay_extractor.extract(
+            petri_net,
+            petri_net_im,
+            petri_net_fm,
+            trace_net,
+            trace_net_im,
+            trace_net_fm,
+            return_as_dict=True,
+        )
+
         return {
             **model_features,
             **trace_features,
             **state_space_features,
             **interaction_features,
+            **token_replay_features,
         }
 
     def _extract_interactions(

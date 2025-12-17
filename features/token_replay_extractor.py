@@ -110,7 +110,7 @@ class TokenReplayFitnessExtractor(BaseFeatureExtractor):
         """
         transitions = sorted(
             trace_net.transitions,
-            key=lambda t: int(t.name.split('_')[1]) if '_' in t.name else 0
+            key=lambda t: int(t.name.split('_')[-1]) if '_' in t.name else 0
         )
 
         activity_key = xes_util.DEFAULT_NAME_KEY
