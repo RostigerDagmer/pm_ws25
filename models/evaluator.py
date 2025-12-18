@@ -1,21 +1,19 @@
 """
 Evaluation framework for alignment heuristic recommenders.
+
+Uses combination-based metrics where ground truth can be multiple near-optimal
+heuristics (within a tolerance threshold of the best).
 """
 
-from typing import Dict, Any, List, Union
-from dataclasses import dataclass, field
+from typing import Dict, Any, List, Union, Tuple
+from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import logging
 import json
-from collections import defaultdict
-from sklearn.metrics import (
-    accuracy_score,
-    precision_recall_fscore_support,
-    confusion_matrix,
-)
+from collections import defaultdict, Counter
 
 from models.base import ClassificationModel
 from dataloaders.runs import RunDataset
@@ -26,23 +24,96 @@ from models.utils import (
 )
 
 
+# Default tolerance thresholds for near-optimal heuristics
+TOLERANCE_THRESHOLDS = [0.0, 0.10, 0.20]
+
+HEURISTIC_ALIASES = {
+    'VERSION_DIJKSTRA_NO_HEURISTICS': 'Dijkstra',
+    'VERSION_STATE_EQUATION_A_STAR_ILP': 'A*-ILP',
+    'VERSION_STATE_EQUATION_A_STAR': 'A*',
+    'VERSION_REQUIRED_MODEL_MOVE': 'RequiredModelMove',
+    'VERSION_REMAINING_TRACE': 'RemainingActivities',
+}
+
+def get_heuristic_alias(full_name: str) -> str:
+    """Get short alias for heuristic name."""
+    return HEURISTIC_ALIASES.get(full_name, full_name)
+
+
+def heuristics_are_similar(
+    time_a: float, time_b: float, relative_threshold: float
+) -> bool:
+    """ Determine if two heuristic execution times are similar using percentage comparison. """
+    if relative_threshold == 0.0:
+        return time_a == time_b
+
+    # Handle zero times
+    min_time = min(time_a, time_b)
+    if min_time == 0:
+        return time_a == time_b
+
+    relative_diff = abs(time_a - time_b) / min_time
+    return relative_diff <= relative_threshold
+
+
+def get_near_optimal_heuristics(
+    heuristic_times: Dict[str, float], threshold: float
+) -> Tuple[str, ...]:
+    """
+    Get all heuristics within threshold of the best.
+
+    Args:
+        heuristic_times: Dict mapping heuristic name to execution time
+        threshold: Relative threshold for near-optimal (e.g., 0.10 for 10%)
+
+    Returns:
+        Tuple of heuristic names that are near-optimal (sorted for consistency)
+    """
+    if not heuristic_times:
+        return ()
+
+    best_time = min(heuristic_times.values())
+    near_optimal = []
+
+    for heuristic, time in heuristic_times.items():
+        if heuristics_are_similar(time, best_time, threshold):
+            near_optimal.append(heuristic)
+
+    return tuple(sorted(near_optimal))
+
+
+@dataclass
+class CombinationMetrics:
+    """Metrics for a specific combination of near-optimal heuristics."""
+
+    combination: Tuple[str, ...]  # e.g., ("A*", "Dijkstra")
+    support: int  # How often this combination is the ground truth
+    correct_predictions: int  # How often was prediction in this combination
+    accuracy: float  # correct_predictions / support
+
+
+@dataclass
+class ToleranceLevelMetrics:
+    """Metrics for a specific tolerance level (e.g., 0%, 10%, 20%)."""
+
+    threshold: float
+    combination_metrics: Dict[Tuple[str, ...], CombinationMetrics]
+    overall_accuracy: float  # Prediction is in near-optimal set
+    macro_accuracy: float  # Average accuracy across all combinations
+    total_samples: int
+    prediction_counts: Dict[str, int]  # How often each heuristic was predicted
+
+
 @dataclass
 class EvaluationMetrics:
-    # Classification metrics
-    accuracy: float
-    precision_per_class: Dict[str, float]
-    recall_per_class: Dict[str, float]
-    f1_per_class: Dict[str, float]
-    confusion_matrix: np.ndarray
-    class_labels: List[str]
+    """Complete evaluation metrics across multiple tolerance levels."""
+
+    # Metrics per tolerance level (0%, 10%, 20%)
+    tolerance_metrics: Dict[float, ToleranceLevelMetrics]
 
     # Time performance metrics
-    mean_alignment_time_only: (
-        float  # Alignment time only (predicted heuristic)
-    )
-    mean_alignment_time_with_prediction: (
-        float  # Total: feature extraction + classification + alignment
-    )
+    mean_alignment_time_only: float  # Alignment time only (predicted heuristic)
+    mean_alignment_time_with_prediction: float  # Total: feature + classification + alignment
     mean_optimal_alignment_time: float  # Fastest heuristic alignment time
     performance_ratio_alignment_only: float  # alignment_only / optimal
     performance_ratio_with_prediction: float  # with_prediction / optimal
@@ -61,13 +132,35 @@ class EvaluationMetrics:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
+        tolerance_dict = {}
+        for threshold, level_metrics in self.tolerance_metrics.items():
+            combo_dict = {}
+            for combo, metrics in level_metrics.combination_metrics.items():
+                # Use aliases for keys
+                combo_aliases = [get_heuristic_alias(h) for h in combo]
+                combo_key = " + ".join(combo_aliases)
+                combo_dict[combo_key] = {
+                    'support': metrics.support,
+                    'correct_predictions': metrics.correct_predictions,
+                    'accuracy': metrics.accuracy,
+                }
+            # Convert prediction counts to use aliases
+            prediction_counts_aliased = {
+                get_heuristic_alias(h): count
+                for h, count in level_metrics.prediction_counts.items()
+            }
+
+            tolerance_dict[f"{threshold:.0%}"] = {
+                'threshold': threshold,
+                'overall_accuracy': level_metrics.overall_accuracy,
+                'macro_accuracy': level_metrics.macro_accuracy,
+                'total_samples': level_metrics.total_samples,
+                'prediction_counts': prediction_counts_aliased,
+                'combination_metrics': combo_dict,
+            }
+
         return {
-            'accuracy': self.accuracy,
-            'precision_per_class': self.precision_per_class,
-            'recall_per_class': self.recall_per_class,
-            'f1_per_class': self.f1_per_class,
-            'confusion_matrix': self.confusion_matrix.tolist(),
-            'class_labels': self.class_labels,
+            'tolerance_metrics': tolerance_dict,
             'mean_alignment_time_only': self.mean_alignment_time_only,
             'mean_alignment_time_with_prediction': self.mean_alignment_time_with_prediction,
             'mean_optimal_alignment_time': self.mean_optimal_alignment_time,
@@ -87,7 +180,6 @@ class EvaluationMetrics:
             "=" * 80,
             "EVALUATION SUMMARY",
             "=" * 80,
-            f"Classification Accuracy: {self.accuracy:.2%}",
             "",
             "Alignment Time Performance:",
             f"  Alignment Only (predicted heuristic): {self.mean_alignment_time_only:.4f}s",
@@ -96,33 +188,18 @@ class EvaluationMetrics:
             f"  Performance Ratio (alignment only): {self.performance_ratio_alignment_only:.3f}x",
             f"  Performance Ratio (with prediction): {self.performance_ratio_with_prediction:.3f}x",
             f"  Time Savings vs Worst: {self.time_savings_vs_worst:.2%}",
-            "",
-            "Per-Class Metrics:",
         ]
 
-        for label in self.class_labels:
-            lines.append(
-                f"  {label}: "
-                f"P={self.precision_per_class.get(label, 0):.2%} "
-                f"R={self.recall_per_class.get(label, 0):.2%} "
-                f"F1={self.f1_per_class.get(label, 0):.2%}"
-            )
+        # Add metrics for each tolerance level
+        for threshold in sorted(self.tolerance_metrics.keys()):
+            level = self.tolerance_metrics[threshold]
+            lines.extend(self._format_tolerance_level(level))
 
+        # Prediction timing
         lines.extend(
             [
                 "",
-                "Confusion Matrix:",
-                "(Rows: Actual/True labels, Columns: Predicted labels)",
-                "",
-            ]
-        )
-
-        # Format confusion matrix
-        lines.append(self._format_confusion_matrix())
-
-        lines.extend(
-            [
-                "",
+                "-" * 80,
                 "Prediction Timing:",
                 f"  Mean Total: {self.mean_prediction_time * 1000:.3f}ms",
                 f"  Mean Feature Extraction: {self.mean_feature_extraction_time * 1000:.3f}ms",
@@ -141,50 +218,83 @@ class EvaluationMetrics:
         lines.append("=" * 80)
         return "\n".join(lines)
 
-    def _format_confusion_matrix(self) -> str:
-        """Format confusion matrix as a readable table."""
+    def _format_tolerance_level(self, level: ToleranceLevelMetrics) -> List[str]:
+        """Format metrics for one tolerance level."""
+        lines = [
+            "",
+            "=" * 80,
+            f"TOLERANCE LEVEL: {level.threshold:.0%}",
+            "=" * 80,
+            "",
+            "Overall Metrics:",
+            f"  Accuracy:       {level.overall_accuracy:>6.2%}",
+            f"  Macro Accuracy: {level.macro_accuracy:>6.2%}",
+            f"  Total Samples:  {level.total_samples:>6}",
+            "",
+        ]
 
-        def clean_and_abbreviate(label: str, max_len: int = 25) -> str:
-            cleaned = label.replace("VERSION_", "")
-            if len(cleaned) <= max_len:
-                return cleaned
-            return cleaned[:max_len]
+        # Add prediction distribution
+        lines.extend([
+            "Prediction Distribution:",
+            "",
+            f"  {'Heuristic':<30} {'Count':>8} {'Percentage':>12}",
+            "  " + "-" * 52,
+        ])
 
-        labels = [clean_and_abbreviate(label) for label in self.class_labels]
-
-        # Calculate column widths
-        max_label_width = max(len(label) for label in labels)
-        col_width = max(max_label_width, 8)
-
-        # Header row
-        header = " " * max_label_width + "  "
-        header += "  ".join(f"{label:>{col_width}}" for label in labels)
-        header += "  " + f"{'TOTAL':>{col_width}}"
-
-        lines = [header]
-
-        # Data rows
-        for i, row_label in enumerate(labels):
-            row_sum = self.confusion_matrix[i].sum()
-            row = f"{row_label:<{max_label_width}}  "
-            row += "  ".join(
-                f"{self.confusion_matrix[i, j]:>{col_width}}"
-                for j in range(len(labels))
-            )
-            row += "  " + f"{row_sum:>{col_width}}"
-            lines.append(row)
-
-        # Total row
-        col_sums = self.confusion_matrix.sum(axis=0)
-        total_sum = self.confusion_matrix.sum()
-        total_row = f"{'TOTAL':<{max_label_width}}  "
-        total_row += "  ".join(
-            f"{col_sums[j]:>{col_width}}" for j in range(len(labels))
+        # Sort by count (most predicted first)
+        sorted_preds = sorted(
+            level.prediction_counts.items(),
+            key=lambda x: x[1],
+            reverse=True,
         )
-        total_row += "  " + f"{total_sum:>{col_width}}"
-        lines.append(total_row)
 
-        return "\n".join(lines)
+        for heuristic, count in sorted_preds:
+            alias = get_heuristic_alias(heuristic)
+            percentage = 100.0 * count / level.total_samples if level.total_samples > 0 else 0.0
+            lines.append(f"  {alias:<30} {count:>8} {percentage:>11.2f}%")
+
+        lines.extend([
+            "",
+            "Per-Combination Ground Truth Metrics:",
+            "",
+        ])
+
+        # Calculate max combination length for dynamic column width
+        max_combo_len = 0
+        combo_strs = []
+        for combo, _ in sorted(
+            level.combination_metrics.items(),
+            key=lambda x: x[1].support,
+            reverse=True,
+        ):
+            combo_aliases = [get_heuristic_alias(h) for h in combo]
+            combo_str = " + ".join(combo_aliases)
+            combo_strs.append(combo_str)
+            max_combo_len = max(max_combo_len, len(combo_str))
+
+        # Set column width with minimum of 30 and maximum of 60
+        combo_width = min(max(max_combo_len, 30), 60)
+
+        # Header for combination table
+        lines.append(
+            f"  {'Combination':<{combo_width}} {'Support':>8} {'Correct':>8} {'Accuracy':>10}"
+        )
+        lines.append("  " + "-" * (combo_width + 28))
+
+        # Sort by support (most frequent first)
+        sorted_combos = sorted(
+            level.combination_metrics.items(),
+            key=lambda x: x[1].support,
+            reverse=True,
+        )
+
+        for (combo, metrics), combo_str in zip(sorted_combos, combo_strs):
+            lines.append(
+                f"  {combo_str:<{combo_width}} {metrics.support:>8} "
+                f"{metrics.correct_predictions:>8} {metrics.accuracy:>10.2%}"
+            )
+
+        return lines
 
 
 class RecommenderEvaluator:
@@ -194,18 +304,20 @@ class RecommenderEvaluator:
         self,
         classifier: ClassificationModel,
         run_datasets: Union[RunDataset, List[RunDataset]],
+        tolerance_thresholds: List[float] = None,
     ):
         self.classifier = classifier
         self.run_datasets = normalize_datasets(run_datasets)
+        self.tolerance_thresholds = tolerance_thresholds or TOLERANCE_THRESHOLDS
         validate_aligner_consistency(self.run_datasets)
 
     def evaluate(self) -> EvaluationMetrics:
-        """Evaluate classifier on run_datasets."""
+        """Evaluate classifier on run_datasets with combination-based metrics."""
         logging.info("Starting evaluation...")
 
-        # Collect predictions and ground truth
-        y_true = []
-        y_pred = []
+        # Collect predictions and timing data
+        predictions = []
+        all_heuristic_times = []  # List of dicts: {heuristic: time}
         actual_times = []
         optimal_times = []
         worst_times = []
@@ -222,26 +334,25 @@ class RecommenderEvaluator:
             prediction = self.classifier.predict_heuristic(
                 model.pm, model.im, model.fm, trace
             )
-            y_pred.append(prediction.predicted_heuristic)
+            predictions.append(prediction.predicted_heuristic)
 
             # Track timing
             prediction_times.append(prediction.total_prediction_time)
             feature_extraction_times.append(prediction.feature_extraction_time)
             classification_times.append(prediction.classification_time)
 
-            # Find fastest heuristic (ground truth)
-            best_algo = None
+            # Collect all heuristic times for this sample
             best_time = float('inf')
             worst_time = 0.0
             heuristic_times = {}
 
-            for algo_name, (algo, item, perf_list) in results_dict.items():
+            for algo_name, (_, _, perf_list) in results_dict.items():
                 durations = [
                     p.duration for p in perf_list if p.duration is not None
                 ]
                 durations = [
                     20.0 if dur == float('inf') else dur for dur in durations
-                ]  # set to timeout value. TODO: read this from the dataset
+                ]  # set to timeout value
                 if durations:
                     mean_time = np.mean(durations)
                     heuristic_times[algo_name] = mean_time
@@ -249,11 +360,10 @@ class RecommenderEvaluator:
 
                     if mean_time < best_time:
                         best_time = mean_time
-                        best_algo = algo_name
                     if mean_time > worst_time:
                         worst_time = mean_time
 
-            y_true.append(best_algo)
+            all_heuristic_times.append(heuristic_times)
             optimal_times.append(best_time)
             worst_times.append(worst_time)
 
@@ -261,19 +371,12 @@ class RecommenderEvaluator:
             actual_time = heuristic_times[prediction.predicted_heuristic]
             actual_times.append(actual_time)
 
-        accuracy = accuracy_score(y_true, y_pred)
-
-        unique_labels = sorted(set(y_true) | set(y_pred))
-        precision, recall, f1, support = precision_recall_fscore_support(
-            y_true, y_pred, labels=unique_labels, average=None, zero_division=0
-        )
-
-        # Build per-class dictionaries
-        precision_dict = dict(zip(unique_labels, precision))
-        recall_dict = dict(zip(unique_labels, recall))
-        f1_dict = dict(zip(unique_labels, f1))
-
-        conf_matrix = confusion_matrix(y_true, y_pred, labels=unique_labels)
+        # Calculate metrics for each tolerance level
+        tolerance_metrics = {}
+        for threshold in self.tolerance_thresholds:
+            tolerance_metrics[threshold] = self._calculate_tolerance_level_metrics(
+                predictions, all_heuristic_times, threshold
+            )
 
         # Compute time performance metrics
         mean_alignment_only = np.mean(actual_times)
@@ -314,12 +417,7 @@ class RecommenderEvaluator:
         feature_importance = self.classifier.get_feature_importance()
 
         metrics = EvaluationMetrics(
-            accuracy=accuracy,
-            precision_per_class=precision_dict,
-            recall_per_class=recall_dict,
-            f1_per_class=f1_dict,
-            confusion_matrix=conf_matrix,
-            class_labels=unique_labels,
+            tolerance_metrics=tolerance_metrics,
             mean_alignment_time_only=mean_alignment_only,
             mean_alignment_time_with_prediction=mean_alignment_with_pred,
             mean_optimal_alignment_time=mean_optimal,
@@ -338,44 +436,118 @@ class RecommenderEvaluator:
 
         return metrics
 
+    def _calculate_tolerance_level_metrics(
+        self,
+        predictions: List[str],
+        all_heuristic_times: List[Dict[str, float]],
+        threshold: float,
+    ) -> ToleranceLevelMetrics:
+        """
+        Calculate metrics for a specific tolerance level.
+
+        Args:
+            predictions: List of predicted heuristic names
+            all_heuristic_times: List of dicts mapping heuristic name to time
+            threshold: Tolerance threshold (e.g., 0.10 for 10%)
+
+        Returns:
+            ToleranceLevelMetrics for this threshold
+        """
+        # Get ground truth combinations for each sample
+        ground_truth_combos = []
+        for heuristic_times in all_heuristic_times:
+            combo = get_near_optimal_heuristics(heuristic_times, threshold)
+            ground_truth_combos.append(combo)
+
+        combo_support = Counter(ground_truth_combos)
+
+        # Count predictions per heuristic
+        prediction_counts = Counter(predictions)
+
+        # Count correct predictions per combination
+        combo_correct = defaultdict(int)
+        overall_correct = 0
+
+        for pred, gt_combo in zip(predictions, ground_truth_combos):
+            if pred in gt_combo:
+                overall_correct += 1
+                combo_correct[gt_combo] += 1
+
+        # Build CombinationMetrics for each combination
+        combination_metrics = {}
+        all_accuracies = []
+
+        for combo, support in combo_support.items():
+            correct = combo_correct[combo]
+            accuracy = correct / support if support > 0 else 0.0
+
+            combination_metrics[combo] = CombinationMetrics(
+                combination=combo,
+                support=support,
+                correct_predictions=correct,
+                accuracy=accuracy,
+            )
+
+            all_accuracies.append(accuracy)
+
+        # Calculate overall metrics
+        total_samples = len(predictions)
+        overall_accuracy = overall_correct / total_samples if total_samples > 0 else 0.0
+        macro_accuracy = np.mean(all_accuracies) if all_accuracies else 0.0
+
+        return ToleranceLevelMetrics(
+            threshold=threshold,
+            combination_metrics=combination_metrics,
+            overall_accuracy=overall_accuracy,
+            macro_accuracy=macro_accuracy,
+            total_samples=total_samples,
+            prediction_counts=dict(prediction_counts),
+        )
+
     def compare_with_baselines(
         self, baselines: List[ClassificationModel]
     ) -> pd.DataFrame:
-        """Compare classifier with baseline models."""
+        """Compare classifier with baseline models across all tolerance levels."""
         results = []
 
         main_metrics = self.evaluate()
-        results.append(
-            {
-                'model': self.classifier.__class__.__name__,
-                'accuracy': main_metrics.accuracy,
-                'performance_ratio_alignment_only': main_metrics.performance_ratio_alignment_only,
-                'performance_ratio_with_prediction': main_metrics.performance_ratio_with_prediction,
-                'mean_alignment_time_only': main_metrics.mean_alignment_time_only,
-                'mean_alignment_time_with_prediction': main_metrics.mean_alignment_time_with_prediction,
-                'mean_prediction_time': main_metrics.mean_prediction_time,
-            }
-        )
+        result_row = {
+            'model': self.classifier.__class__.__name__,
+            'performance_ratio_alignment_only': main_metrics.performance_ratio_alignment_only,
+            'performance_ratio_with_prediction': main_metrics.performance_ratio_with_prediction,
+            'mean_alignment_time_only': main_metrics.mean_alignment_time_only,
+            'mean_alignment_time_with_prediction': main_metrics.mean_alignment_time_with_prediction,
+            'mean_prediction_time': main_metrics.mean_prediction_time,
+        }
+        # Add accuracy for each tolerance level
+        for threshold, level_metrics in main_metrics.tolerance_metrics.items():
+            result_row[f'accuracy_{threshold:.0%}'] = level_metrics.overall_accuracy
+            result_row[f'macro_accuracy_{threshold:.0%}'] = level_metrics.macro_accuracy
+        results.append(result_row)
 
         # Evaluate baselines
         for baseline in baselines:
             logging.info(
                 f"\nEvaluating baseline: {baseline.__class__.__name__}"
             )
-            evaluator = RecommenderEvaluator(baseline, self.run_datasets)
+            evaluator = RecommenderEvaluator(
+                baseline, self.run_datasets, self.tolerance_thresholds
+            )
             baseline_metrics = evaluator.evaluate()
 
-            results.append(
-                {
-                    'model': baseline.__class__.__name__,
-                    'accuracy': baseline_metrics.accuracy,
-                    'performance_ratio_alignment_only': baseline_metrics.performance_ratio_alignment_only,
-                    'performance_ratio_with_prediction': baseline_metrics.performance_ratio_with_prediction,
-                    'mean_alignment_time_only': baseline_metrics.mean_alignment_time_only,
-                    'mean_alignment_time_with_prediction': baseline_metrics.mean_alignment_time_with_prediction,
-                    'mean_prediction_time': baseline_metrics.mean_prediction_time,
-                }
-            )
+            result_row = {
+                'model': baseline.__class__.__name__,
+                'performance_ratio_alignment_only': baseline_metrics.performance_ratio_alignment_only,
+                'performance_ratio_with_prediction': baseline_metrics.performance_ratio_with_prediction,
+                'mean_alignment_time_only': baseline_metrics.mean_alignment_time_only,
+                'mean_alignment_time_with_prediction': baseline_metrics.mean_alignment_time_with_prediction,
+                'mean_prediction_time': baseline_metrics.mean_prediction_time,
+            }
+            # Add accuracy for each tolerance level
+            for threshold, level_metrics in baseline_metrics.tolerance_metrics.items():
+                result_row[f'accuracy_{threshold:.0%}'] = level_metrics.overall_accuracy
+                result_row[f'macro_accuracy_{threshold:.0%}'] = level_metrics.macro_accuracy
+            results.append(result_row)
 
         df = pd.DataFrame(results)
 
