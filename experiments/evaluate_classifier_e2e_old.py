@@ -32,7 +32,7 @@ from util.distributions import ExponentialSpec, NormalSpec
 
 logging.basicConfig(level=logging.INFO)
 
-OUTPUT_DIR = Path("outputs") / "evaluate_classifier"
+OUTPUT_DIR = Path("outputs") / "evaluate_classifier_new"
 
 TRAIN_DATASETS = {
     'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
