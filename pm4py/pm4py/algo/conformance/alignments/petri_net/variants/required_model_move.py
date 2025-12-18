@@ -44,12 +44,13 @@ from enum import Enum
 import sys
 from pm4py.util.constants import PARAMETER_CONSTANT_ACTIVITY_KEY
 from pm4py.util import variants_util
-from typing import Optional, Dict, Any, Union, List
+from typing import Optional, Dict, Any, Union, List, Set
 from pm4py.objects.log.obj import Trace
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.util import typing
 
 from pm4py.pm4py.objects.petri_net import semantics
+from pm4py.pm4py.objects.petri_net.utils import reachability_graph
 
 
 class Parameters(Enum):
@@ -80,10 +81,13 @@ class ReachHeuristic:
     3. SRLog Optimization (Algorithm 7 & 8)
     """
 
-    def __init__(self, model_net: PetriNet, sync_net: PetriNet, skip_symb=utils.SKIP):
+    def __init__(self, model_net: PetriNet, mode_initial_marking: Marking, sync_net: PetriNet, skip_symb=utils.SKIP):
         self.model_net = model_net
         self.sync_net = sync_net
         self.skip_symb = skip_symb
+
+        decorate_transitions_prepostset(self.model_net)
+        decorate_places_preset_trans(self.model_net)
 
         # 1. Mapping: Sync_Place -> Model_Place
         self.sync_to_model_map = self._build_place_mapping(sync_net, model_net)
@@ -93,7 +97,7 @@ class ReachHeuristic:
 
         # 3. Optimization Pre-computation (Algorithm 8)
         # Map: FrozenSet(Marking) -> Set[ActivityLabels]
-        self.alive_activities_map = self._compute_alive_activities(model_net)
+        self.alive_activities_map = self._compute_alive_activities(model_net, mode_initial_marking)
 
     def _build_place_mapping(self, sync_net: PetriNet, model_net: PetriNet):
         """
@@ -109,14 +113,14 @@ class ReachHeuristic:
             # Check if this sync place represents a model place
             # PM4Py Sync Product naming: (SKIP, model_place_name)
             if isinstance(sync_p.name, tuple) and len(sync_p.name) == 2:
-                left, right = sync_p.name
-
-                # In standard construct(), pn2 (Model) is usually the second argument,
-                # so its places are named (SKIP, name).
-                if left == self.skip_symb and right in model_places_by_name:
-                    mapping[sync_p] = model_places_by_name[right]
+                if sync_p.name[0] == self.skip_symb and sync_p.name[1] in model_places_by_name:
+                    mapping[sync_p] = model_places_by_name[sync_p.name[1]]
 
         return mapping
+
+    def _get_marking_key(self, marking: Marking) -> frozenset:
+        """ Returns a robust canonical key for a marking based on Place Names. """
+        return frozenset((p.name, count) for p, count in marking.items() if count > 0)
 
     def _project_marking(self, sync_marking: Marking) -> Marking:
         """
@@ -125,75 +129,57 @@ class ReachHeuristic:
         """
         model_marking = Marking()
         for sync_p, count in sync_marking.items():
-            if sync_p in self.sync_to_model_map:
+            if count > 0 and sync_p in self.sync_to_model_map:
                 model_p = self.sync_to_model_map[sync_p]
                 model_marking[model_p] += count
         return model_marking
 
-    def _compute_alive_activities(self, net: PetriNet) -> dict:
+    def _compute_alive_activities(self, net: PetriNet, model_initial_marking: Marking) -> Dict[frozenset, Set[str]]:
         """
         Algorithm 8: Initialization for SRLog.
         Pre-computes the 'alive activities' for every reachable marking in the ORIGINAL model.
         Returns: Dict[FrozenMarking, Set[Labels]]
         """
-        # 1. Find Initial Marking of the Model (usually empty input arcs)
-        # Note: In standard PM4Py, we might need the IM passed explicitly.
-        # If not available, we try to discover it or assume it's standard.
-        # For robustness, let's discover it:
-        initial_marking = Marking()
-        for p in net.places:
-            if len(p.in_arcs) == 0:
-                initial_marking[p] = 1
 
-        # 2. Build Reachability Graph (Nodes and Edges)
-        # We perform a BFS to find all states and transitions between them
-        rg_nodes = set()
-        rg_edges = []  # List of (source_m_key, target_m_key, label)
+        initial_marking = model_initial_marking
 
-        init_key = frozenset(initial_marking.items())
-        rg_nodes.add(init_key)
+        # 1. Build Reachability Graph (Nodes and Edges)
+        try:
+            # We use the explicitly passed initial marking here
+            _, outgoing_transitions, _ = reachability_graph.marking_flow_petri(net,model_initial_marking)
+        except:
+            return {}
 
-        queue = deque([(initial_marking, init_key)])
+        # Build graphs for propagation
+        reverse_graph = {}
+        direct_alive = {}
 
-        # Map: FrozenMarking -> Set[Labels] (initially just direct outgoing)
-        alive_map = {}
+        for src_m, trans_map in outgoing_transitions.items():
+            src_key = self._get_marking_key(src_m)
+            if src_key not in direct_alive: direct_alive[src_key] = set()
 
-        while queue:
-            m, m_key = queue.popleft()
+            for t, tgt_m in trans_map.items():
+                tgt_key = self._get_marking_key(tgt_m)
 
-            if m_key not in alive_map:
-                alive_map[m_key] = set()
-
-            enabled = semantics.enabled_transitions(net, m)
-            for t in enabled:
-                new_m = semantics.execute(t, net, m)
-                new_m_key = frozenset(new_m.items())
-
-                # Add direct alive label
                 if t.label is not None:
-                    alive_map[m_key].add(t.label)
+                    direct_alive[src_key].add(t.label)
 
-                # Record Edge for back-propagation
-                rg_edges.append((m_key, new_m_key))
+                if tgt_key not in reverse_graph: reverse_graph[tgt_key] = []
+                reverse_graph[tgt_key].append(src_key)
 
-                if new_m_key not in rg_nodes:
-                    rg_nodes.add(new_m_key)
-                    queue.append((new_m, new_m_key))
-
-        # 3. Backwards Propagation (Fixed-Point Iteration)
-        # If I can reach State B from State A, then A inherits all alive activities of B.
+        # Backwards Propagation
+        alive_map = copy(direct_alive)
         changed = True
         while changed:
             changed = False
-            for src_key, tgt_key in rg_edges:
+            for tgt_key, src_keys in reverse_graph.items():
                 tgt_alive = alive_map.get(tgt_key, set())
-                src_alive = alive_map[src_key]
-
-                # If target has something source doesn't, add it
-                if not tgt_alive.issubset(src_alive):
-                    src_alive.update(tgt_alive)
-                    changed = True
-
+                for src_key in src_keys:
+                    src_alive = alive_map.get(src_key, set())
+                    if not tgt_alive.issubset(src_alive):
+                        src_alive.update(tgt_alive)
+                        alive_map[src_key] = src_alive
+                        changed = True
         return alive_map
 
     def compute_required_activities(self, model_marking: Marking) -> set:
@@ -202,7 +188,7 @@ class ReachHeuristic:
         Performs structural traversal on the PROCESS MODEL to find unavoidable transitions.
         """
         # Cache Check
-        marking_key = frozenset(model_marking.items())
+        marking_key = self._get_marking_key(model_marking)
         if marking_key in self._cache:
             return self._cache[marking_key]
 
@@ -694,7 +680,7 @@ def apply_trace_net(
                   not utils.__is_model_move(t, utils.SKIP) and not utils.__is_log_move(t, utils.SKIP)]
     if sync_moves: h_sync_cost = min(sync_moves)
 
-    reach_heuristic = ReachHeuristic(petri_net, sync_prod, utils.SKIP)
+    reach_heuristic = ReachHeuristic(petri_net, initial_marking, sync_prod, utils.SKIP)
 
     return apply_sync_prod(
         sync_prod,
@@ -793,7 +779,7 @@ def run_greedy_search(sync_net, ini, fin, cost_function, skip, trace_labels):
                 best_new_idx = new_idx
 
         if best_t:
-            curr_m = semantics.weak_execute(best_t, sync_net, curr_m)
+            curr_m = semantics.weak_execute(best_t, curr_m)
             curr_cost += cost_function[best_t]
             trace_idx = best_new_idx
             steps += 1
