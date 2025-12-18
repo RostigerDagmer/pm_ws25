@@ -41,9 +41,10 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
             + self.trace_extractor.feature_names
             + self.state_space_extractor.feature_names
             + [
-                'interaction_n_activity_present_in_model',  # e.g. model has A,B,C and trace has A,B,A,D -> 3
+                'interaction_n_activity_present_in_model',
                 'interaction_n_activity_not_in_model',
-            ]  # e.g. model has A,B,C and trace has A,B,A,D -> 1
+                'interaction_activity_coverage_ratio',
+            ]
             + self.token_replay_extractor.feature_names
         )
 
@@ -66,7 +67,9 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
         state_space_features = self.state_space_extractor.extract(
             petri_net, petri_net_im, petri_net_fm, return_as_dict=True
         )
-        interaction_features = self._extract_interactions(petri_net, trace_net)
+        interaction_features = self._extract_interactions(
+            petri_net, petri_net_im, petri_net_fm, trace_net
+        )
 
         token_replay_features = self.token_replay_extractor.extract(
             petri_net,
@@ -87,7 +90,11 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
         }
 
     def _extract_interactions(
-        self, model_net: PetriNet, trace_net: PetriNet
+        self,
+        model_net: PetriNet,
+        model_im: Marking,
+        model_fm: Marking,
+        trace_net: PetriNet
     ) -> Dict[str, float]:
         """Extract interaction features between model and trace."""
         model_labels = {
@@ -104,7 +111,12 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
             1 for label in trace_labels if label not in model_labels
         )
 
+        trace_length = len(trace_labels)
+        coverage_ratio = present_in_model / trace_length if trace_length > 0 else 0.0
+
         return {
             'interaction_n_activity_present_in_model': present_in_model,
             'interaction_n_activity_not_in_model': not_in_model,
+            'interaction_activity_coverage_ratio': coverage_ratio,
         }
+
