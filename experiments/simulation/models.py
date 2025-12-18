@@ -183,10 +183,10 @@ if __name__ == "__main__":
     RNG.initialize(4)
 
     dist_params = {
-        "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
+        "op": CategoricalSpec([0.1, 0.5, 0.3, 0.1]),
         "seq_len": PoissonSpec(4),
         "p_stop": BernoulliDepthLinearSpec(base=0.15, slope=0.1),
-        "width": PoissonSpec(3),
+        "width": PoissonSpec(10),
     }
     stnet = sample_net(
         dist_params, max_depth=5, generator=RNG.torch_generator()

@@ -6,8 +6,7 @@ from dataclasses import dataclass
 from typing import Callable, Generator, Optional, Any, Union
 import torch
 from torch.utils.data import Dataset
-from dataloaders.base import BaseEventLogDataset
-from dataloaders.util import _normalize_log_input
+from dataloaders.base import BaseEventLogDataset, _normalize_log_input
 from pm4py.discovery import (
     discover_petri_net_alpha,
     discover_petri_net_alpha_plus,

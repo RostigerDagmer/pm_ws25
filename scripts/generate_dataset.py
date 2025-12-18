@@ -1,49 +1,11 @@
 import argparse
 import yaml
-from pathlib import Path
 from configs.schema import PipelineConfig
-from dataloaders.net import ProcessModelDataset
-from dataloaders.unique_net import UniqueProcessModelDataset
-from dataloaders.util import build_dataset
-from dataloaders.runs import RunDataset
 from util.rng import RNG
 import logging
+from dataloaders.util import build_pipeline
 
 logging.basicConfig(level=logging.INFO)
-
-
-def build_pipeline(cfg: PipelineConfig, skip_init: bool = False) -> RunDataset:
-    log_dataset = build_dataset(cfg.log_path)
-
-    pm_dataset = ProcessModelDataset(
-        log_dataset=log_dataset,
-        discovery_methods=cfg.discovery.resolve(),
-        param_grid=cfg.discovery.params,
-        sampler_specs={
-            sampler.name: sampler.build() for sampler in cfg.discovery.samplers
-        },
-        cached=True,
-        num_workers=cfg.discovery.workers or cfg.alignment.workers,
-    )
-
-    if cfg.deduplication:
-        pm_dataset = UniqueProcessModelDataset(
-            base_dataset=pm_dataset,
-            dedup_config=cfg.deduplication.config,
-            force_recompute=cfg.deduplication.force_recompute,
-        )
-
-    return RunDataset(
-        base_path=cfg.alignment.cache_path or Path("cache/.runs"),
-        process_model_dataset=pm_dataset,
-        aligners=cfg.alignment.resolve(),
-        trace_sampler=cfg.alignment.sampler.build(ds=pm_dataset),
-        n_runs=cfg.alignment.runs,
-        n_workers=cfg.alignment.workers,
-        write_batch_size=cfg.alignment.write_batch_size,
-        skip_init=skip_init,
-    )
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -72,4 +34,4 @@ if __name__ == "__main__":
 
     logging.info(cfg)
 
-    dataset = build_pipeline(cfg, rng)
+    dataset = build_pipeline(cfg)

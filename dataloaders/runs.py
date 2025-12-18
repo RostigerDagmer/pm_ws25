@@ -1,4 +1,3 @@
-from dataloaders.util import _normalize_log_input
 from dataloaders.net import deserialize_sampler
 from concurrent.futures._base import Future
 from concurrent.futures._base import as_completed
@@ -530,9 +529,10 @@ class RunDataset(
         self.aligners = aligners
         self.n_runs = n_runs
         self.items: dict[str, "RunDataset.SerializedItemType"] = {}
-        self.combinations: dict[str, list[str]] = (
-            {}
-        )  # pivot table from combination_id -> item_ids
+        # pivot table from combination_id -> item_ids
+        self.combinations: dict[str, list[str]] = {}
+        # pivot table from model_id -> item_ids
+        self.models: dict[str, list[str]] = {}
         self.index: list[str] = []
         self.n_workers = n_workers
         self.write_batch_size = write_batch_size
@@ -574,6 +574,14 @@ class RunDataset(
                         self.combinations.setdefault(item.comb_id, []).append(
                             item.item_id
                         )
+                        self.models.setdefault(
+                            (
+                                item.model
+                                if isinstance(item.model, str)
+                                else item.model.hash()
+                            ),
+                            [],
+                        ).append(item.item_id)
                 except EOFError:
                     break
 
@@ -596,7 +604,7 @@ class RunDataset(
 
         return SerializedItemType(
             hash,
-            model,
+            model.hash(),
             trace,
             None,
             stats,
@@ -686,6 +694,7 @@ class RunDataset(
         existing_items = self.items
         new_items: dict[str, RunDataset.SerializedItemType] = {}
         new_combinations: dict[str, list[str]] = {}
+        new_models: dict[str, list[str]] = {}
         batch: dict[str, RunDataset.SerializedItemType] = {}
         os.makedirs(self.save_path.parent, exist_ok=True)
 
@@ -747,6 +756,7 @@ class RunDataset(
                 new_combinations.setdefault(item.comb_id, []).append(
                     item.item_id
                 )
+                new_models.setdefault(item.model, []).append(item.item_id)
                 aligned.update(1)
 
                 if len(batch) >= self.write_batch_size:
@@ -769,8 +779,16 @@ class RunDataset(
         self.combinations = {
             k: v for k, v in self.combinations.items() if v
         }  # filter empty
+        self.models = {
+            k: [v for v in vals if v not in irrelevant]
+            for k, vals in self.models.items()
+        }
+        self.models = {
+            k: v for k, v in self.models.items() if v
+        }  # filter empty
         self.items.update(new_items)
         self.combinations.update(new_combinations)
+        self.models.update(new_models)
         self.index = list(self.items.keys())
         gc.collect()
 
@@ -825,40 +843,31 @@ class RunDataset(
 
     def iter_by_combination(
         self,
-    ) -> Iterator[
-        Tuple[
-            Union[
-                "ProcessModelDataset.ItemType",
-                "SyntheticProcessModelDataset.ItemType",
-            ],
-            Trace,
-            Dict[
-                str,
-                Tuple[
-                    str,
-                    Union[typing.AlignmentResult, typing.ListAlignments],
-                    List[PerfCounter],
-                ],
-            ],
-        ]
-    ]:
+    ) -> Iterator[List["RunDataset.SerializedItemType"]]:
         """
         Iterate over RunDataset grouped by combination_id.
 
         Yields for each (Model, Trace) combination:
-            - model: ProcessModelDataset.ItemType
-            - trace: Trace object
-            - results_dict: Dict[algo_name -> (algo, item, perf)]
+            - items: List[RunDataset.SerializedItemType]
         """
 
         for comb_id in self.combinations:
-            items = [self[item_id] for item_id in self.combinations[comb_id]]
+            yield self.get_combination(comb_id)
+
+    def get_combination(
+        self, comb_id: str
+    ) -> List["RunDataset.SerializedItemType"]:
+        return [
+            self.serialized[item_id] for item_id in self.combinations[comb_id]
+        ]
+
+    def iter_by_model(
+        self,
+    ) -> Iterator[Tuple[Hashable, List["RunDataset.SerializedItemType"]]]:
+        for model_id, item_ids in self.models.items():
+            items = [self.serialized[item_id] for item_id in item_ids]
             model = items[0].model
-            trace = items[0].trace
-            results_dict = {
-                item.algo: (item.algo, item.item, item.perf) for item in items
-            }
-            yield (model, trace, results_dict)
+            yield (model, items)
 
 
 def get_stats(stats: list[PerfCounter]) -> dict[str, float]:
@@ -895,7 +904,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import pandas as pd
 
-    RNG.initialize(3)
+    RNG.initialize(1)
     logging.basicConfig(level=logging.INFO)
 
     # CONFIGURATION
@@ -943,6 +952,21 @@ if __name__ == "__main__":
                 20,  # Number of models per config
             ),
             (
+                {  # loop dominant
+                    "dist_params": {
+                        "op": CategoricalSpec([0.15, 0.15, 0.6, 0.1]),
+                        "seq_len": PoissonSpec(4),
+                        "p_stop": BernoulliDepthLinearSpec(
+                            base=0.2, slope=0.1
+                        ),
+                        "width": PoissonSpec(3),
+                    },
+                    "min_depth": MIN_DEPTH,
+                    "max_depth": MAX_DEPTH,
+                },
+                20,  # Number of models per config
+            ),
+            (
                 {  # shallow and wide xor dominant
                     "dist_params": {
                         "op": CategoricalSpec([0.6, 0.1, 0.2, 0.1]),
@@ -966,21 +990,6 @@ if __name__ == "__main__":
                             base=0.5, slope=0.3
                         ),
                         "width": PoissonSpec(10),
-                    },
-                    "min_depth": MIN_DEPTH,
-                    "max_depth": MAX_DEPTH,
-                },
-                20,  # Number of models per config
-            ),
-            (
-                {  # loop dominant
-                    "dist_params": {
-                        "op": CategoricalSpec([0.15, 0.15, 0.6, 0.1]),
-                        "seq_len": PoissonSpec(4),
-                        "p_stop": BernoulliDepthLinearSpec(
-                            base=0.2, slope=0.1
-                        ),
-                        "width": PoissonSpec(3),
                     },
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
@@ -1047,7 +1056,7 @@ if __name__ == "__main__":
         ]
     )
 
-    for run in tqdm(run_dataset, desc="Extracting features from runs"):
+    for run in tqdm(run_dataset, desc="Gathering runs"):
         model, trace, item, perf, algo = (
             run.model,
             run.trace,

@@ -2,6 +2,8 @@
 Base abstract class for alignment heuristic classifiers.
 """
 
+from dataloaders.net import ProcessModelDataset
+from dataloaders.labels import LabelDataset
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List, Union
 from pathlib import Path
@@ -10,23 +12,17 @@ import hashlib
 import json
 import time
 import logging
-from dataclasses import dataclass
+import torch
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 from sklearn.preprocessing import LabelEncoder
+from dataclasses import dataclass
 
-from dataloaders.runs import RunDataset
 from features.extractors import BaseFeatureExtractor
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.objects.log.obj import Trace
 from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
-import pandas as pd
-
-from models.utils import (
-    normalize_datasets,
-    validate_aligner_consistency,
-    iter_combined_datasets,
-)
 
 
 @dataclass
@@ -56,34 +52,34 @@ class ClassificationModel(ABC):
 
     def __init__(
         self,
-        run_datasets: Optional[Union[RunDataset, List[RunDataset]]] = None,
+        dataset: Optional[LabelDataset] = None,
         feature_extractor: Optional[BaseFeatureExtractor] = None,
         tables: Optional[List[pd.DataFrame]] = None,
         cache_dir: Optional[Path] = None,
         hyperparameters: Optional[Dict[str, Any]] = None,
         force_retrain: bool = False,
+        device: Optional[torch.device] = None,
     ):
         """
         Args:
-            run_datasets: Single RunDataset or list of RunDatasets for training
+            dataset: Optional LabelDataset for training
             feature_extractor: Feature extractor for model/trace pairs
             table: Optional compressed table of ids + feature_vector for training
             cache_dir: Directory for model cache (defaults to first dataset's base_path / .cache_models)
             hyperparameters: Model-specific hyperparameters
             force_retrain: Force retraining even if cached model exists
         """
-        # Normalize to list and validate
+
         self.tables = tables
+        self.dataset = dataset
 
         if tables is None:
-            if run_datasets is None:
+            if dataset is None:
                 raise ValueError(
-                    "At least one of run_datasets or tables must be provided."
+                    "At least one of dataset or tables must be provided."
                 )
-            self.run_datasets = normalize_datasets(run_datasets)
-            validate_aligner_consistency(self.run_datasets)
         else:
-            self.run_datasets = None
+            self.dataset = None
 
         self.feature_extractor = feature_extractor
         self.hyperparameters = (
@@ -105,6 +101,7 @@ class ClassificationModel(ABC):
         self.cache_file = (
             self.cache_dir / f"{self.__class__.__name__}_{cache_key}.pkl"
         )
+        self.device = device or torch.device("cpu")
 
         if force_retrain or not self._load_from_cache():
             logging.info(f"Training new {self.__class__.__name__}...")
@@ -160,11 +157,7 @@ class ClassificationModel(ABC):
     def _compute_cache_key(self) -> str:
         """Compute cache key from datasets, feature extractor, and hyperparameters."""
         key_data = {
-            'dataset_hashes': (
-                sorted([ds.log_uuid for ds in self.run_datasets])
-                if self.run_datasets
-                else []
-            ),
+            'dataset_hashes': (self.dataset.hash() if self.dataset else None,),
             'feature_extractor_names': self.feature_extractor.feature_names,
             'hyperparameters': self.hyperparameters,
             'model_class': self.__class__.__name__,
@@ -205,42 +198,24 @@ class ClassificationModel(ABC):
             "Extracting features and identifying fastest heuristics..."
         )
         X_list, y_list = [], []
-        for model, trace, results_dict in tqdm(
-            iter_combined_datasets(self.run_datasets),
+        for item in tqdm(
+            self.dataset,
             desc="Training data preparation",
         ):
             # Extract features
-            trace_net, trace_im, trace_fm = construct_trace_net(trace)
+            trace_net, trace_im, trace_fm = construct_trace_net(item.trace)
             features = self.feature_extractor.extract(
-                model.pm,
-                model.im,
-                model.fm,
+                item.model.pm,
+                item.model.im,
+                item.model.fm,
                 trace_net,
                 trace_im,
                 trace_fm,
                 return_as_dict=False,
             )
 
-            # Find fastest heuristic
-            best_algo = None
-            best_time = float('inf')
-
-            for algo_name, (algo, item, perf_list) in results_dict.items():
-                # Compute mean time from perf counters
-                durations = [
-                    p.duration
-                    for p in perf_list
-                    if p.duration is not None and p.duration != float('inf')
-                ]
-                if durations:
-                    mean_time = np.mean(durations)
-                    if mean_time < best_time:
-                        best_time = mean_time
-                        best_algo = algo_name
-
-            if best_algo is not None:
-                X_list.append(features)
-                y_list.append(best_algo)
+            X_list.append(features)
+            y_list.append(item.algo)
         return X_list, y_list
 
     def _get_xy_table(self):
@@ -340,3 +315,44 @@ class ClassificationModel(ABC):
             feature_extraction_time=feature_extraction_time,
             classification_time=classification_time,
         )
+
+    def predict_batched(
+        self, model: ProcessModelDataset.ItemType, traces: list[Trace]
+    ) -> list[PredictionResult]:
+
+        t_fe_start = time.perf_counter()
+        trace_nets = [construct_trace_net(trace) for trace in traces]
+        features = self.feature_extractor.extract_batched(
+            model.pm,
+            model.im,
+            model.fm,
+            trace_nets,
+            return_as_dict=False,
+            use_cache=False,
+        )
+        t_fe_end = time.perf_counter()
+        feature_extraction_time = t_fe_end - t_fe_start
+
+        predictions = []
+        for feature in features:
+            t_clf_start = time.perf_counter()
+            X = feature.reshape(1, -1)
+            proba = self._predict_proba(X)[0]
+            predicted_class = np.argmax(proba)
+            confidence = proba[predicted_class]
+            predicted_heuristic = self.label_encoder.inverse_transform(
+                [predicted_class]
+            )[0]
+            t_clf_end = time.perf_counter()
+            classification_time = t_clf_end - t_clf_start
+            predictions.append(
+                PredictionResult(
+                    predicted_heuristic=predicted_heuristic,
+                    confidence=float(confidence),
+                    total_prediction_time=t_clf_end - t_clf_start,
+                    feature_extraction_time=feature_extraction_time,
+                    classification_time=classification_time,
+                )
+            )
+
+        return predictions

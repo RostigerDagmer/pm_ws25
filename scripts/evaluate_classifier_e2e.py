@@ -10,18 +10,15 @@ This script:
 6. Evaluates on test datasets and compares with baselines
 """
 
-from typing import Optional
-from experiments.simulation.dataset import get_synthetic_dataset
+from dataloaders.labels import LabelDataset
+from scripts.create_labels import DF_SCHEMA, format_row
+import torch
+from models.spectral_model import SpectralModel
+from argparse import ArgumentParser
 from util.rng import RNG
-import yaml
-from configs.schema import PipelineConfig
-import json
 import logging
 from pathlib import Path
-import numpy as np
-import os
 
-from dataloaders.runs import RunDataset
 from features.extractors import CompositeFeatureExtractor
 from models import (
     XGBoostClassifier,
@@ -29,8 +26,12 @@ from models import (
     RandomClassifier,
     RecommenderEvaluator,
 )
-from scripts.generate_dataset import build_pipeline
-import pandas as pd
+from dataloaders.util import (
+    get_natural_dataset,
+    get_synthetic_dataset,
+    create_tables,
+    find_existing_tables,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -48,20 +49,20 @@ TRAIN_DATASETS = {
     # '6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd': [
     #     'Hospital%20Billing%20-%20Event%20Log.xes'
     # ],
-    '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
-        'Sepsis%20Cases%20-%20Event%20Log.xes'
-    ],
+    # '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
+    #     'Sepsis%20Cases%20-%20Event%20Log.xes'
+    # ],
     # 'd06aff4b-79f0-45e6-8ec8-e19730c248f1': ['BPI_Challenge_2019.xes'],
     # '3537c19d-6c64-4b1d-815d-915ab0e479da': [
     #     'BPI_Challenge_2013_open_problems.xes'
     # ],
-    '500573e6-accc-4b0c-9576-aa5468b10cee': [
-        'BPI_Challenge_2013_incidents.xes'
-    ],
-    '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
-    'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
-    '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
-    'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
+    # '500573e6-accc-4b0c-9576-aa5468b10cee': [
+    #     'BPI_Challenge_2013_incidents.xes'
+    # ],
+    # '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
+    # 'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
+    # '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
+    # 'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
 }
 
 TEST_DATASETS = {
@@ -69,104 +70,114 @@ TEST_DATASETS = {
     '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
     'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
     '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
-    # 'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
-    #     'BPI_Challenge_2013_closed_problems.xes'
-    # ],
+    'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
+        'BPI_Challenge_2013_closed_problems.xes'
+    ],
 }
 
 
-def find_existing_tables(
-    root: Path,
-):
-    # find files ending in .train.csv / .test.csv and .eval.csv
-    train_tables = []
-    test_tables = []
-    eval_tables = []
-    for table_path in root.glob("**/*.train.csv"):
-        train_tables.append(table_path)
-    for table_path in root.glob("**/*.test.csv"):
-        test_tables.append(table_path)
-    for table_path in root.glob("**/*.eval.csv"):
-        eval_tables.append(table_path)
-
-    train_tables = [pd.read_csv(table_path) for table_path in train_tables]
-    test_tables = [pd.read_csv(table_path) for table_path in test_tables]
-    eval_tables = [pd.read_csv(table_path) for table_path in eval_tables]
-
-    return train_tables, test_tables, eval_tables
-
-
-def get_natural_dataset(
-    log_path: str,
-    config: str,
-    base_path: Optional[str] = None,
-    skip_init: bool = False,
-) -> RunDataset:
-    RNG.initialize(SEED)
-    cfg_dict = yaml.safe_load(open(config))
-    cfg = PipelineConfig.model_validate(cfg_dict)
-    cfg.log_path = log_path
-    cfg.alignment.cache_path = base_path
-
-    cfg.seed = SEED
-    # Use SLURM_CPUS_PER_TASK if available, otherwise default to 16
-    cfg.alignment.workers = int(os.environ.get('SLURM_CPUS_PER_TASK', 16))
-
-    # Skip config <-> cache check
-    # (This is unsafe if process models are being referenced in the cache that are not included in the current config)
-    return build_pipeline(cfg, skip_init=skip_init)
-
-
 if __name__ == "__main__":
+
+    RNG.initialize(SEED)
+
+    arg_parser = ArgumentParser()
+    arg_parser.add_argument(
+        "--use-tables",
+        action="store_true",
+        help="Use existing feature tables to skip feature extraction",
+    )
+    args = arg_parser.parse_args()
 
     config_path = "configs/default.yaml"
     cache_path = "cache/.runs"
 
     # Create train RunDatasets
-    # This is too heavy for now
     logging.info(
         f"\nCreating {sum(len(f) for f in TRAIN_DATASETS.values())} train RunDatasets..."
     )
-    train_run_datasets = []
-    for dataset_uuid, files in TRAIN_DATASETS.items():
-        for filename in files:
-            run_dataset = get_natural_dataset(
-                str(Path("data") / dataset_uuid / filename),
-                config_path,
-                cache_path,
+
+    train_run_datasets = None
+    train_tables, test_tables, eval_tables = None, None, None
+
+    if args.use_tables:
+        train_tables, test_tables, eval_tables = find_existing_tables(
+            Path(cache_path)
+        )
+    else:
+        train_run_datasets = []
+        for dataset_uuid, files in TRAIN_DATASETS.items():
+            for filename in files:
+                print(f"Loading: {filename}")
+                run_dataset = get_natural_dataset(
+                    str(Path("data") / dataset_uuid / filename),
+                    config_path,
+                    cache_path,
+                    seed=SEED,
+                )
+                if run_dataset is not None:
+                    train_run_datasets.append(run_dataset)
+
+        train_run_datasets.append(
+            get_synthetic_dataset(Path(cache_path), seed=SEED, count=50)
+        )
+        train_tables, test_tables, eval_tables = [], [], []
+        for run_dataset in train_run_datasets:
+            t_train, t_test, t_eval = create_tables(
+                run_dataset,
+                train_ratio=0.7,
+                test_ratio=0.2,
+                schema=DF_SCHEMA,
+                fe=CompositeFeatureExtractor(),
+                fmt_row=format_row,
             )
-            if run_dataset is not None:
-                train_run_datasets.append(run_dataset)
+            train_tables.append(t_train)
+            test_tables.append(t_test)
+            eval_tables.append(t_eval)
 
-    train_run_datasets.append(
-        get_synthetic_dataset(Path(cache_path), seed=SEED, count=50)
-    )
-
-    # Can merge individually extracted tables with precomputed features
-    # train_tables, test_tables, eval_tables = find_existing_tables(Path(cache_path))
+    # Relying on existing tables can skip single threaded feature extraction
 
     logging.info("\nCreating feature extractor...")
     feature_extractor = CompositeFeatureExtractor(use_cache=True)
 
     logging.info("\nTraining XGBoostClassifier...")
     classifier = XGBoostClassifier(
-        run_datasets=train_run_datasets,
+        tables=train_tables,
+        # run_datasets=train_run_datasets,
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
     )
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    transformer_model = SpectralModel(
+        d_model=64,
+        d_trace=64,
+        hidden_dim=64,
+        mlp_hidden_dim=128,
+        n_classes=6,
+        num_heads=4,
+        n_layers=2,
+        dropout=0.25,
+        pretraining=False,  # Important!
+    ).to(device)
+
+    transformer_model.load_state_dict(torch.load("transformer_model.pth"))
+    transformer_model.eval()
+
     # Train baselines
     logging.info("\nTraining baseline classifiers...")
     single_best = SingleBestSolver(
-        run_datasets=train_run_datasets,
+        tables=train_tables,
+        # run_datasets=train_run_datasets,
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
     )
 
     random_clf = RandomClassifier(
-        run_datasets=train_run_datasets,
+        tables=train_tables,
+        # run_datasets=train_run_datasets,
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
@@ -181,7 +192,7 @@ if __name__ == "__main__":
                 str(Path("data") / dataset_uuid / filename),
                 config_path,
                 cache_path,
-                use_cache=True,  # Use cached alignment runs for speed
+                seed=SEED,
             )
             if run_dataset is not None:
                 test_run_datasets.append(run_dataset)
@@ -190,17 +201,22 @@ if __name__ == "__main__":
     test_run_datasets.append(
         get_synthetic_dataset(Path(cache_path), seed=SEED + 1, count=4)
     )
+
+    test_dataset = LabelDataset(test_run_datasets)
+
     # Evaluate
     logging.info("\nEvaluating on test datasets...")
     evaluator = RecommenderEvaluator(
-        classifier=classifier, run_datasets=test_run_datasets
+        classifier=classifier, dataset=test_dataset
     )
 
-    metrics = evaluator.evaluate()
+    metrics = evaluator.evaluate_batched()
 
     # Compare with baselines
     logging.info("\nComparing with baselines...")
-    comparison_df = evaluator.compare_with_baselines([single_best, random_clf])
+    comparison_df = evaluator.compare_with_baselines(
+        [single_best, transformer_model, random_clf]
+    )
     logging.info("\n" + comparison_df.to_string())
 
     RecommenderEvaluator.save_results(
