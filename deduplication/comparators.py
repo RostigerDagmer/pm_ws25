@@ -9,6 +9,7 @@ import numpy as np
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from features import ModelFeatureExtractor
 from typing import *
+import logging
 
 class BaseComparator(ABC):
     """Interface for all comparators."""
@@ -243,47 +244,116 @@ class DualScoreFeatureComparator(BaseComparator):
         self.epsilon = 1e-10
         self.debug_callback = debug_callback
 
-        # Define feature group indices based on ModelFeatureExtractor.feature_names
-        # Structural: indices 0-7 (model_n_transitions to model_n_xor_split)
-        # Degree stats: indices 8-23 (all degree features)
-        self.structural_indices = list(range(0, 8))
-        self.degree_indices = list(range(8, 24))
-
-        # Hardcoded weights for structural features (indices 0-7)
+        # Define feature weights as dictionary
         # Number of transitions, places, arcs, etc. are already measured by the edge/label comparators,
         # thats why their weights are relatively low compared to splits.
-        self.structural_weights = np.array([
-            1.0,  # model_n_transitions
-            1.0,  # model_n_places
-            1.0,  # model_n_arcs
-            1.0,  # model_n_inv_transition
-            1.0,  # model_n_dup_transition
-            1.0,  # model_n_uniq_transition
-            3.0,  # model_n_and_split
-            3.0,  # model_n_xor_split
-        ])
-
-        # Hardcoded weights for degree features (indices 8-23)
         # Almost all transitions (invisible, duplicate, unique) have an in/out-degree of 1
         # resulting in high similarity scores, thus we downweight them.
-        self.degree_weights = np.array([
-            1.0,  # model_inv_tran_in_deg_mean
-            1.0,  # model_inv_tran_in_deg_std
-            1.0,  # model_inv_tran_out_deg_mean
-            1.0,  # model_inv_tran_out_deg_std
-            1.0,  # model_uniq_tran_in_deg_mean
-            1.0,  # model_uniq_tran_in_deg_std
-            1.0,  # model_uniq_tran_out_deg_mean
-            1.0,  # model_uniq_tran_out_deg_std
-            1.0,  # model_dup_tran_in_deg_mean
-            1.0,  # model_dup_tran_in_deg_std
-            1.0,  # model_dup_tran_out_deg_mean
-            1.0,  # model_dup_tran_out_deg_std
-            5.0,  # model_place_in_deg_mean
-            5.0,  # model_place_in_deg_std
-            5.0,  # model_place_out_deg_mean
-            5.0,  # model_place_out_deg_std
-        ])
+        self.feature_weights = {
+            # Structural features (high weight for splits)
+            'model_n_transitions': 1.0,
+            'model_n_places': 1.0,
+            'model_n_arcs': 1.0,
+            'model_n_inv_transition': 1.0,
+            'model_n_dup_transition': 1.0,
+            'model_n_uniq_transition': 1.0,
+            'model_n_and_split': 3.0,
+            'model_n_xor_split': 3.0,
+            # Degree statistics (standard weight)
+            'model_inv_tran_in_deg_mean': 1.0,
+            'model_inv_tran_in_deg_std': 1.0,
+            'model_inv_tran_out_deg_mean': 1.0,
+            'model_inv_tran_out_deg_std': 1.0,
+            'model_uniq_tran_in_deg_mean': 1.0,
+            'model_uniq_tran_in_deg_std': 1.0,
+            'model_uniq_tran_out_deg_mean': 1.0,
+            'model_uniq_tran_out_deg_std': 1.0,
+            'model_dup_tran_in_deg_mean': 1.0,
+            'model_dup_tran_in_deg_std': 1.0,
+            'model_dup_tran_out_deg_mean': 1.0,
+            'model_dup_tran_out_deg_std': 1.0,
+            # Place degree statistics (higher weight)
+            'model_place_in_deg_mean': 5.0,
+            'model_place_in_deg_std': 5.0,
+            'model_place_out_deg_mean': 5.0,
+            'model_place_out_deg_std': 5.0,
+            # Overall transition statistics (zero weight - already covered)
+            'model_tran_in_deg_mean': 0.0,
+            'model_tran_in_deg_std': 0.0,
+            'model_tran_out_deg_mean': 0.0,
+            'model_tran_out_deg_std': 0.0,
+            # AND split statistics (zero weight - already covered)
+            'model_and_split_avg_out_deg': 0.0,
+            'model_and_split_max_out_deg': 0.0,
+            'model_and_split_out_deg_std': 0.0,
+            # XOR split statistics (zero weight - already covered)
+            'model_xor_split_avg_out_deg': 0.0,
+            'model_xor_split_max_out_deg': 0.0,
+            'model_xor_split_out_deg_std': 0.0,
+            # Density features (zero weight - already covered)
+            'model_density_arcs_per_transition': 0.0,
+            'model_density_arcs_per_transition_plus_places': 0.0,
+            'model_density_arcs_per_place': 0.0,
+        }
+
+        self._validate_feature_weights()
+        self._build_weight_arrays()
+
+    def _validate_feature_weights(self):
+        """
+        Validate that all features from ModelFeatureExtractor have corresponding weights.
+        Warns about missing or extra feature weights.
+        """
+
+        extractor_features = set(self.extractor.feature_names)
+        weight_features = set(self.feature_weights.keys())
+
+        missing_weights = extractor_features - weight_features
+        if missing_weights:
+            logging.warning(
+                f"DualScoreFeatureComparator: Missing weights for features: {sorted(missing_weights)}"
+            )
+
+        extra_weights = weight_features - extractor_features
+        if extra_weights:
+            logging.warning(
+                f"DualScoreFeatureComparator: Extra weights defined for non-existent features: {sorted(extra_weights)}"
+            )
+
+
+    def _build_weight_arrays(self):
+        """
+        Build numpy weight arrays from the feature_weights dictionary.
+        Separates features into structural and degree groups.
+        """
+        structural_features = [
+            'model_n_transitions',
+            'model_n_places',
+            'model_n_arcs',
+            'model_n_inv_transition',
+            'model_n_dup_transition',
+            'model_n_uniq_transition',
+            'model_n_and_split',
+            'model_n_xor_split',
+        ]
+
+        self.structural_indices = []
+        structural_weights_list = []
+        for idx, feature_name in enumerate(self.extractor.feature_names):
+            if feature_name in structural_features:
+                self.structural_indices.append(idx)
+                structural_weights_list.append(self.feature_weights.get(feature_name, 0.0))
+
+        self.structural_weights = np.array(structural_weights_list)
+
+        self.degree_indices = []
+        degree_weights_list = []
+        for idx, feature_name in enumerate(self.extractor.feature_names):
+            if feature_name not in structural_features:
+                self.degree_indices.append(idx)
+                degree_weights_list.append(self.feature_weights.get(feature_name, 0.0))
+
+        self.degree_weights = np.array(degree_weights_list)
 
     def _canberra_distance(
         self,
