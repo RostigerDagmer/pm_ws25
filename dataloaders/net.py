@@ -342,7 +342,7 @@ class ProcessModelDataset(
         cached=False,
         cache_dir=None,
         num_workers=None,
-        timeout: float = 60.0,
+        timeout: float = 300.0,
         write_batch_size: int = 100,
         **kwargs,
     ):
@@ -499,7 +499,7 @@ class ProcessModelDataset(
                     discovered.update(1)
                 except Exception as e:
                     traceback.print_exc()
-                    logging.error("Failed to cache %s: %s", key, e, cfg)
+                    logging.error("Failed to cache %s: %s (config: %s)", key, e, cfg)
                 if len(batch) >= self.write_batch_size:
                     ProcessModelDataset._flush_batch(f, batch)
                     written.update(len(batch))
@@ -651,7 +651,7 @@ class ProcessModelDataset(
         return item.serialize()
 
     def __len__(self):
-        return len(self.configurations)
+        return len(self.items)
 
     # --- skips deserialization for faster access ---
     def _get_serialized(self, idx: int | str) -> SerializedItemType:

@@ -146,7 +146,7 @@ if __name__ == "__main__":
     logging.info("\nLoading pre-computed CSV tables...")
     # Search in cache/.runs, data/runs, and data/runs_synthetic for CSV files
     train_tables, test_tables, eval_tables = [], [], []
-    for search_path in [Path(cache_path), Path("data/runs"), Path("data/runs_synthetic")]:
+    for search_path in [Path(cache_path), Path("data/runs"), Path("cache/.runs_synthetic")]:
         if search_path.exists():
             logging.info(f"  Searching in: {search_path}")
             t_train, t_test, t_eval = find_existing_tables(search_path)

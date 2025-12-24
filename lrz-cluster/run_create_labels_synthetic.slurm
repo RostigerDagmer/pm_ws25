@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --partition=cm4_inter
-#SBATCH --time=04:00:00  # Should finish much faster with 64 CPUs
-#SBATCH --cpus-per-task=64  # Using 64 CPUs for maximum speed
-#SBATCH --mem=128G  # More memory for 64 workers
+#SBATCH --time=01:30:00  # 1.5 hours (sufficient with 96 CPUs)
+#SBATCH --cpus-per-task=96  # 96 CPUs (safe limit for cm4_inter)
+#SBATCH --mem=256G  # 256GB RAM (sufficient for 96 workers)
 #SBATCH --output=logs/create_labels_synthetic_%j.out
 #SBATCH --error=logs/create_labels_synthetic_%j.err
 #SBATCH --job-name=synthetic_labels
@@ -38,8 +38,8 @@ echo ""
 python scripts/create_labels_synthetic.py \
     --config configs/default.yaml \
     --seed 42 \
-    --n-models 200 \
-    --n-traces 50 \
+    --n-models 100 \
+    --n-traces 40 \
     --max-trace-length 50 \
     --min-depth 1 \
     --max-depth 3 \
@@ -47,8 +47,8 @@ python scripts/create_labels_synthetic.py \
     --workers $SLURM_CPUS_PER_TASK \
     --train 0.7 \
     --test 0.2 \
-    --eval 0.1
-    # --force-recompute  # Uncomment to regenerate alignment runs from scratch (required for first run or when changing parameters)
+    --eval 0.1 \
+    --force-recompute  # Required for first run or when changing parameters
 
 EXIT_CODE=$?
 
@@ -60,7 +60,7 @@ echo "============================================"
 
 if [ $EXIT_CODE -eq 0 ]; then
     echo "✓ SUCCESS: Synthetic data generated"
-    echo "Check data/runs_synthetic/ for output CSV files"
+    echo "Check cache/.runs_synthetic/ for output CSV files"
 else
     echo "✗ FAILED: Check logs/create_labels_synthetic_${SLURM_JOB_ID}.err"
 fi
