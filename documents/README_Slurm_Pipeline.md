@@ -8,11 +8,11 @@ This pipeline generates training data from real and synthetic sources, then trai
 
 | Script | Purpose | Partition | CPUs | Memory | Runs | Expected Runtime |
 |--------|---------|-----------|------|--------|------|------------------|
-| **run_create_labels_parallel.slurm** | Real data (21 XES datasets) | cm4_inter | 1029<br>(21 datasets × 49 CPUs) | 512GB | 10 | **~6.1 hours** |
+| **run_create_labels_parallel.slurm** | Real data (21 XES datasets) | cm4_inter | 224<br>(10 datasets × 22 CPUs per batch) | 480GB | 5 | **~2 hours** |
 | **run_create_labels_synthetic.slurm** | Synthetic data | cm4_inter | 96 | 256GB | 10 | **30-40 min** |
 | **run_evaluate_classifier.slurm** | Train & test classifier | serial_std | 32 | 128GB | - | **30-45 min** |
 
-**Total pipeline time: ~7-8 hours** (sequential execution due to MaxJobs=1 and MaxSubmit=2 limits)
+**Total pipeline time: ~3-4 hours** (sequential execution due to MaxJobs=1 and MaxSubmit=2 limits)
 
 ---
 
@@ -26,7 +26,7 @@ cd ~/pm_ws25
 # Step 1: Generate synthetic data first (faster, ~30-40 min)
 sbatch lrz-cluster/run_create_labels_synthetic.slurm
 
-# Step 2: After synthetic job completes, generate real data (~6.1 hours)
+# Step 2: After synthetic job completes, generate real data (~2 hours)
 sbatch lrz-cluster/run_create_labels_parallel.slurm
 
 # Step 3: After both complete, run evaluation (~30-45 min)
@@ -51,12 +51,12 @@ cat outputs/evaluate_classifier/summary.txt
 - Outputs to: `cache/.runs/`
 
 **Configuration:**
-- **Single Slurm job** with **1029 CPUs** total (cm4_inter partition)
-- **ALL 21 datasets processed in parallel** (49 CPUs each)
-- **512GB RAM** total
-- **10 alignment runs** per model-trace pair (`--runs 10`)
+- **Single Slurm job** with **224 CPUs** total (cm4_inter partition)
+- **21 datasets processed in 3 sequential batches** (22 CPUs each, 10+10+1 per batch)
+- **480GB RAM** total
+- **5 alignment runs** per model-trace pair (`--runs 5`)
 - **5 alignment algorithms** tested
-- **1 batch** to process all 21 datasets simultaneously
+- **3 batches** to process all 21 datasets (batch size = 10)
 
 **Submit:**
 ```bash
@@ -221,10 +221,10 @@ pm_ws25/
 ### Resource Usage:
 
 **Real Data Processing (bash background jobs approach):**
-- Needs: **1 Slurm job** with **1029 CPUs** (cm4_inter)
-- Runs: ALL 21 datasets in parallel (49 CPUs each) within the single job
-- Processes 21 datasets in 1 batch
-- Fits in cm4_inter: ✅ (uses ~99% of available CPUs)
+- Needs: **1 Slurm job** with **224 CPUs** (cm4_inter)
+- Runs: 21 datasets in **3 sequential batches** (22 CPUs each, batches of 10+10+1)
+- Processes 10 datasets at a time per batch
+- Fits in cm4_inter: ✅ (uses ~24% of partition CPUs)
 - **Workaround for MaxSubmit=2 limit** ✅
 
 **Synthetic Data Generation:**
@@ -287,8 +287,8 @@ ls -lh cache/.runs_synthetic/*.train.csv
 - Check resource limits: ensure you're not exceeding quotas
 
 **Out of memory:**
-- Real data: Each job has 80GB (sufficient for all datasets)
-- Synthetic: Job has 350GB (sufficient for 192 workers)
+- Real data: Job has 480GB RAM (sufficient for 10 datasets in parallel)
+- Synthetic: Job has 256GB RAM (sufficient for 96 workers)
 
 **Slow execution:**
 - Verify CPU allocation: `squeue -u $USER -o "%.18i %.9P %.8T %C"`
@@ -298,11 +298,11 @@ ls -lh cache/.runs_synthetic/*.train.csv
 
 ## Summary
 
-✅ **Optimized for maximum parallelism:** Uses cm4_inter partition with 1029 CPUs
+✅ **Optimized for single-node parallelism:** Uses cm4_inter partition with 224 CPUs
 ✅ **Sequential job execution:** Jobs run one at a time due to MaxJobs=1 limit
-✅ **Parallel dataset processing:** Bash background jobs process ALL 21 datasets simultaneously within single job (MaxSubmit=2 workaround)
-✅ **Completion time:** ~6.1 hours for all 21 datasets with 10 alignment runs per combination
-✅ **High quality:** 10 alignment runs (`--runs 10`) for robust statistical results
+✅ **Batch processing:** 21 datasets in 3 batches (10+10+1) within single job (MaxSubmit=2 workaround)
+✅ **Completion time:** ~2 hours for all 21 datasets with 5 alignment runs per combination
+✅ **Efficient processing:** 5 alignment runs (`--runs 5`) per model-trace pair
 ✅ **Intelligent caching:** Reuses alignment results across runs (use `--force-recompute` for first run)
 ✅ **Automatic hybrid training:** Combines all CSV files automatically
 
