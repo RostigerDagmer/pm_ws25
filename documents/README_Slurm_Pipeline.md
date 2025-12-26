@@ -110,7 +110,7 @@ squeue -u $USER
 
 # Watch real-time logs
 tail -f logs/create_labels_synthetic_*.out
-tail -f logs/create_labels_*_*.out  # For array jobs
+tail -f logs/create_labels_all_*.out  # For parallel processing job
 
 # Check generated files
 ls -lh cache/.runs_synthetic/*.train.csv
