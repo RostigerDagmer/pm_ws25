@@ -1,10 +1,11 @@
 #!/bin/bash
 #
-# Parallel Label Generation using Bash Background Jobs
+# Parallel Label Generation using Bash Background Jobs (OPTIMIZED)
 #
-# Processes 21 datasets in 2 sequential batches within a SINGLE job
-# Batch 1: 10 datasets, Batch 2: 11 datasets (22 workers each, 5 runs)
-# Expected total runtime: ~2 hours
+# Processes 21 datasets in 3 sequential batches within a SINGLE job
+# Batches: 7+7+7 datasets (32 workers each, 5 runs)
+# Uses /tmp for cache to avoid disk quota limits
+# Expected total runtime: ~6.6 hours
 #
 #SBATCH --job-name=create_labels_all
 #SBATCH --partition=cm4_inter
@@ -36,9 +37,57 @@ source ~/pm_ws25/.venv/bin/activate
 export PYTHONPATH="${PYTHONPATH}:${HOME}/pm_ws25"
 cd ${HOME}/pm_ws25
 
-export OMP_NUM_THREADS=22  # Each parallel job gets ~22 CPUs (224/10=22.4)
-export MKL_NUM_THREADS=22
-export NUMEXPR_NUM_THREADS=22
+# Use /tmp for ALL cache directories to avoid home directory quota issues (1.5TB available)
+TEMP_CACHE_BASE="/tmp/pm_cache_${SLURM_JOB_ID}"
+mkdir -p "$TEMP_CACHE_BASE"/{runs,unique_models,process_models}
+mkdir -p cache
+
+# Backup and symlink cache/.runs
+if [ -d "cache/.runs" ] && [ ! -L "cache/.runs" ]; then
+    mv cache/.runs "cache/.runs.backup_${SLURM_JOB_ID}"
+    echo "✓ Backed up cache/.runs"
+    # Copy existing cache to /tmp for reuse
+    if [ "$(ls -A cache/.runs.backup_${SLURM_JOB_ID})" ]; then
+        cp -r cache/.runs.backup_${SLURM_JOB_ID}/* "$TEMP_CACHE_BASE/runs/"
+        echo "✓ Copied $(ls cache/.runs.backup_${SLURM_JOB_ID}/*.pkl 2>/dev/null | wc -l) cached datasets to /tmp"
+    fi
+fi
+ln -sf "$TEMP_CACHE_BASE/runs" cache/.runs
+
+# Backup and symlink cache/.cache_unique_models
+if [ -d "cache/.cache_unique_models" ] && [ ! -L "cache/.cache_unique_models" ]; then
+    mv cache/.cache_unique_models "cache/.cache_unique_models.backup_${SLURM_JOB_ID}"
+    echo "✓ Backed up cache/.cache_unique_models"
+    # Copy existing cache to /tmp for reuse
+    if [ "$(ls -A cache/.cache_unique_models.backup_${SLURM_JOB_ID})" ]; then
+        cp -r cache/.cache_unique_models.backup_${SLURM_JOB_ID}/* "$TEMP_CACHE_BASE/unique_models/"
+        echo "✓ Copied cached unique models to /tmp"
+    fi
+fi
+ln -sf "$TEMP_CACHE_BASE/unique_models" cache/.cache_unique_models
+
+# Backup and symlink cache/.cache_process_models
+if [ -d "cache/.cache_process_models" ] && [ ! -L "cache/.cache_process_models" ]; then
+    mv cache/.cache_process_models "cache/.cache_process_models.backup_${SLURM_JOB_ID}"
+    echo "✓ Backed up cache/.cache_process_models"
+    # Copy existing cache to /tmp for reuse
+    if [ "$(ls -A cache/.cache_process_models.backup_${SLURM_JOB_ID})" ]; then
+        cp -r cache/.cache_process_models.backup_${SLURM_JOB_ID}/* "$TEMP_CACHE_BASE/process_models/"
+        echo "✓ Copied cached process models to /tmp"
+    fi
+fi
+ln -sf "$TEMP_CACHE_BASE/process_models" cache/.cache_process_models
+
+echo "✓ All cache directories using /tmp:"
+echo "  cache/.runs -> $TEMP_CACHE_BASE/runs"
+echo "  cache/.cache_unique_models -> $TEMP_CACHE_BASE/unique_models"
+echo "  cache/.cache_process_models -> $TEMP_CACHE_BASE/process_models"
+echo "✓ /tmp space: $(df -h /tmp | tail -1 | awk '{print $4}') available"
+echo ""
+
+export OMP_NUM_THREADS=32  # Each parallel job gets 32 CPUs (224/7=32)
+export MKL_NUM_THREADS=32
+export NUMEXPR_NUM_THREADS=32
 
 # Create dataset list file
 cat > /tmp/datasets_${SLURM_JOB_ID}.txt <<'EOF'
@@ -65,15 +114,15 @@ data/6a0a26d2-82d0-4018-b1cd-89afb0e8627f/DomesticDeclarations.xes
 data/db35afac-2133-40f3-a565-2dc77a9329a3/PermitLog.xes
 EOF
 
-echo "Running 21 datasets in 2 batches (22 workers/dataset, 5 runs each)..."
-echo "Batch 1: 10 datasets | Batch 2: 11 datasets (estimated runtime: ~1 hour per batch, ~2 hours total)"
+echo "Running 21 datasets in 3 batches (32 workers/dataset, 5 runs each)..."
+echo "Batch 1-3: 7 datasets each (estimated runtime: ~2.2 hours per batch, ~6.6 hours total)"
 echo ""
 
 # Process ALL datasets in parallel (batch size = total datasets)
 DATASETS_FILE=/tmp/datasets_${SLURM_JOB_ID}.txt
 SUCCESS_COUNT=0
 FAIL_COUNT=0
-BATCH_SIZE=10  # Run 10 datasets in parallel (224 CPUs / 22 per dataset ≈ 10)
+BATCH_SIZE=7  # Run 7 datasets in parallel (224 CPUs / 32 per dataset ≈ 7)
 
 # Read datasets into array
 mapfile -t DATASETS < "$DATASETS_FILE"
@@ -109,7 +158,7 @@ for ((i=0; i<${#DATASETS[@]}; i+=BATCH_SIZE)); do
                 --test 0.2 \
                 --eval 0.1 \
                 --runs 5 \
-                --workers 22 \
+                --workers 32 \
                 > logs/dataset_${SLURM_JOB_ID}_${DATASET_NUM}.out 2>&1
             # --force-recompute  # Uncomment this line (and add \ to line above) to regenerate all data
 
@@ -155,6 +204,61 @@ echo "============================================"
 
 # Cleanup
 rm -f /tmp/datasets_${SLURM_JOB_ID}.txt
+
+# Move cache from /tmp to final location
+echo ""
+echo "============================================"
+echo "Moving cache from /tmp to final location..."
+echo "============================================"
+
+# Move cache/.runs
+if [ -L "cache/.runs" ]; then
+    if [ -d "cache/.runs.backup_${SLURM_JOB_ID}" ]; then
+        cp -v "$TEMP_CACHE_BASE/runs"/* "cache/.runs.backup_${SLURM_JOB_ID}/" 2>/dev/null || true
+        rm cache/.runs
+        mv "cache/.runs.backup_${SLURM_JOB_ID}" cache/.runs
+        echo "✓ Merged runs cache"
+    else
+        rm cache/.runs
+        mv "$TEMP_CACHE_BASE/runs" cache/.runs
+        echo "✓ Moved runs cache"
+    fi
+fi
+
+# Move cache/.cache_unique_models
+if [ -L "cache/.cache_unique_models" ]; then
+    if [ -d "cache/.cache_unique_models.backup_${SLURM_JOB_ID}" ]; then
+        cp -v "$TEMP_CACHE_BASE/unique_models"/* "cache/.cache_unique_models.backup_${SLURM_JOB_ID}/" 2>/dev/null || true
+        rm cache/.cache_unique_models
+        mv "cache/.cache_unique_models.backup_${SLURM_JOB_ID}" cache/.cache_unique_models
+        echo "✓ Merged unique_models cache"
+    else
+        rm cache/.cache_unique_models
+        mv "$TEMP_CACHE_BASE/unique_models" cache/.cache_unique_models
+        echo "✓ Moved unique_models cache"
+    fi
+fi
+
+# Move cache/.cache_process_models
+if [ -L "cache/.cache_process_models" ]; then
+    if [ -d "cache/.cache_process_models.backup_${SLURM_JOB_ID}" ]; then
+        cp -v "$TEMP_CACHE_BASE/process_models"/* "cache/.cache_process_models.backup_${SLURM_JOB_ID}/" 2>/dev/null || true
+        rm cache/.cache_process_models
+        mv "cache/.cache_process_models.backup_${SLURM_JOB_ID}" cache/.cache_process_models
+        echo "✓ Merged process_models cache"
+    else
+        rm cache/.cache_process_models
+        mv "$TEMP_CACHE_BASE/process_models" cache/.cache_process_models
+        echo "✓ Moved process_models cache"
+    fi
+fi
+
+# Clean up temp directory
+rm -rf "$TEMP_CACHE_BASE"
+FINAL_SIZE=$(du -sh cache/ 2>/dev/null | cut -f1)
+echo "✓ All caches moved successfully (total: $FINAL_SIZE)"
+echo "============================================"
+echo ""
 
 if [ $FAIL_COUNT -eq 0 ]; then
     echo "✓ ALL DATASETS PROCESSED SUCCESSFULLY"

@@ -8,7 +8,7 @@ This pipeline generates training data from real and synthetic sources, then trai
 
 | Script | Purpose | Partition | CPUs | Memory | Runs | Expected Runtime |
 |--------|---------|-----------|------|--------|------|------------------|
-| **run_create_labels_parallel.slurm** | Real data (21 XES datasets) | cm4_inter | 224<br>(10 datasets × 22 CPUs per batch) | 480GB | 5 | **~4-4.5 hours** |
+| **run_create_labels_parallel.slurm** | Real data (21 XES datasets) | cm4_inter | 224<br>(7 datasets × 32 CPUs per batch) | 480GB | 5 | **~6.6 hours** |
 | **run_create_labels_synthetic.slurm** | Synthetic data | cm4_inter | 96 | 256GB | 10 | **30-40 min** |
 | **run_evaluate_classifier.slurm** | Train & test classifier | serial_std | 32 | 128GB | - | **30-45 min** |
 
@@ -50,11 +50,12 @@ cat outputs/evaluate_classifier/summary.txt
 
 **Configuration:**
 - **Single Slurm job** with **224 CPUs** total (cm4_inter partition)
-- **21 datasets processed in 3 sequential batches** (22 CPUs each, 10+10+1 per batch)
+- **21 datasets processed in 3 sequential batches** (32 CPUs each, 7+7+7 per batch)
+- **Uses /tmp (1.5TB) for temporary cache** to avoid home directory quota limits
 - **480GB RAM** total
 - **5 alignment runs** per model-trace pair (`--runs 5`)
 - **5 alignment algorithms** tested
-- **3 batches** to process all 21 datasets (batch size = 10)
+- **3 batches** to process all 21 datasets (batch size = 7)
 
 **Submit:**
 ```bash
@@ -112,7 +113,6 @@ tail -f logs/create_labels_synthetic_*.out
 tail -f logs/create_labels_*_*.out  # For array jobs
 
 # Check generated files
-∂
 ls -lh cache/.runs_synthetic/*.train.csv
 ```
 
@@ -220,8 +220,9 @@ pm_ws25/
 
 **Real Data Processing (bash background jobs approach):**
 - Needs: **1 Slurm job** with **224 CPUs** (cm4_inter)
-- Runs: 21 datasets in **3 sequential batches** (22 CPUs each, batches of 10+10+1)
-- Processes 10 datasets at a time per batch
+- Runs: 21 datasets in **3 sequential batches** (32 CPUs each, batches of 7+7+7)
+- Processes 7 datasets at a time per batch
+- Uses /tmp (1.5TB) for cache to avoid disk quota limits
 - Fits in cm4_inter: ✅ (uses ~24% of partition CPUs)
 - **Workaround for MaxSubmit=2 limit** ✅
 
@@ -240,6 +241,13 @@ pm_ws25/
 All scripts use intelligent caching to avoid recomputing alignments:
 - **First run:** Requires `--force-recompute` flag (uncomment in script) to generate alignment data from scratch
 - **Subsequent runs:** Reuses cached alignment results unless you uncomment `--force-recompute` to regenerate everything
+
+### Disk Quota Optimization
+
+**run_create_labels_parallel.slurm** uses a smart caching strategy:
+- **During execution:** Writes all cache directories to `/tmp` (1.5TB available, no quota limits)
+- **After completion:** Automatically moves cache back to `~/pm_ws25/cache/` (`.runs`, `.cache_unique_models`, `.cache_process_models`)
+- **Benefit:** Avoids home directory disk quota issues during large parallel writes
 
 To regenerate data (e.g., after changing parameters), uncomment the `--force-recompute` line in the respective Slurm script.
 
@@ -285,10 +293,59 @@ ls -lh cache/.runs_synthetic/*.train.csv
 - Check resource limits: ensure you're not exceeding quotas
 
 **Out of memory:**
-- Real data: Job has 480GB RAM (sufficient for 10 datasets in parallel)
+- Real data: Job has 480GB RAM (sufficient for 7 datasets in parallel)
 - Synthetic: Job has 256GB RAM (sufficient for 96 workers)
 
 **Slow execution:**
 - Verify CPU allocation: `squeue -u $USER -o "%.18i %.9P %.8T %C"`
 - Check logs for errors or warnings
+
+**Pickle data truncation error:**
+
+**Symptom:**
+```
+_pickle.UnpicklingError: pickle data was truncated
+```
+
+**Root cause:**
+- Occurs during parallel batch processing when multiple datasets compete for shared cache files
+- Process model cache files (`.cache_process_models/*.pkl`) can be corrupted due to concurrent write conflicts
+- Truncated files typically have suspicious sizes (e.g., exactly 4MB = 2^22 bytes)
+
+**How to fix:**
+
+1. **Identify failed datasets:**
+```bash
+# Check job summary for failures
+tail -50 logs/create_labels_all_*.out | grep -A5 "SUMMARY"
+
+# Find datasets with errors
+grep -l "pickle data was truncated" logs/dataset_*.out
+```
+
+2. **Delete corrupted cache files:**
+```bash
+# Example: If dataset hash is db35afac-2133-40f3-a565-2dc77a9329a3
+rm -fv cache/.cache_process_models/db35afac-2133-40f3-a565-2dc77a9329a3.pkl
+```
+
+3. **Modify and run single-dataset script:**
+
+Edit `lrz-cluster/run_permitlog.slurm` and change the `DATASET` variable (around line 96):
+
+```bash
+DATASET="data/<HASH>/<DATASET_NAME>.xes"
+```
+
+Example for PermitLog:
+```bash
+DATASET="data/db35afac-2133-40f3-a565-2dc77a9329a3/PermitLog.xes"
+```
+
+Then submit:
+```bash
+sbatch lrz-cluster/run_permitlog.slurm
+```
+
+This script uses all 224 CPUs for the single dataset (avoiding parallel competition) and automatically reuses existing cache.
 
