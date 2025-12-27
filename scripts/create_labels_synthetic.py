@@ -59,7 +59,7 @@ def build_synthetic_pipeline(
         batch_size=128,  # Batch size for simulation
     )
 
-    base_path = cfg.alignment.cache_path or Path("data/runs_synthetic")
+    base_path = cfg.alignment.cache_path or Path("cache/.runs_synthetic")
 
     return RunDataset(
         base_path=base_path,
