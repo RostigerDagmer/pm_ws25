@@ -15,28 +15,25 @@ import pandas as pd
 import numpy as np
 import random
 from tqdm import tqdm
-
-from dataloaders.runs import RunDataset
 from dataloaders.labels import LabelDataset
 from dataloaders.util import (
     get_natural_dataset,
     get_synthetic_dataset,
     build_pipeline,
 )
-from features.extractors import SpectralFeatureExtractor
+from features.spectral_extractor import SpectralFeatureExtractor
 from models.spectral_model import (
     SpectralModel,
     traces_to_tensors,
     prepare_masked_batch,
 )
 from util.rng import RNG
-
 import os
 
 # Configuration
 LOGGING_LEVEL = logging.INFO
 SEED = 1
-EPOCHS = 10
+EPOCHS = 50
 
 
 @torch.no_grad()
@@ -146,33 +143,33 @@ def train():
     config_path = "./configs/default.yaml"
 
     DATASETS = {
-        'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
-        '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
-            'Sepsis%20Cases%20-%20Event%20Log.xes'
-        ],
-        '500573e6-accc-4b0c-9576-aa5468b10cee': [
-            'BPI_Challenge_2013_incidents.xes'
-        ],
-        '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': [
-            'InternationalDeclarations.xes'
-        ],
-        'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
-        '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
-        '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
-        'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
-        '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
+        # 'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
+        # '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
+        #     'Sepsis%20Cases%20-%20Event%20Log.xes'
+        # ],
+        # '500573e6-accc-4b0c-9576-aa5468b10cee': [
+        #     'BPI_Challenge_2013_incidents.xes'
+        # ],
+        # '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': [
+        #     'InternationalDeclarations.xes'
+        # ],
+        # 'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
+        # '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
+        # '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
+        # 'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
+        # '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
         "synthetic": ["synthetic"],
     }
     # 3. Model Initialization
     model = SpectralModel(
-        d_model=64,
-        d_trace=64,
-        hidden_dim=64,
-        mlp_hidden_dim=128,
+        d_model=128,
+        d_trace=128,
+        hidden_dim=256,
+        mlp_hidden_dim=512,
         n_classes=6,
         num_heads=4,
-        n_layers=2,
-        dropout=0.25,
+        n_layers=3,
+        dropout=0.1,
         pretraining=False,  # Important!
     ).to(device)
 
@@ -180,7 +177,11 @@ def train():
     for dataset_uuid, files in list(DATASETS.items()):
         if dataset_uuid.endswith("synthetic"):
             run_dataset = get_synthetic_dataset(
-                Path("./cache/.runs"), seed=SEED, device=device
+                Path("./cache/.runs"),
+                seed=SEED,
+                device=device,
+                num_models=100,
+                num_traces=16,
             )
         else:
             run_dataset = get_natural_dataset(
@@ -211,6 +212,9 @@ def train():
     )
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+    lr_schedule = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=EPOCHS
+    )
     criterion = nn.CrossEntropyLoss(reduction="none")
 
     for epoch in range(EPOCHS):
@@ -235,7 +239,6 @@ def train():
             logits = model.pool(logits)
             loss = criterion(logits, batch_y)
 
-            # scale loss by timing per category
             loss = loss.mean()
 
             loss.backward()
@@ -251,6 +254,7 @@ def train():
 
         # Validation
         val_loss, val_acc = evaluate(model, val_batches, criterion, device)
+        lr_schedule.step()
 
         pbar.set_postfix(
             {

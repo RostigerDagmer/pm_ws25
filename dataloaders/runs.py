@@ -25,7 +25,7 @@ from tqdm import tqdm
 from dataloaders.synthetic import SyntheticProcessModelDataset
 from experiments.simulation.noise import inject_noise_trace
 from experiments.simulation.simulate import simulate_batch, apply_labels
-from features.extractors import CompositeFeatureExtractor
+from features import CompositeFeatureExtractor
 from pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.objects.log.obj import EventLog, Trace
 import cProfile
@@ -99,7 +99,6 @@ class AlignerSpec(Enum):
         PM4pyAligner("VERSION_DIJKSTRA_NO_HEURISTICS"),
         PM4pyAligner("VERSION_REMAINING_TRACE"),
         PM4pyAligner("VERSION_REQUIRED_MODEL_MOVE"),
-        PM4pyAligner("VERSION_REQUIRED_ACTIVITIES"),
         PM4pyAligner("VERSION_STATE_EQUATION_A_STAR"),
         PM4pyAligner("VERSION_STATE_EQUATION_A_STAR_ILP"),
         # PM4pyAligner(Variants.VERSION_INCREMENTAL_A_STAR),

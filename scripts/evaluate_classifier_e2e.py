@@ -19,7 +19,7 @@ from util.rng import RNG
 import logging
 from pathlib import Path
 
-from features.extractors import CompositeFeatureExtractor
+from features import CompositeFeatureExtractor
 from models import (
     XGBoostClassifier,
     SingleBestSolver,
@@ -32,11 +32,15 @@ from dataloaders.util import (
     create_tables,
     find_existing_tables,
 )
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 
 SEED = 1
-OUTPUT_DIR = Path("outputs") / "evaluate_classifier"
+
+OUTPUT_DIR = (
+    Path("outputs") / f"evaluate_classifier_{datetime.now():%Y%m%d_%H%M%S}"
+)
 
 TRAIN_DATASETS = {
     # 'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
@@ -45,34 +49,34 @@ TRAIN_DATASETS = {
     # '679b11cf-47cd-459e-a6de-9ca614e25985': ['BPIC15_4.xes'],
     # '3301445f-95e8-4ff0-98a4-901f1f204972': ['BPI%20Challenge%202018.xes'],
     # '3926db30-f712-4394-aebc-75976070e91f': ['BPI_Challenge_2012.xes'],
-    'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
     # '6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd': [
     #     'Hospital%20Billing%20-%20Event%20Log.xes'
-    # ],
-    # '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
-    #     'Sepsis%20Cases%20-%20Event%20Log.xes'
     # ],
     # 'd06aff4b-79f0-45e6-8ec8-e19730c248f1': ['BPI_Challenge_2019.xes'],
     # '3537c19d-6c64-4b1d-815d-915ab0e479da': [
     #     'BPI_Challenge_2013_open_problems.xes'
     # ],
+    # 'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
+    # 'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
     # '500573e6-accc-4b0c-9576-aa5468b10cee': [
     #     'BPI_Challenge_2013_incidents.xes'
     # ],
-    # '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
-    # 'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
+    '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
+    'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
     # '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
-    # 'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
+    # '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
+    #     'Sepsis%20Cases%20-%20Event%20Log.xes'
+    # ],
 }
 
 TEST_DATASETS = {
     # 'b32c6fe5-f212-4286-9774-58dd53511cf8': ['BPIC15_5.xes'],
-    '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
+    # '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
     'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
     '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
-    'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
-        'BPI_Challenge_2013_closed_problems.xes'
-    ],
+    # 'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
+    #     'BPI_Challenge_2013_closed_problems.xes'
+    # ],
 }
 
 
@@ -84,7 +88,7 @@ if __name__ == "__main__":
     arg_parser.add_argument(
         "--use-tables",
         action="store_true",
-        help="Use existing feature tables to skip feature extraction",
+        help="Use existing feature tables to shortcut feature extraction",
     )
     args = arg_parser.parse_args()
 
@@ -118,7 +122,9 @@ if __name__ == "__main__":
                     train_run_datasets.append(run_dataset)
 
         train_run_datasets.append(
-            get_synthetic_dataset(Path(cache_path), seed=SEED, count=50)
+            get_synthetic_dataset(
+                Path(cache_path), seed=SEED, num_models=100, num_traces=8
+            )
         )
         train_tables, test_tables, eval_tables = [], [], []
         for run_dataset in train_run_datasets:
@@ -129,6 +135,7 @@ if __name__ == "__main__":
                 schema=DF_SCHEMA,
                 fe=CompositeFeatureExtractor(),
                 fmt_row=format_row,
+                force_recompute=True,
             )
             train_tables.append(t_train)
             test_tables.append(t_test)
@@ -142,34 +149,35 @@ if __name__ == "__main__":
     logging.info("\nTraining XGBoostClassifier...")
     classifier = XGBoostClassifier(
         tables=train_tables,
-        # run_datasets=train_run_datasets,
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
     )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    has_transformer_model = Path("transformer_model.pth").exists()
 
-    transformer_model = SpectralModel(
-        d_model=64,
-        d_trace=64,
-        hidden_dim=64,
-        mlp_hidden_dim=128,
-        n_classes=6,
-        num_heads=4,
-        n_layers=2,
-        dropout=0.25,
-        pretraining=False,  # Important!
-    ).to(device)
+    if has_transformer_model:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    transformer_model.load_state_dict(torch.load("transformer_model.pth"))
-    transformer_model.eval()
+        transformer_model = SpectralModel(
+            d_model=128,
+            d_trace=128,
+            hidden_dim=256,
+            mlp_hidden_dim=512,
+            n_classes=6,
+            num_heads=4,
+            n_layers=3,
+            dropout=0.1,
+            pretraining=False,
+        ).to(device)
+
+        transformer_model.load_state_dict(torch.load("transformer_model.pth"))
+        transformer_model.eval()
 
     # Train baselines
     logging.info("\nTraining baseline classifiers...")
     single_best = SingleBestSolver(
         tables=train_tables,
-        # run_datasets=train_run_datasets,
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
@@ -177,7 +185,6 @@ if __name__ == "__main__":
 
     random_clf = RandomClassifier(
         tables=train_tables,
-        # run_datasets=train_run_datasets,
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
@@ -199,7 +206,9 @@ if __name__ == "__main__":
                 logging.info(f"  ✓ Loaded {len(run_dataset)} runs from cache")
 
     test_run_datasets.append(
-        get_synthetic_dataset(Path(cache_path), seed=SEED + 1, count=4)
+        get_synthetic_dataset(
+            Path(cache_path), seed=SEED + 1, num_models=20, num_traces=16
+        )
     )
 
     test_dataset = LabelDataset(test_run_datasets)
@@ -215,7 +224,8 @@ if __name__ == "__main__":
     # Compare with baselines
     logging.info("\nComparing with baselines...")
     comparison_df = evaluator.compare_with_baselines(
-        [single_best, transformer_model, random_clf]
+        [single_best, random_clf]
+        + ([transformer_model] if has_transformer_model else [])
     )
     logging.info("\n" + comparison_df.to_string())
 
@@ -223,6 +233,6 @@ if __name__ == "__main__":
         metrics=metrics,
         comparison_df=comparison_df,
         output_dir=OUTPUT_DIR,
-        train_count=len(train_run_datasets),
-        test_count=len(test_run_datasets),
+        train_count=len(train_tables),
+        test_count=len(test_tables),
     )

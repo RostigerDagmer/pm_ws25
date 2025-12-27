@@ -11,7 +11,7 @@ from pm4py.objects.petri_net.utils.petri_utils import (
     add_transition, add_place, add_arc_from_to, remove_arc, construct_trace_net
 )
 from pm4py.vis import view_petri_net
-from features.extractors import CompositeFeatureExtractor
+from features import CompositeFeatureExtractor
 
 
 class TestCompositeFeatureExtractor(unittest.TestCase):

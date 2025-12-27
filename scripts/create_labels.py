@@ -1,15 +1,12 @@
 import argparse
 import logging
-import os
 import yaml
-import random
-from torch.utils.data import DataLoader, Dataset
 from configs.schema import PipelineConfig
 from dataloaders.runs import RunDataset, PerfCounter
 import numpy as np
 import pandas as pd
 
-from features.extractors import CompositeFeatureExtractor
+from features import CompositeFeatureExtractor
 from util.rng import RNG
 from dataloaders.util import create_tables, build_pipeline
 

@@ -17,7 +17,7 @@ import logging
 from pathlib import Path
 from experiments.simulation.models import seq
 from experiments.simulation.structured_net import StructuredNet
-from features.extractors import StateSpaceSizeExtractor, ModelFeatureExtractor
+from features.base_extractor import StateSpaceSizeExtractor, ModelFeatureExtractor
 from pm4py.visualization.petri_net import visualizer as pn_visualizer
 from util.distributions import CategoricalSpec, PoissonSpec, BernoulliDepthLinearSpec
 from dataloaders.synthetic import SyntheticProcessModelDataset

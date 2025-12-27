@@ -4,7 +4,7 @@ from experiments.simulation.simulate import simulate_batch
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-from features.extractors import SpectralFeatureExtractor
+from features.spectral_extractor import SpectralFeatureExtractor
 from util.distributions import (
     CategoricalSpec,
     PoissonSpec,
@@ -35,9 +35,6 @@ PARAM_GRID = [
     for w in [2, 3, 4]
 ]
 
-# print(f"Total Configs: {PARAM_GRID}")
-# print(f"Total Models: {len(PARAM_GRID)}")
-
 
 @torch.no_grad()
 def inject_pretraining_noise(
@@ -49,6 +46,10 @@ def inject_pretraining_noise(
     p_drop: float = 0.03,  # replace known token with PAD (-1)
     p_swap: float = 0.03,  # swap adjacent tokens
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Vectorized equivalent to experiments.simulation.inject_noise_trace
+    """
+
     device = tok_idx.device
     B, S = tok_idx.shape
 
@@ -114,19 +115,18 @@ def train():
     )
 
     model = SpectralModel(
-        d_model=64,
-        d_trace=64,
-        hidden_dim=64,
-        mlp_hidden_dim=128,
+        d_model=128,
+        d_trace=128,
+        hidden_dim=256,
+        mlp_hidden_dim=512,
         n_classes=6,
         num_heads=4,
-        n_layers=2,
-        dropout=0.25,
+        n_layers=3,
+        dropout=0.1,
         pretraining=True,  # Important!
     ).to(device)
 
-    extractor = SpectralFeatureExtractor(d_model=64, n_coeffs=8)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4)
 
     # Standard Cross Entropy
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
@@ -150,7 +150,7 @@ def train():
             tok_idx, unk_bucket = inject_pretraining_noise(
                 tok_idx=logs_tensor,
                 L=len(net_tensor.labels),
-                K=model.unk_buckets.num_embeddings,  # if it's nn.Embedding
+                K=model.unk_buckets.num_embeddings,
                 unk_bucket=None,
                 p_unk=0.07,
                 p_drop=0.03,
@@ -159,7 +159,7 @@ def train():
 
             # 2. Prepare Masked Inputs & Targets
             model_basis, embedded_log, targets = prepare_masked_batch(
-                extractor,
+                model.feature_extractor,
                 model,
                 net_tensor.pre,
                 net_tensor.post,
@@ -171,7 +171,6 @@ def train():
             )
 
             # 3. Batchify Model Basis
-            # The basis is unique to the Petri net, but needs to be repeated for the batch
             # Basis: [1, T_vocab, d_model] -> [B, T_vocab, d_model]
             batch_model_basis = model_basis.repeat(embedded_log.shape[0], 1, 1)
 
@@ -182,7 +181,6 @@ def train():
             logits = model(batch_model_basis, embedded_log)
 
             # 5. Calculate Loss
-            # Flatten for CrossEntropy:
             # Logits -> [B * Seq_Len, T_vocab]
             # Targets -> [B * Seq_Len]
 
@@ -195,17 +193,11 @@ def train():
                 optimizer.zero_grad()
                 continue
 
-            # print(f"flat_logits: {flat_logits}")
-            # print(f"flat_logits.shape: {flat_logits.shape}")
-            # print(f"flat_targets: {flat_targets.tolist()}")
-            # print(f"flat_targets.shape: {flat_targets.shape}")
-
             loss = loss_fn(flat_logits, flat_targets)
 
             loss.backward()
             optimizer.step()
 
-            # print(f"Loss: {loss.item():.4f}")
         torch.save(model.state_dict(), "spectral_model_pretrained.pth")
 
 

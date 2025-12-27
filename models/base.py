@@ -19,7 +19,7 @@ from tqdm import tqdm
 from sklearn.preprocessing import LabelEncoder
 from dataclasses import dataclass
 
-from features.extractors import BaseFeatureExtractor
+from features.base_extractor import BaseFeatureExtractor
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.objects.log.obj import Trace
 from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
@@ -224,8 +224,12 @@ class ClassificationModel(ABC):
             parsed_features = (
                 table['feature_vector']
                 .apply(
-                    lambda x: np.fromstring(
-                        x.strip('[]').replace('\n', ' '), sep=' '
+                    lambda x: (
+                        np.fromstring(
+                            x.strip('[]').replace('\n', ' '), sep=' '
+                        )
+                        if not isinstance(x, np.ndarray)
+                        else x
                     )
                 )
                 .tolist()

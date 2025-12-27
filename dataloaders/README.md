@@ -10,24 +10,9 @@ On distros/OS with perl based `rename`:
 rename -n 's/^.*?_uuid_//' data/*_uuid_*
 ```
 
-# Dataloaders
+# Log Dataloaders
 
-Because loading the data using pm4py is trivial and I presume we're going to use torch for the ML part I already created Dataloaders for CSV and XES.
-To be as generic as possible w.r.t. feature definition in the dataloader the constructor takes both a **vocab_fn** and a **feature_fn** Callable argument that you have to provide.
-
-##### vocab_fn
-
-Has to map trace attributes to indices or dicts of key -> value for each attribute. Think of it like a tokenizer over the vocabulary of the attributes of the trace.
-There are two variants already in the file of the BaseClass.
-One builds a nested dict the other builds a flat dict.
-
-##### feature_fn
-
-Is a builder for the actual feature function that has to map a trace to a feature vector.
-You provide the dataset with a function taking in the vocab you have built or is produced by one of the defaults.
-You return a function that takes a trace and returns a tensor of features.
-
-An example is also in the file of the base class.
+Essentially just a typed wrapper for one of two PM4PY import codepaths.
 
 
 # Process Model Dataset
@@ -38,8 +23,8 @@ dataloaders.net.DISCOVERY_METHODS.ALL is a default for all discovery functions c
 But you can also pass your own.
 You should provide a dictionary of parameter lists, a "parameter grid" for the discovery algorithm.
 All possible permutations of parameters that are valid for a given function will be run.
-**The dataset thus contains all combinations of product DISCOVERY_METHOD x PARAM_GRID**.
-This means the dataset can get quite big... especially if you use the PARAM_GRID.EXTENSIVE default.
+**The dataset thus contains all combinations of the product DISCOVERY_METHOD x PARAM_GRID**.
+This means the dataset can get quite big.
 
 
 # Runs Dataset
@@ -58,12 +43,19 @@ In runs.py `__main__` one can find an example of an end to end construction of a
 Initial construction can take quite a while. Process Discovery takes quite some time and running every process model against every trace with slight perturbations expands the total item set a lot.
 One can restrict the number of traces taken from the original dataset by specifying a slice range: e.g. only try to align traces (10, 50).
 
-After caching is complete extracting a "labeled" dataset becomes quite simple by grouping on the ids of each dataset item.
+After caching is complete, extracting a "labeled" dataset becomes quite simple by grouping on the ids of each dataset item.
 Example for this is also in `__main__`.
 
 Datasets are "incremental" meaning they store all previously generated data yet only access items that result from the current configuration.
 This means that configurations can be "expanded" without recomputing already present items.
 
+
+# Synthetic Process Models and Eventlogs
+
+RunDataset's can also accept SyntheticProcessModelDataset's. When using SyntheticProcessModelDatasets with RunDataset one has to use a different Trace Sampler object (SyntheticTraceSampler) because Synthetic EventLogs
+as well as Synthetic Process Models never materialize on disk. Both are resampled based on their unique and deterministic sampling configuration which in many cases is as fast or faster than read and deserializing from disk.
+Essentially the flow from Eventlog to ProcessModel happens in reverse for Synthetic data. Which is why the API of RunDataset is not entirely congruent for this case.
+
 TODOs:
 
-    🔄 caching.
+    ✅ caching.

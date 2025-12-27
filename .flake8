@@ -1,5 +1,5 @@
 # .flake8
 [flake8]
 exclude = .git,__pycache__,pm4py
-ignore = E203, E501, E704, F401, F403, F405, W503, W504, F841, E741
+ignore = E203, E501, E704, F401, F403, F405, W503, W504, F841, E722, E741
 # mirror of pm4py codeQ

@@ -16,7 +16,7 @@ from dataloaders.csv_log import CSVEventLogDataset
 from dataloaders.xes_log import XESEventLogDataset
 from dataloaders.synthetic import SyntheticProcessModelDataset
 from dataloaders.runs import RunDataset, AlignerSpec, SyntheticTraceSampler
-from features.extractors import BaseFeatureExtractor
+from features.base_extractor import BaseFeatureExtractor
 from configs.schema import PipelineConfig
 from util.rng import RNG
 
@@ -179,7 +179,11 @@ def get_natural_dataset(
 
 
 def get_synthetic_dataset(
-    cache_path: Path, seed: int = 1, count: int = 20, device: str = "cpu"
+    cache_path: Path,
+    seed: int = 1,
+    num_models: int = 20,
+    num_traces: int = 32,
+    device: str = "cpu",
 ) -> RunDataset:
     RNG.initialize(seed)
 
@@ -209,7 +213,7 @@ def get_synthetic_dataset(
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                count,  # Number of models per config
+                num_models,  # Number of models per config
             ),
             (
                 {  # xor dominant
@@ -224,7 +228,7 @@ def get_synthetic_dataset(
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                count,  # Number of models per config
+                num_models,  # Number of models per config
             ),
             (
                 {  # shallow and wide xor dominant
@@ -239,7 +243,7 @@ def get_synthetic_dataset(
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                count,  # Number of models per config
+                num_models,  # Number of models per config
             ),
             (
                 {  # shallow and wide xor / loop dominant
@@ -254,7 +258,7 @@ def get_synthetic_dataset(
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                count,  # Number of models per config
+                num_models,  # Number of models per config
             ),
             (
                 {  # loop dominant
@@ -269,7 +273,7 @@ def get_synthetic_dataset(
                     "min_depth": MIN_DEPTH,
                     "max_depth": MAX_DEPTH,
                 },
-                count,  # Number of models per config
+                num_models,  # Number of models per config
             ),
         ],
     )
@@ -277,7 +281,7 @@ def get_synthetic_dataset(
         ds=synthetic_dataset,
         seed=RNG.get_seed(),
         batch_size=128,
-        slice=range(0, 8),
+        slice=range(0, num_traces),
         steps=40,
         device=device,
     )

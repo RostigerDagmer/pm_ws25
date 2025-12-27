@@ -1,6 +1,6 @@
 seed: 1
 discovery:
-  methods: ["inductive"] # either a DISCOVERY_METHOD variant or a list of any in the set { "inductive","heuristic", "alpha", "alpha_plus", "ilp" }
+  methods: ["inductive" , "heuristic"] # either a DISCOVERY_METHOD variant or a list of any in the set { "inductive","heuristic", "alpha", "alpha_plus", "ilp" }
   params: # method-specific lists of parameters (only eligible will be applied to a method)
     noise_threshold: [0.0, 0.1, 0.2, 0.3]
     disable_fallthroughs: true

@@ -3,7 +3,7 @@ from pathlib import Path
 from dataloaders.runs import AlignerSpec
 from dataloaders.synthetic import SyntheticProcessModelDataset
 from sklearn.preprocessing._label import LabelEncoder
-from features.extractors import SpectralFeatureExtractor
+from features.spectral_extractor import SpectralFeatureExtractor
 from models.base import ClassificationModel, PredictionResult
 from experiments.simulation.structured_net import StructuredNet
 from pm4py.objects.log.obj import Trace
@@ -190,6 +190,7 @@ class SpectralModel(nn.Module, ClassificationModel):
         self.d_trace = d_trace
         self.hidden_dim = hidden_dim
         self.pretraining = pretraining
+        self.n_classes = n_classes
 
         self.positional_encoding = RotaryEmbedding(hidden_dim)
         self.feature_extractor = SpectralFeatureExtractor(
@@ -310,8 +311,6 @@ class SpectralModel(nn.Module, ClassificationModel):
             attn_output = mlp_block(attn_output) + attn_output
             q = attn_output + q  # skip connection
 
-        # 3. MLP Head
-        # Squeeze sequence dim: [B, 1, hidden_dim] -> [B, hidden_dim]
         if self.pretraining:
             k_v_t = k_v.transpose(1, 2)
 
@@ -320,9 +319,11 @@ class SpectralModel(nn.Module, ClassificationModel):
             logits = torch.bmm(q, k_v_t) / torch.sqrt(
                 torch.tensor(self.d_model, dtype=torch.float32)
             )
+        # 3. MLP Head
         else:
-            mlp_input = q.squeeze(1)
-            logits = self.mlp_head(mlp_input)
+            B, S, V = q.shape
+            logits = self.mlp_head(q.view(B * S, V))
+            logits = logits.view(B, S, self.n_classes)
 
         return logits
 
@@ -373,6 +374,7 @@ class SpectralModel(nn.Module, ClassificationModel):
         logits = self(
             model_basis.repeat(trace_embedding.shape[0], 1, 1), trace_embedding
         )
+
         logits = self.pool(logits).detach()
         logits = F.softmax(logits, dim=-1)
         if logits.ndim == 1:
@@ -456,35 +458,35 @@ if __name__ == "__main__":
         num_heads=4,
         n_layers=2,
         dropout=0.25,
-        pretraining=True,  # Important!
+        pretraining=False,  # Important!
     )
 
     pm, items = next(dataset.iter_by_model())
     tensor_net = pm.net  # .to_tensor()
 
-    tok_ids, unk_ids = traces_to_tensors(
-        [item.trace for item in items],
-        tensor_net.labels,
-        model.device,
-        model.num_unk_buckets,
-    )
+    # tok_ids, unk_ids = traces_to_tensors(
+    #     [item.trace for item in items],
+    #     tensor_net.labels,
+    #     model.device,
+    #     model.num_unk_buckets,
+    # )
 
-    print((unk_ids == -1).all())
-    print(unk_ids.shape)
-    print(tok_ids.shape)
+    # print((unk_ids == -1).all())
+    # print(unk_ids.shape)
+    # print(tok_ids.shape)
 
-    model_basis, embedded_log, targets = prepare_masked_batch(
-        model.feature_extractor,
-        model,
-        tensor_net.pre,
-        tensor_net.post,
-        tensor_net.labels,
-        tok_ids,
-        unk_ids,
-        model.device,
-    )
-    print(f"model: {model_basis.shape}")
-    print(f"embedded_log: {embedded_log.shape}")
-    y = model(model_basis.repeat(embedded_log.shape[0], 1, 1), embedded_log)
-    print(f"y: {y}")
-    # print(model.predict_batched(pm, [item.trace for item in items]))
+    # model_basis, embedded_log, targets = prepare_masked_batch(
+    #     model.feature_extractor,
+    #     model,
+    #     tensor_net.pre,
+    #     tensor_net.post,
+    #     tensor_net.labels,
+    #     tok_ids,
+    #     unk_ids,
+    #     model.device,
+    # )
+    # print(f"model: {model_basis.shape}")
+    # print(f"embedded_log: {embedded_log.shape}")
+    # y = model(model_basis.repeat(embedded_log.shape[0], 1, 1), embedded_log)
+    # print(f"y: {y}")
+    print(model.predict_batched(pm, [item.trace for item in items]))
