@@ -27,8 +27,8 @@ from models import (
     XGBoostClassifier,
     SingleBestSolver,
     RandomClassifier,
-    RecommenderEvaluator,
 )
+from models.evaluator_csv import RecommenderEvaluator
 from scripts.generate_dataset import build_pipeline
 import pandas as pd
 
@@ -82,20 +82,47 @@ OUTPUT_DIR = Path("outputs") / "evaluate_classifier"
 def find_existing_tables(
     root: Path,
 ):
-    # find files ending in .train.csv / .test.csv and .eval.csv
+    """
+    Load tables for training and evaluation.
+
+    - train: Uses .train.csv (labels only, one best aligner per combination)
+    - test: Uses .runs.csv filtered by .test.csv combination_ids
+      (complete data with all aligners per combination for proper evaluation)
+    - eval: Uses .eval.csv (labels only)
+    """
     train_tables = []
     test_tables = []
     eval_tables = []
-    for table_path in root.glob("**/*.train.csv"):
-        train_tables.append(table_path)
-    for table_path in root.glob("**/*.test.csv"):
-        test_tables.append(table_path)
-    for table_path in root.glob("**/*.eval.csv"):
-        eval_tables.append(table_path)
 
-    train_tables = [pd.read_csv(table_path) for table_path in train_tables]
-    test_tables = [pd.read_csv(table_path) for table_path in test_tables]
-    eval_tables = [pd.read_csv(table_path) for table_path in eval_tables]
+    # Load train tables (labels only)
+    for table_path in root.glob("**/*.train.csv"):
+        train_tables.append(pd.read_csv(table_path))
+
+    # Load test tables: runs.csv filtered by test.csv combination_ids
+    test_label_paths = list(root.glob("**/*.test.csv"))
+    for test_label_path in test_label_paths:
+        # Get corresponding runs.csv file
+        runs_path = test_label_path.parent / test_label_path.name.replace('.test.csv', '.runs.csv')
+        if not runs_path.exists():
+            logging.warning(f"No runs.csv found for {test_label_path}, using test.csv directly")
+            test_tables.append(pd.read_csv(test_label_path))
+            continue
+
+        # Load test combination_ids
+        test_labels = pd.read_csv(test_label_path)
+        test_combination_ids = set(test_labels['combination_id'].unique())
+
+        # Load full runs data and filter by test combination_ids
+        runs_df = pd.read_csv(runs_path)
+        test_filtered = runs_df[runs_df['combination_id'].isin(test_combination_ids)]
+
+        logging.info(f"Test set {test_label_path.name}: {len(test_combination_ids)} combinations, "
+                     f"{len(test_filtered)} total rows (all aligners)")
+        test_tables.append(test_filtered)
+
+    # Load eval tables (labels only)
+    for table_path in root.glob("**/*.eval.csv"):
+        eval_tables.append(pd.read_csv(table_path))
 
     return train_tables, test_tables, eval_tables
 

@@ -10,7 +10,7 @@ This pipeline generates training data from real and synthetic sources, then trai
 |--------|---------|-----------|------|--------|------|------------------|
 | **run_create_labels_parallel.slurm** | Real data (21 XES datasets) | cm4_inter | 224<br>(7 datasets × 32 CPUs per batch) | 480GB | 5 | **~6.6 hours** |
 | **run_create_labels_synthetic.slurm** | Synthetic data | cm4_inter | 96 | 256GB | 10 | **30-40 min** |
-| **run_evaluate_classifier.slurm** | Train & test classifier | serial_std | 32 | 128GB | - | **30-45 min** |
+| **run_evaluate_classifier.slurm** | Train & test classifier | serial_std | 32 | 128GB | - | **5 min** |
 
 ---
 
@@ -324,22 +324,40 @@ grep -l "pickle data was truncated" logs/dataset_*.out
 ```
 
 2. **Delete corrupted cache files:**
+
+**Option A: If only process model cache is corrupted (pkl can be reused):**
 ```bash
 # Example: If dataset hash is db35afac-2133-40f3-a565-2dc77a9329a3
 rm -fv cache/.cache_process_models/db35afac-2133-40f3-a565-2dc77a9329a3.pkl
 ```
 
+**Option B: If pkl backup is also corrupted (must reprocess from scratch):**
+```bash
+# Example: If dataset hash is fb84cf2d-166f-4de2-87be-62ee317077e5
+# Delete ALL corrupted files including pkl backups
+rm -v ~/pm_ws25/cache/.runs/fb84cf2d-166f-4de2-87be-62ee317077e5.*
+rm -v ~/pm_ws25/cache/.cache_process_models/fb84cf2d-166f-4de2-87be-62ee317077e5.pkl
+rm -v ~/pkl_backup/fb84cf2d-166f-4de2-87be-62ee317077e5.pkl
+```
+
 3. **Modify and run single-dataset script:**
 
-Edit `lrz-cluster/run_permitlog.slurm` and change the `DATASET` variable (around line 96):
+Edit `lrz-cluster/run_permitlog.slurm` and change the `DATASET` variable (around line 89):
 
 ```bash
 DATASET="data/<HASH>/<DATASET_NAME>.xes"
 ```
 
-Example for PermitLog:
+**Examples:**
+
+PermitLog (Option A - reuses cache):
 ```bash
 DATASET="data/db35afac-2133-40f3-a565-2dc77a9329a3/PermitLog.xes"
+```
+
+PrepaidTravelCost (Option B - processes from scratch):
+```bash
+DATASET="data/fb84cf2d-166f-4de2-87be-62ee317077e5/PrepaidTravelCost.xes"
 ```
 
 Then submit:
@@ -347,5 +365,5 @@ Then submit:
 sbatch lrz-cluster/run_permitlog.slurm
 ```
 
-This script uses all 224 CPUs for the single dataset (avoiding parallel competition) and automatically reuses existing cache.
+This script uses all 224 CPUs for the single dataset (avoiding parallel competition). For Option A, it reuses existing cache. For Option B, it processes from scratch without corrupted pkl files.
 
