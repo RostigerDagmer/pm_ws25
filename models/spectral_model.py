@@ -1,3 +1,4 @@
+from features.gnn_encoder import PetriNetGNNEncoder
 from dataloaders.runs import SyntheticTraceSampler
 from pathlib import Path
 from dataloaders.runs import AlignerSpec
@@ -193,8 +194,11 @@ class SpectralModel(nn.Module, ClassificationModel):
         self.n_classes = n_classes
 
         self.positional_encoding = RotaryEmbedding(hidden_dim)
-        self.feature_extractor = SpectralFeatureExtractor(
-            d_model=d_model, n_coeffs=8
+        # self.feature_extractor = SpectralFeatureExtractor(
+        #     d_model=d_model, n_coeffs=8
+        # )
+        self.feature_extractor = PetriNetGNNEncoder(
+            d_model=d_model, n_layers=8, dropout=0.2
         )
         self.label_encoder = LabelEncoder()
 
@@ -246,7 +250,7 @@ class SpectralModel(nn.Module, ClassificationModel):
         self.silent_token = nn.Parameter(torch.randn(1, 1, d_trace))
 
         self.num_unk_buckets = num_unk_buckets
-        if self.pretraining:
+        if not self.pretraining:
             self.mask_token.requires_grad = False
 
     @property
@@ -426,7 +430,7 @@ if __name__ == "__main__":
                     "min_depth": 1,
                     "max_depth": 2,
                 },
-                1,  # Number of models per config
+                5,  # Number of models per config
             ),
         ],
     )
@@ -461,32 +465,42 @@ if __name__ == "__main__":
         pretraining=False,  # Important!
     )
 
-    pm, items = next(dataset.iter_by_model())
-    tensor_net = pm.net  # .to_tensor()
+    limit = 5
+    for pm, items in dataset.iter_by_model():
+        if limit <= 0:
+            break
+        tensor_net = pm.net  # .to_tensor()
 
-    # tok_ids, unk_ids = traces_to_tensors(
-    #     [item.trace for item in items],
-    #     tensor_net.labels,
-    #     model.device,
-    #     model.num_unk_buckets,
-    # )
+        # tok_ids, unk_ids = traces_to_tensors(
+        #     [item.trace for item in items],
+        #     tensor_net.labels,
+        #     model.device,
+        #     model.num_unk_buckets,
+        # )
 
-    # print((unk_ids == -1).all())
-    # print(unk_ids.shape)
-    # print(tok_ids.shape)
+        # print((unk_ids == -1).all())
+        # print(unk_ids.shape)
+        # print(tok_ids.shape)
 
-    # model_basis, embedded_log, targets = prepare_masked_batch(
-    #     model.feature_extractor,
-    #     model,
-    #     tensor_net.pre,
-    #     tensor_net.post,
-    #     tensor_net.labels,
-    #     tok_ids,
-    #     unk_ids,
-    #     model.device,
-    # )
-    # print(f"model: {model_basis.shape}")
-    # print(f"embedded_log: {embedded_log.shape}")
-    # y = model(model_basis.repeat(embedded_log.shape[0], 1, 1), embedded_log)
-    # print(f"y: {y}")
-    print(model.predict_batched(pm, [item.trace for item in items]))
+        # model_basis, embedded_log, targets = prepare_masked_batch(
+        #     model.feature_extractor,
+        #     model,
+        #     tensor_net.pre,
+        #     tensor_net.post,
+        #     tensor_net.labels,
+        #     tok_ids,
+        #     unk_ids,
+        #     model.device,
+        # )
+        # print(f"model: {model_basis.shape}")
+        # print(f"embedded_log: {embedded_log.shape}")
+        # y = model(model_basis.repeat(embedded_log.shape[0], 1, 1), embedded_log)
+        # print(f"y: {y}")
+        pred = model.predict_batched(pm, [item.trace for item in items])
+        print(pred)
+
+        print("feature extraction times")
+        print([p.feature_extraction_time for p in pred])
+        print("classifier times")
+        print([p.classification_time for p in pred])
+        limit -= 1
