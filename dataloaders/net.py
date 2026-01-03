@@ -14,6 +14,10 @@ from pm4py.discovery import (
     discover_petri_net_ilp,
     discover_petri_net_inductive,
 )
+from pm4py.objects.petri_net.utils.check_soundness import (
+    check_wfnet,
+    check_easy_soundness_net_in_fin_marking,
+)
 from itertools import product
 from pathlib import Path
 import pickle
@@ -343,6 +347,7 @@ class ProcessModelDataset(
         num_workers=None,
         timeout: float = 300.0,
         write_batch_size: int = 100,
+        filter_unsound: bool = True,
         **kwargs,
     ):
         """
@@ -376,6 +381,7 @@ class ProcessModelDataset(
         self.cached = cached
         self.num_workers = num_workers or os.cpu_count()
         self.timeout = timeout
+        self.filter_unsound = filter_unsound
         if cached:
             self.cache_dir = (
                 Path(cache_dir)
@@ -475,7 +481,7 @@ class ProcessModelDataset(
                 seen_hashes.add(key)
                 fut = pool.schedule(
                     ProcessModelDataset._process_item,
-                    args=(cfg,),
+                    args=(cfg, self.filter_unsound),
                     timeout=self.timeout,
                 )
                 futures[fut] = (
@@ -486,10 +492,13 @@ class ProcessModelDataset(
                 written.total += 1
                 scheduled.update(1)
 
+            scheduled.close()
             for fut in as_completed(futures):
                 key, cfg = futures[fut]
                 try:
                     item = fut.result()
+                    if item is None:
+                        continue
                     assert (
                         item.hash() == key
                     ), f"Hash mismatch: {item.hash()} != {key}: {item}"
@@ -509,7 +518,8 @@ class ProcessModelDataset(
                 ProcessModelDataset._flush_batch(f, batch)
                 written.update(len(batch))
                 batch.clear()
-
+            discovered.close()
+            written.close()
         self.items.update(new_items)
         self.index = list(self.items.keys())
 
@@ -632,12 +642,18 @@ class ProcessModelDataset(
             int,
             EventLog | Trace | pd.DataFrame,
         ],
-    ) -> SerializedItemType:
+        filter_unsound: bool = True,
+    ) -> Optional[SerializedItemType]:
         method_name, fn, params, sampler, subset_idx, subset = cfg
         subset_log = _normalize_log_input(subset)
         net, im, fm = ProcessModelDataset._safe_discover(
             fn, subset_log, params
         )
+        if filter_unsound:
+            if not check_wfnet(
+                net
+            ) or not check_easy_soundness_net_in_fin_marking(net, im, fm):
+                return None
 
         item = ItemType(
             pm=net,
@@ -664,7 +680,6 @@ class ProcessModelDataset(
             return self.items[key]
         print("keys: ", self.items.keys())
         raise KeyError(key)
-        return self._process_item(self.configurations[key])
 
     def __getitem__(self, idx: int | str) -> ItemType:
         serialized_item = self._get_serialized(idx)
@@ -739,9 +754,15 @@ if __name__ == "__main__":
     # Create base dataset with caching enabled
     pm_dataset = ProcessModelDataset(
         log_dataset=log_dataset,
-        discovery_methods={"inductive": discover_petri_net_inductive},
+        discovery_methods={
+            "inductive": discover_petri_net_inductive,
+            "heuristic": discover_petri_net_heuristics,
+        },
         param_grid={
-            "noise_threshold": [0.0, 0.1, 0.2, 0.3],
+            "noise_threshold": [0.0, 0.2, 0.4],
+            "dependency_threshold": [0.0, 0.1, 0.2],
+            "and_threshold": [0.0, 0.2, 0.5],
+            "loop_two_threshold": [0.0, 0.2, 0.3],
             "disable_fallthroughs": [True],
         },
         sampler_specs={
@@ -767,6 +788,7 @@ if __name__ == "__main__":
     )
 
     for i, item in enumerate(pm_dataset):
+        item = pm_dataset[-(i + 1)]
         view_petri_net(
             item.pm,
             item.im,

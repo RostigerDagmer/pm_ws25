@@ -201,9 +201,6 @@ if __name__ == "__main__":
                 cache_path,
                 seed=SEED,
             )
-            if run_dataset is not None:
-                test_run_datasets.append(run_dataset)
-                logging.info(f"  ✓ Loaded {len(run_dataset)} runs from cache")
 
     test_run_datasets.append(
         get_synthetic_dataset(
