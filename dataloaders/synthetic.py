@@ -45,7 +45,7 @@ class SyntheticEventLogDataset(BaseEventLogDataset):
         for _ in range(
             (self.n_traces + self.batch_size - 1) // self.batch_size
         ):
-            batch = simulate.simulate_batch(
+            batch, _, _ = simulate.simulate_batch(
                 (self.N.pre, self.N.post),
                 self.N.M0,
                 self.N.Mf,

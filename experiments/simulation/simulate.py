@@ -67,13 +67,12 @@ def simulate_batch(
     steps: int = 100,
     batch_size: int = 128,
     compact: bool = True,
+    record_enabled_history: bool = False,
     generator: Optional[torch.Generator] = None,
 ):
     pre, post = net_tensors
     n_trans, n_places = pre.shape
     device = pre.device
-
-    labels_t = torch.tensor(list(range(len(labels))), device=device)
 
     silent_mask = torch.tensor(
         [label == "" for label in labels], dtype=torch.bool, device=device
@@ -86,24 +85,39 @@ def simulate_batch(
     if weights is None:
         weights = torch.ones(n_trans, device=device, dtype=torch.float)
 
-    logs = -torch.ones((batch_size, steps), dtype=torch.long, device=device)
+    transitions = -torch.ones(
+        (batch_size, steps), dtype=torch.long, device=device
+    )
     done = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+    enabled_hist = None
+    if record_enabled_history:
+        enabled_hist = torch.zeros(
+            (batch_size, steps, n_trans), dtype=torch.bool, device=device
+        )
+    visible_hist = torch.zeros(
+        (batch_size, steps), dtype=torch.bool, device=device
+    )
 
     for step in range(steps):
         # enabled[b,t] = (M[b] >= pre[t]).all(p)
         enabled = (M.unsqueeze(1) >= pre).all(dim=2)  # [B, T]
 
+        if record_enabled_history:
+            enabled_hist[:, step, :] = enabled
+
         # zero out probs where not enabled
         probs = enabled.float() * weights  # [B, T]
 
         # Identify active rows (at least one enabled transition)
-        active = enabled.any(dim=1)  # [B]
+        active = enabled.any(dim=1) & (~done)  # [B]
 
         # Handle all-zero probs to avoid multinomial error
         # We set a dummy probability for deadlocked rows, but we won't use the result
         probs[~active, 0] = 1.0
 
-        probs = torch.nn.functional.normalize(probs, dim=1)
+        probs_sum = probs.sum(dim=1, keepdim=True).clamp_min(1e-12)
+        probs = probs / probs_sum
         # sample one transition per batch row
         # torch.multinomial expects non-negative rows that sum to 1
         t_idx = torch.multinomial(probs, 1, generator=generator).squeeze(
@@ -118,16 +132,10 @@ def simulate_batch(
         M[active] = M[active] + delta[active]
 
         # record label if visible
-        visible = ~silent_mask[t_idx]
+        visible = (~silent_mask[t_idx]) & active
+        visible_hist[:, step] = visible
 
-        current_step_logs = (labels_t[t_idx] + 1) * visible.long() - 1
-
-        # Create a mask for update: active
-        update_mask = active
-
-        logs[torch.arange(batch_size, device=device)[update_mask], step] = (
-            current_step_logs[update_mask]
-        )
+        transitions[visible, step] = t_idx[visible]
 
         # check completion
         done |= torch.all(M == Mf, dim=1)
@@ -136,15 +144,24 @@ def simulate_batch(
 
     if compact:
         # logs: [B, steps] tensor of label IDs, 0 for silent, pad_id for beyond max_steps
-        visible = logs != -1  # mask non-silent transitions
-        compacted = -torch.ones_like(logs)
-        lengths = visible.sum(dim=1)
+        compacted = -torch.ones_like(transitions)
+        compacted_enabled = None
+        if record_enabled_history:
+            compacted_enabled = torch.zeros_like(
+                enabled_hist
+            )  # bool padded with False
+        lengths = visible_hist.sum(dim=1)
 
-        for b in range(logs.size(0)):
-            compacted[b, : lengths[b]] = logs[b, visible[b]]
+        for b in range(transitions.size(0)):
+            idx = visible_hist[b].nonzero(as_tuple=False).squeeze(1)
+            L = idx.numel()
+            compacted[b, :L] = transitions[b, idx]
+            if record_enabled_history:
+                compacted_enabled[b, :L] = enabled_hist[b, idx]
 
-        return compacted
-    return logs
+        return compacted, compacted_enabled, lengths
+
+    return transitions, enabled_hist, visible_hist
 
 
 def apply_labels(log: torch.Tensor, labels: list[str]) -> EventLog:
@@ -162,3 +179,45 @@ def apply_labels(log: torch.Tensor, labels: list[str]) -> EventLog:
                 events.append(Event({"concept:name": labels[tok_idx]}))
         ret.append(Trace(events))
     return ret
+
+
+if __name__ == "__main__":
+    from util.distributions import (
+        BernoulliDepthLinearSpec,
+        CategoricalSpec,
+        PoissonSpec,
+    )
+    from experiments.simulation.models import sample_net
+    from util.rng import RNG
+    import matplotlib.pyplot as plt
+
+    RNG.initialize(4)
+
+    dist_params = {
+        "op": CategoricalSpec([0.1, 0.5, 0.3, 0.1]),
+        "seq_len": PoissonSpec(4),
+        "p_stop": BernoulliDepthLinearSpec(base=0.15, slope=0.1),
+        "width": PoissonSpec(10),
+    }
+    stnet = sample_net(
+        dist_params, max_depth=3, generator=RNG.torch_generator()
+    )
+
+    tnet = stnet.to_tensor()
+
+    log, hist, vis = simulate_batch(
+        (tnet.pre, tnet.post),
+        tnet.M0,
+        tnet.Mf,
+        tnet.labels,
+        steps=10,
+        batch_size=4,
+        compact=True,
+        record_enabled_history=True,
+    )
+    print(hist)
+    print(hist.shape)
+    plt.imshow(hist.cpu().float()[0], aspect="auto")
+    plt.show()
+    print(vis)
+    print(log)

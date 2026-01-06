@@ -64,7 +64,7 @@ def test_spectral_extractor():
     print("Simulating traces...")
     net_tensor = stnet.to_tensor()
     # Need to move to device if using GPU, but CPU is fine for test
-    logs_tensor = simulate_batch(
+    logs_tensor, _, _ = simulate_batch(
         (net_tensor.pre, net_tensor.post),
         net_tensor.M0,
         net_tensor.Mf,
@@ -197,7 +197,7 @@ def test_fast_path():
 
     # 2. Simulate Traces
     net_tensor = stnet.to_tensor(device=device)
-    logs_tensor = simulate_batch(
+    logs_tensor, _, _ = simulate_batch(
         (net_tensor.pre, net_tensor.post),
         net_tensor.M0,
         net_tensor.Mf,

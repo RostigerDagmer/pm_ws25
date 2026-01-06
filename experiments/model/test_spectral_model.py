@@ -33,7 +33,7 @@ def test_spectral_model():
 
     print("2. Simulating trace...")
     net_tensor = stnet.to_tensor()
-    logs_tensor = simulate_batch(
+    logs_tensor, _, _ = simulate_batch(
         (net_tensor.pre, net_tensor.post),
         net_tensor.M0,
         net_tensor.Mf,

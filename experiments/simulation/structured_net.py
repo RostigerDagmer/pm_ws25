@@ -330,7 +330,7 @@ def test_tensor_conversion():
     # Optionally, you can add a more formal check here based on your requirements
     # For example, comparing places, transitions, and arcs in both nets
 
-    tensor_log = simulate_batch(
+    tensor_log, _, _ = simulate_batch(
         (tensor_net.pre, tensor_net.post),
         tensor_net.M0,
         tensor_net.Mf,
@@ -343,7 +343,7 @@ def test_tensor_conversion():
     log1 = apply_labels(tensor_log, tensor_net.labels)
 
     r_tensor_net = reconstructed_stnet.to_tensor()
-    r_tensor_log = simulate_batch(
+    r_tensor_log, _, _ = simulate_batch(
         (r_tensor_net.pre, r_tensor_net.post),
         r_tensor_net.M0,
         r_tensor_net.Mf,
