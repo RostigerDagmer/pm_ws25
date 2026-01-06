@@ -173,7 +173,10 @@ class PerfCounter(Serializable[dict[str, Any]]):
     def _dict(self) -> dict[str, Any]:
         return {
             "duration": self.duration,
-            "stats": marshal.dumps(self.stats.stats) if self.stats else None,
+            "stats": {
+                "__search": (0, 0, self.search_time, 0, {}),
+                "cvxopt.glpk.lp": (0, 0, self.lp_time, 0, {}),
+            },
         }
 
     def serialize(self) -> dict[str, Any]:
@@ -413,7 +416,7 @@ class SyntheticTraceSampler(TraceSampler):
         generator = torch.Generator(device=self.device).manual_seed(model_seed)
         while remaining > 0:
             bsz = min(self.batch_size, remaining)
-            seq_batch = simulate_batch(
+            seq_batch, _, _ = simulate_batch(
                 (pre, post),
                 M0,
                 Mf,
