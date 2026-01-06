@@ -183,6 +183,8 @@ def get_synthetic_dataset(
     seed: int = 1,
     num_models: int = 20,
     num_traces: int = 32,
+    min_depth: int = 1,
+    max_depth: int = 2,
     device: str = "cpu",
 ) -> RunDataset:
     RNG.initialize(seed)
@@ -194,9 +196,6 @@ def get_synthetic_dataset(
         PoissonSpec,
         BernoulliDepthLinearSpec,
     )
-
-    MAX_DEPTH = 2
-    MIN_DEPTH = 1
 
     synthetic_dataset = SyntheticProcessModelDataset(
         param_grid=[
@@ -210,8 +209,8 @@ def get_synthetic_dataset(
                         ),
                         "width": PoissonSpec(3),
                     },
-                    "min_depth": MIN_DEPTH,
-                    "max_depth": MAX_DEPTH,
+                    "min_depth": min_depth,
+                    "max_depth": max_depth,
                 },
                 num_models,  # Number of models per config
             ),
@@ -225,8 +224,8 @@ def get_synthetic_dataset(
                         ),
                         "width": PoissonSpec(3),
                     },
-                    "min_depth": MIN_DEPTH,
-                    "max_depth": MAX_DEPTH,
+                    "min_depth": min_depth,
+                    "max_depth": max_depth,
                 },
                 num_models,  # Number of models per config
             ),
@@ -240,8 +239,8 @@ def get_synthetic_dataset(
                         ),
                         "width": PoissonSpec(10),
                     },
-                    "min_depth": MIN_DEPTH,
-                    "max_depth": MAX_DEPTH,
+                    "min_depth": min_depth,
+                    "max_depth": max_depth,
                 },
                 num_models,  # Number of models per config
             ),
@@ -255,8 +254,8 @@ def get_synthetic_dataset(
                         ),
                         "width": PoissonSpec(10),
                     },
-                    "min_depth": MIN_DEPTH,
-                    "max_depth": MAX_DEPTH,
+                    "min_depth": min_depth,
+                    "max_depth": max_depth,
                 },
                 num_models,  # Number of models per config
             ),
@@ -270,8 +269,8 @@ def get_synthetic_dataset(
                         ),
                         "width": PoissonSpec(3),
                     },
-                    "min_depth": MIN_DEPTH,
-                    "max_depth": MAX_DEPTH,
+                    "min_depth": min_depth,
+                    "max_depth": max_depth,
                 },
                 num_models,  # Number of models per config
             ),
