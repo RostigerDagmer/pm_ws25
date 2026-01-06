@@ -1,3 +1,4 @@
+from experiments.simulation.structured_net import TensorNet
 from features.gnn_encoder import PetriNetGNNEncoder
 from dataloaders.runs import SyntheticTraceSampler
 from pathlib import Path
@@ -10,6 +11,7 @@ from experiments.simulation.structured_net import StructuredNet
 from pm4py.objects.log.obj import Trace
 from dataloaders.runs import RunDataset
 import time
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -48,9 +50,7 @@ def traces_to_tensors(
 def prepare_masked_batch(
     extractor,
     model,  # SpectralModel
-    pre: torch.Tensor,
-    post: torch.Tensor,
-    labels: list[str],
+    tensor_net: TensorNet,
     tok_idx: torch.Tensor,  # [B,S] values: -1 pad, 0..L-1 known/silent, L unknown
     unk_bucket: torch.Tensor,  # [B,S] values: -1 for non-unk, else 0..K-1
     device: torch.device,
@@ -62,6 +62,11 @@ def prepare_masked_batch(
         embedded_log:  [B, S, d_trace]
         final_targets: [B, S] vocab indices for masked known tokens, else -100
     """
+    pre = tensor_net.pre
+    post = tensor_net.post
+    labels = tensor_net.labels
+    im = tensor_net.init
+    fm = tensor_net.final
     B, S = tok_idx.shape
     L = len(labels)  # local label vocab size; unknown sentinel is == L
     d_basis = model.d_model
@@ -71,7 +76,7 @@ def prepare_masked_batch(
     # A) Compute Basis + local->vocab map (silent excluded, duplicates merged)
     # -------------------------
     basis_labels, basis, local_to_vocab = extractor.compute_basis_and_maps(
-        pre, post, labels
+        pre, post, labels, im, fm
     )
     basis = basis.to(device)
     local_to_vocab = local_to_vocab.to(
@@ -159,8 +164,155 @@ def prepare_masked_batch(
             mask_bool.unsqueeze(-1), mask_tok, embedded_log
         )
     # print(f"final targets: {final_targets[final_targets != -100]}")
-    return model_basis, embedded_log, final_targets
+    return model_basis, embedded_log, final_targets, local_to_vocab
 
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)
+
+class MultiHeadAttention(nn.Module):
+    """
+    Computes multi-head attention. Supports nested or padded tensors.
+
+    Args:
+        E_q (int): Size of embedding dim for query
+        E_k (int): Size of embedding dim for key
+        E_v (int): Size of embedding dim for value
+        E_total (int): Total embedding dim of combined heads post input projection. Each head
+            has dim E_total // nheads
+        nheads (int): Number of heads
+        dropout (float, optional): Dropout probability. Default: 0.0
+        bias (bool, optional): Whether to add bias to input projection. Default: True
+    """
+
+    def __init__(
+        self,
+        E_q: int,
+        E_k: int,
+        E_v: int,
+        E_total: int,
+        nheads: int,
+        dropout: float = 0.0,
+        pos_enc: RotaryEmbedding | None = None,
+        bias=True,
+        device=None,
+        dtype=None,
+    ):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.nheads = nheads
+        self.dropout = dropout
+        self._qkv_same_embed_dim = E_q == E_k and E_q == E_v
+        if self._qkv_same_embed_dim:
+            self.packed_proj = nn.Linear(E_q, E_total * 3, bias=bias, **factory_kwargs)
+        else:
+            self.q_proj = nn.Linear(E_q, E_total, bias=bias, **factory_kwargs)
+            self.k_proj = nn.Linear(E_k, E_total, bias=bias, **factory_kwargs)
+            self.v_proj = nn.Linear(E_v, E_total, bias=bias, **factory_kwargs)
+        E_out = E_q
+        self.out_proj = nn.Linear(E_total, E_out, bias=bias, **factory_kwargs)
+        assert E_total % nheads == 0, "Embedding dim is not divisible by nheads"
+        self.E_head = E_total // nheads
+        self.bias = bias
+        self.pos_enc = pos_enc
+
+    def _apply_pos_enc(self, q, k):
+        if self.pos_enc is None:
+            return q, k
+        if isinstance(self.pos_enc, RotaryEmbedding):
+            return self.pos_enc.rotate_queries_and_keys(q, k, seq_dim=1)
+        raise ValueError(f"unknown positional encoding type: {type(self.pos_enc)}")
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask=None,
+        is_causal=False,
+    ) -> torch.Tensor:
+        """
+        Forward pass; runs the following process:
+            1. Apply input projection
+            2. Split heads and prepare for SDPA
+            3. Run SDPA
+            4. Apply output projection
+
+        Args:
+            query (torch.Tensor): query of shape (``N``, ``L_q``, ``E_qk``)
+            key (torch.Tensor): key of shape (``N``, ``L_kv``, ``E_qk``)
+            value (torch.Tensor): value of shape (``N``, ``L_kv``, ``E_v``)
+            attn_mask (torch.Tensor, optional): attention mask of shape (``N``, ``L_q``, ``L_kv``) to pass to SDPA. Default: None
+            is_causal (bool, optional): Whether to apply causal mask. Default: False
+
+        Returns:
+            attn_output (torch.Tensor): output of shape (N, L_t, E_q)
+        """
+        # Step 1. Apply input projection
+        if self._qkv_same_embed_dim:
+            if query is key and key is value:
+                result = self.packed_proj(query)
+                query, key, value = torch.chunk(result, 3, dim=-1)
+            else:
+                q_weight, k_weight, v_weight = torch.chunk(
+                    self.packed_proj.weight, 3, dim=0
+                )
+                if self.bias:
+                    q_bias, k_bias, v_bias = torch.chunk(
+                        self.packed_proj.bias, 3, dim=0
+                    )
+                else:
+                    q_bias, k_bias, v_bias = None, None, None
+                query, key, value = (
+                    F.linear(query, q_weight, q_bias),
+                    F.linear(key, k_weight, k_bias),
+                    F.linear(value, v_weight, v_bias),
+                )
+
+        else:
+            query = self.q_proj(query)
+            key = self.k_proj(key)
+            value = self.v_proj(value)
+
+        # apply positional encodings
+        query, key = self._apply_pos_enc(query, key)
+
+        # Step 2. Split heads and prepare for SDPA
+        # reshape query, key, value to separate by head
+        # (N, L_t, E_total) -> (N, L_t, nheads, E_head) -> (N, nheads, L_t, E_head)
+        query = query.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+        # (N, L_s, E_total) -> (N, L_s, nheads, E_head) -> (N, nheads, L_s, E_head)
+        key = key.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+        # (N, L_s, E_total) -> (N, L_s, nheads, E_head) -> (N, nheads, L_s, E_head)
+        value = value.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+
+        # Step 3. Run SDPA
+        # (N, nheads, L_t, E_head)
+        attn_output = F.scaled_dot_product_attention(
+            query, key, value, dropout_p=self.dropout, is_causal=is_causal
+        )
+        # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
+        attn_output = attn_output.transpose(1, 2).flatten(-2)
+
+        # Step 4. Apply output projection
+        # (N, L_t, E_total) -> (N, L_t, E_out)
+        attn_output = self.out_proj(attn_output)
+
+        return attn_output
 
 class SpectralModel(nn.Module, ClassificationModel):
     def __init__(
@@ -172,6 +324,7 @@ class SpectralModel(nn.Module, ClassificationModel):
         n_classes: int,
         num_heads: int = 1,
         n_layers: int = 1,
+        n_self_attn: int = 1,
         dropout: float = 0.1,
         pretraining: bool = False,
         num_unk_buckets: int = 32,
@@ -192,8 +345,10 @@ class SpectralModel(nn.Module, ClassificationModel):
         self.hidden_dim = hidden_dim
         self.pretraining = pretraining
         self.n_classes = n_classes
+        self.n_self_attn = n_self_attn
 
-        self.positional_encoding = RotaryEmbedding(hidden_dim)
+        # self.positional_encoding = PositionalEncoding(hidden_dim, dropout=dropout)
+        self.positional_encoding = RotaryEmbedding(hidden_dim, use_xpos=True, learned_freq=True)
         # self.feature_extractor = SpectralFeatureExtractor(
         #     d_model=d_model, n_coeffs=8
         # )
@@ -202,26 +357,28 @@ class SpectralModel(nn.Module, ClassificationModel):
         )
         self.label_encoder = LabelEncoder()
 
-        # Projections
+        # Input Projections
         self.model_proj = nn.Linear(d_model, hidden_dim)
         self.trace_proj = nn.Linear(d_trace, hidden_dim)
 
-        # Cross Attention
-        # batch_first=True means input is (batch, seq, feature)
-        self.attn_blocks = nn.ModuleList(
+        # Seq Self Attention
+        self.self_attn_blocks = nn.ModuleList(
             [
-                nn.MultiheadAttention(
-                    embed_dim=hidden_dim,
-                    num_heads=num_heads,
+                MultiHeadAttention(
+                    E_q=hidden_dim,
+                    E_k=hidden_dim,
+                    E_v=hidden_dim,
+                    E_total=hidden_dim,
+                    nheads=num_heads,
                     dropout=dropout,
-                    batch_first=True,
+                    pos_enc=self.positional_encoding
                 )
-                for _ in range(n_layers)
+                for _ in range(n_self_attn)
             ]
         )
-        self.attn_norm = nn.LayerNorm(hidden_dim)
-        self.attn_dropout = nn.Dropout(dropout)
-        self.mlp_blocks = nn.ModuleList(
+        self.self_attn_norm = nn.LayerNorm(hidden_dim)
+        self.self_attn_dropout = nn.Dropout(dropout)
+        self.self_mlp_blocks = nn.ModuleList(
             [
                 nn.Sequential(
                     nn.Linear(hidden_dim, mlp_hidden_dim),
@@ -232,16 +389,35 @@ class SpectralModel(nn.Module, ClassificationModel):
                     nn.Dropout(dropout),
                     nn.LayerNorm(hidden_dim),
                 )
-                for _ in range(n_layers)
+                for _ in range(n_self_attn)
             ]
         )
 
-        # MLP Head
+        # Net <-> Seq Cross Attention
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer=nn.TransformerDecoderLayer(
+                d_model=hidden_dim,
+                nhead=num_heads,
+                dim_feedforward=mlp_hidden_dim,
+                dropout=dropout,
+                activation=nn.GELU(),
+                batch_first=True),
+            num_layers=n_layers
+        )
+
+        # # MLP Head
         self.mlp_head = nn.Sequential(
+            # nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, n_classes),
+        )
+
+        self.pooler = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
         )
 
         self.mask_token = nn.Parameter(torch.randn(1, 1, d_trace))
@@ -281,16 +457,35 @@ class SpectralModel(nn.Module, ClassificationModel):
     def _train_classifier(self):
         pass
 
-    def pool(self, x: torch.Tensor) -> torch.Tensor:
-        return x.mean(dim=1)  # mean pooling
+    def pool(self, x: torch.Tensor, pad_mask: torch.Tensor) -> torch.Tensor:
+        if pad_mask is None:
+            return x.mean(dim=1)
+        keep = (~pad_mask).float()                      # 1 where real tokens
+        denom = keep.sum(dim=1, keepdim=True).clamp_min(1.0)
+        return (x * keep.unsqueeze(-1)).sum(dim=1) / denom
+    
+    def pool_logits(self, logits: torch.Tensor, pad_mask: torch.Tensor) -> torch.Tensor:
+        if pad_mask is not None:
+            logits = logits.masked_fill(pad_mask.unsqueeze(-1), float("-inf"))
+        pooled = torch.logsumexp(logits, dim=1)  # [B,C]
+        return pooled
+
+    def attn_pool(self, x: torch.Tensor, pad_mask: torch.Tensor) -> torch.Tensor:
+        # x: [B,S,H]
+        scores = self.pooler(x).squeeze(-1)  # [B,S]
+        if pad_mask is not None:
+            scores = scores.masked_fill(pad_mask, float("-inf"))
+        w = scores.softmax(dim=1).unsqueeze(-1)  # [B,S,1]
+        return (x * w).sum(dim=1) # [B,H]
 
     def forward(
-        self, model_basis: torch.Tensor, trace_embedding: torch.Tensor
+        self, model_basis: torch.Tensor, trace_embedding: torch.Tensor, trace_mask: torch.Tensor | None = None, net_mask: torch.Tensor | None = None,
+        attn_pool: bool = False
     ) -> torch.Tensor:
         """
         Args:
             model_basis: [Batch, T, d_model]
-            trace_embedding: [Batch, d_trace]
+            trace_embedding: [Batch, S, d_trace]
 
         Returns:
             logits: [Batch, n_classes]
@@ -305,15 +500,16 @@ class SpectralModel(nn.Module, ClassificationModel):
         # 2. Cross Attention
         # Query: Trace, Key/Value: Model
         # attn_output: [B, 1, hidden_dim]
-        for attn_block, mlp_block in zip(self.attn_blocks, self.mlp_blocks):
+        for attn_block, mlp_block in zip(self.self_attn_blocks, self.self_mlp_blocks):
             # print(f"q shape: {q.shape}, k_v shape: {k_v.shape}")
-            q = self.positional_encoding.rotate_queries_or_keys(q)
-            k_v = self.positional_encoding.rotate_queries_or_keys(k_v)
-            attn_output, _ = attn_block(query=q, key=k_v, value=k_v)
-            attn_output = self.attn_norm(attn_output)
-            attn_output = self.attn_dropout(attn_output)
+            attn_output = attn_block(query=q, key=q, value=q)
+            attn_output = self.self_attn_norm(attn_output)
+            attn_output = self.self_attn_dropout(attn_output)
             attn_output = mlp_block(attn_output) + attn_output
             q = attn_output + q  # skip connection
+
+        # 3. Cross Attention
+        q = self.decoder(tgt=q, memory=k_v, tgt_key_padding_mask=trace_mask, memory_mask=net_mask)
 
         if self.pretraining:
             k_v_t = k_v.transpose(1, 2)
@@ -321,11 +517,14 @@ class SpectralModel(nn.Module, ClassificationModel):
             # Compute logits via Dot Product
             # logits: [B, Seq_Len, T_vocab]
             logits = torch.bmm(q, k_v_t) / torch.sqrt(
-                torch.tensor(self.d_model, dtype=torch.float32)
+                torch.tensor(self.hidden_dim, dtype=torch.float32)
             )
-        # 3. MLP Head
+        # 4. MLP Head
         else:
             B, S, V = q.shape
+            if attn_pool:
+                q_ = self.attn_pool(q, trace_mask)
+                return self.mlp_head(q_)
             logits = self.mlp_head(q.view(B * S, V))
             logits = logits.view(B, S, self.n_classes)
 
@@ -343,28 +542,28 @@ class SpectralModel(nn.Module, ClassificationModel):
         max_len = max(len(trace) for trace in traces)
 
         if hasattr(model_item, "net"):
-            net_tensor = model_item.net.to(device=self.device)
+            tensor_net = model_item.net.to(device=self.device)
         else:
             # safe path for non-synthetic models
-            net_tensor = StructuredNet(
+            tensor_net = StructuredNet(
                 "sample", model_item.pm, model_item.im, model_item.fm
             ).to_tensor(device=self.device)
 
         tok_ids, unk_ids = traces_to_tensors(
             traces,
-            net_tensor.labels,
+            tensor_net.labels,
             device=self.device,
             unk_buckets=self.num_unk_buckets,
         )
+        trace_mask = tok_ids == -1
+        trace_mask[:, 0] = False # unmask at least one position
 
         t_fe_start = time.perf_counter()
 
-        model_basis, trace_embedding, _ = prepare_masked_batch(
+        model_basis, trace_embedding, _, _ = prepare_masked_batch(
             extractor=self.feature_extractor,
-            model=self,  # Need model to access the learnable mask token
-            pre=net_tensor.pre,
-            post=net_tensor.post,
-            labels=net_tensor.labels,
+            model=self,
+            tensor_net=tensor_net,
             tok_idx=tok_ids,
             unk_bucket=unk_ids,
             device=self.device,
@@ -375,11 +574,24 @@ class SpectralModel(nn.Module, ClassificationModel):
         feature_extraction_time = t_fe_end - t_fe_start
 
         t_clf_start = time.perf_counter()
-        logits = self(
-            model_basis.repeat(trace_embedding.shape[0], 1, 1), trace_embedding
-        )
+        try:
+            logits = self(
+                model_basis.repeat(trace_embedding.shape[0], 1, 1), trace_embedding, trace_mask=trace_mask, attn_pool=True
+            )
+        except:
+            print(f"Failed to infer for model:\n{tensor_net}\nand traces:\n{traces}")
+            return [
+                PredictionResult(
+                    predicted_heuristic=self.label_map[0],
+                    confidence=float(0.0),
+                    total_prediction_time=feature_extraction_time / len(traces),
+                    feature_extraction_time=feature_extraction_time / len(traces),
+                    classification_time=0.0,
+                )
+                for _ in range(len(traces))
+            ]
 
-        logits = self.pool(logits).detach()
+        logits = self.pool_logits(logits, trace_mask).detach()
         logits = F.softmax(logits, dim=-1)
         if logits.ndim == 1:
             logits = logits.unsqueeze(0)
@@ -485,9 +697,7 @@ if __name__ == "__main__":
         # model_basis, embedded_log, targets = prepare_masked_batch(
         #     model.feature_extractor,
         #     model,
-        #     tensor_net.pre,
-        #     tensor_net.post,
-        #     tensor_net.labels,
+        #     tensor_net,
         #     tok_ids,
         #     unk_ids,
         #     model.device,

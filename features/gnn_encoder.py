@@ -50,14 +50,18 @@ class PetriGNNLayer(nn.Module):
         # ---- Place -> Transition aggregation ----
         # For each transition t, aggregate from places p with weights pre[t,p] / post[t,p]
         # [T,P] @ [P,d] -> [T,d]
-        m_t_pre = pre_f @ self.p2t_pre(h_p)
-        m_t_post = post_f @ self.p2t_post(h_p)
+        deg_t_pre = pre_f.sum(dim=1, keepdim=True).clamp_min(1.0)
+        deg_t_post = post_f.sum(dim=1, keepdim=True).clamp_min(1.0)
+        m_t_pre = pre_f @ self.p2t_pre(h_p) / deg_t_pre
+        m_t_post = post_f @ self.p2t_post(h_p) / deg_t_post
 
         # ---- Transition -> Place aggregation ----
         # For each place p, aggregate from transitions t (note transpose)
         # [P,T] @ [T,d] -> [P,d]
-        m_p_pre = pre_f.t() @ self.t2p_pre(h_t)
-        m_p_post = post_f.t() @ self.t2p_post(h_t)
+        deg_p_pre = pre_f.t().sum(dim=1, keepdim=True).clamp_min(1.0)
+        deg_p_post = post_f.t().sum(dim=1, keepdim=True).clamp_min(1.0)
+        m_p_pre = pre_f.t() @ self.t2p_pre(h_t) / deg_p_pre
+        m_p_post = post_f.t() @ self.t2p_post(h_t) / deg_p_post
 
         # ---- Update with residual ----
         t_in = torch.cat([h_t, m_t_pre, m_t_post], dim=-1)
@@ -89,6 +93,22 @@ class PetriNetGNNEncoder(nn.Module):
         self.init_t = nn.Parameter(torch.randn(1, d_model) * 0.02)
         self.init_p = nn.Parameter(torch.randn(1, d_model) * 0.02)
 
+        # Trans feats: log degs (4), is init (1), is final (1) => 6
+        self.p_feat_dim = 6
+        # Trans feats: log degs (4), silent (1) => 5
+        self.t_feat_dim = 5
+
+        self.p_mlp = nn.Sequential(
+            nn.Linear(self.p_feat_dim, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.t_mlp = nn.Sequential(
+            nn.Linear(self.t_feat_dim, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model),
+        )
+
     @torch.no_grad()
     def _build_local_to_vocab(
         self, labels: list[str], device
@@ -109,8 +129,82 @@ class PetriNetGNNEncoder(nn.Module):
         basis_labels = list(label_to_row.keys())
         return basis_labels, local_to_vocab
 
+    def _init_features(
+        self,
+        pre: torch.Tensor,
+        post: torch.Tensor,
+        labels: list[str],
+        init_place_idx: int | None,
+        final_place_idx: int | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Returns:
+          p_feats: [P, p_feat_dim]
+          t_feats: [T, t_feat_dim]
+        """
+        device = pre.device
+        T, P = pre.shape
+
+        pre_f = pre.float()
+        post_f = post.float()
+
+        # weighted token degrees
+        p_in_tok = post_f.sum(dim=0)  # [P]
+        p_out_tok = pre_f.sum(dim=0)  # [P]
+        t_pre_tok = pre_f.sum(dim=1)  # [T]
+        t_post_tok = post_f.sum(dim=1)  # [T]
+
+        # unweighted arc degrees
+        p_in_arc = (post > 0).sum(dim=0).float()
+        p_out_arc = (pre > 0).sum(dim=0).float()
+        t_pre_arc = (pre > 0).sum(dim=1).float()
+        t_post_arc = (post > 0).sum(dim=1).float()
+
+        # flags
+        is_init = torch.zeros((P,), device=device)
+        is_final = torch.zeros((P,), device=device)
+        if init_place_idx is not None and 0 <= init_place_idx < P:
+            is_init[init_place_idx] = 1.0
+        if final_place_idx is not None and 0 <= final_place_idx < P:
+            is_final[final_place_idx] = 1.0
+
+        is_silent = torch.tensor(
+            [1.0 if lab == "" else 0.0 for lab in labels], device=device
+        )
+
+        # assemble features
+        p_feats = torch.stack(
+            [
+                torch.log1p(p_in_tok),
+                torch.log1p(p_out_tok),
+                torch.log1p(p_in_arc),
+                torch.log1p(p_out_arc),
+                is_init,
+                is_final,
+            ],
+            dim=1,
+        )  # [P,10]
+
+        t_feats = torch.stack(
+            [
+                torch.log1p(t_pre_tok),
+                torch.log1p(t_post_tok),
+                torch.log1p(t_pre_arc),
+                torch.log1p(t_post_arc),
+                is_silent,
+            ],
+            dim=1,
+        )  # [T,9]
+
+        return p_feats, t_feats
+
     def compute_basis_and_maps(
-        self, pre: torch.Tensor, post: torch.Tensor, labels: list[str]
+        self,
+        pre: torch.Tensor,
+        post: torch.Tensor,
+        labels: list[str],
+        im: int,
+        fm: int,
     ):
         """
         pre/post: [T,P]
@@ -131,10 +225,16 @@ class PetriNetGNNEncoder(nn.Module):
                 torch.zeros((0, self.d_model), device=device),
                 local_to_vocab,
             )
+        # init embeddings with features
+        p_feats, t_feats = self._init_features(pre, post, labels, im, fm)
 
         # Initialize node embeddings
-        h_t = self.init_t.expand(T, self.d_model).contiguous()
-        h_p = self.init_p.expand(P, self.d_model).contiguous()
+        h_t = self.init_t.expand(T, self.d_model).contiguous() + self.t_mlp(
+            t_feats
+        )
+        h_p = self.init_p.expand(P, self.d_model).contiguous() + self.p_mlp(
+            p_feats
+        )
 
         # Message passing
         for layer in self.layers:
@@ -190,7 +290,7 @@ if __name__ == "__main__":
     encoder = PetriNetGNNEncoder(d_model=128, n_layers=8, dropout=0.2)
     t_net = stnet.to_tensor()
     b_labels, b, vocab = encoder.compute_basis_and_maps(
-        t_net.pre, t_net.post, t_net.labels
+        t_net.pre, t_net.post, t_net.labels, t_net.init, t_net.final
     )
 
     print(b_labels)
