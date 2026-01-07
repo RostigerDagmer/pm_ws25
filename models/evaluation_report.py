@@ -89,12 +89,14 @@ class EvaluationReportGenerator:
         <h1>Heuristic Recommendation Evaluation Report</h1>
         <div class="nav-links">
             <a href="#per-dataset">Per-Dataset Breakdown</a>
+            <a href="#per-heuristic">Per-Heuristic Analysis</a>
             <a href="#summary-table">Summary Table</a>
         </div>
     </nav>
 
     <div class="container">
         {self._generate_per_dataset_section()}
+        {self._generate_per_heuristic_section()}
         {self._generate_summary_table_section()}
     </div>
 
@@ -284,6 +286,11 @@ class EvaluationReportGenerator:
             color: #2980b9;
         }
 
+        .dataset-info {
+            font-size: 1.1rem;
+            font-weight: 500;
+        }
+
         .expand-icon {
             font-size: 1.5rem;
             transition: transform 0.3s;
@@ -327,6 +334,39 @@ class EvaluationReportGenerator:
         .perf-ratio-ok { color: #ffc107; font-weight: bold; }
         .perf-ratio-bad { color: #dc3545; font-weight: bold; }
 
+        .tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            border-bottom: 2px solid #dee2e6;
+        }
+
+        .tab-button {
+            padding: 0.75rem 1.5rem;
+            background: transparent;
+            border: none;
+            border-bottom: 3px solid transparent;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 500;
+            color: #666;
+            transition: all 0.2s;
+        }
+
+        .tab-button:hover {
+            color: #2c3e50;
+            background: #f8f9fa;
+        }
+
+        .tab-button.active {
+            color: #3498db;
+            border-bottom-color: #3498db;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
         @media (max-width: 768px) {
             .metrics-grid {
                 grid-template-columns: 1fr;
@@ -346,6 +386,27 @@ class EvaluationReportGenerator:
     def _get_javascript(self) -> str:
         """Get JavaScript for interactive features."""
         return """
+        // Tab switching
+        function switchTab(evt, tabId) {
+            // Hide all tab contents
+            const tabContents = document.getElementsByClassName('tab-content');
+            for (let i = 0; i < tabContents.length; i++) {
+                tabContents[i].style.display = 'none';
+            }
+
+            // Remove active class from all tab buttons
+            const tabButtons = document.getElementsByClassName('tab-button');
+            for (let i = 0; i < tabButtons.length; i++) {
+                tabButtons[i].classList.remove('active');
+            }
+
+            // Show the selected tab content
+            document.getElementById(tabId).style.display = 'block';
+
+            // Add active class to the clicked button
+            evt.currentTarget.classList.add('active');
+        }
+
         // Toggle dataset details
         document.querySelectorAll('.dataset-header').forEach(header => {
             header.addEventListener('click', function() {
@@ -519,7 +580,7 @@ class EvaluationReportGenerator:
             <div class="dataset-header">
                 <div>
                     <h3>Overall (All Test Datasets Combined)</h3>
-                    <span style="color: #666; font-size: 0.9rem;">
+                    <span class="dataset-info" style="color: #666;">
                         {samples:,} samples |
                         Accuracy: {acc_0:.1f}% / {acc_10:.1f}% / {acc_20:.1f}% |
                         Perf Ratio: <span class="{self._get_perf_ratio_class(perf_ratio)}">{perf_ratio:.3f}x</span>
@@ -597,7 +658,7 @@ class EvaluationReportGenerator:
             <div class="dataset-header">
                 <div>
                     <h3>{display_name}</h3>
-                    <span style="color: #666; font-size: 0.9rem;">
+                    <span class="dataset-info" style="color: #666;">
                         {samples} samples |
                         Accuracy: {acc_0:.1f}% / {acc_10:.1f}% / {acc_20:.1f}% |
                         Perf Ratio: <span class="{self._get_perf_ratio_class(perf_ratio)}">{perf_ratio:.3f}x</span>
@@ -630,6 +691,167 @@ class EvaluationReportGenerator:
                 {self._generate_legend()}
             </div>
         </div>
+        """
+
+    def _generate_per_heuristic_section(self) -> str:
+        """Generate per-heuristic performance analysis section."""
+        tolerance_metrics = self.metrics.get('tolerance_metrics', {})
+
+        if not tolerance_metrics:
+            return ""
+
+        # Create tabs for each tolerance level
+        tolerance_tabs_html = []
+        tolerance_content_html = []
+
+        for idx, threshold_key in enumerate(['0%', '10%', '20%']):
+            if threshold_key not in tolerance_metrics:
+                continue
+
+            level = tolerance_metrics[threshold_key]
+
+            # Tab button
+            active_class = "active" if idx == 0 else ""
+            tolerance_tabs_html.append(f"""
+                <button class="tab-button {active_class}" onclick="switchTab(event, 'tolerance-{threshold_key}')">{threshold_key} Tolerance</button>
+            """)
+
+            # Tab content
+            display_style = "block" if idx == 0 else "none"
+
+            if threshold_key == '0%':
+                # For 0% tolerance: Show per-heuristic binary metrics
+                per_heur = level.get('per_heuristic_metrics', {})
+
+                if not per_heur:
+                    continue
+
+                # Sort heuristics by F1 score (descending)
+                sorted_heuristics = sorted(
+                    per_heur.items(),
+                    key=lambda x: x[1].get('f1_score', 0),
+                    reverse=True
+                )
+
+                # Create table rows
+                heur_rows = []
+                for heur_name, metrics in sorted_heuristics:
+                    tp = metrics.get('true_positives', 0)
+                    fp = metrics.get('false_positives', 0)
+                    fn = metrics.get('false_negatives', 0)
+                    precision = metrics.get('precision', 0) * 100
+                    recall = metrics.get('recall', 0) * 100
+                    accuracy = metrics.get('accuracy', 0) * 100
+                    f1 = metrics.get('f1_score', 0) * 100
+                    optimal_samples = metrics.get('total_optimal_samples', 0)
+
+                    heur_rows.append(f"""
+                    <tr>
+                        <td><strong>{heur_name}</strong></td>
+                        <td style="text-align: right;">{optimal_samples}</td>
+                        <td style="text-align: right;">{tp}</td>
+                        <td style="text-align: right;">{fp}</td>
+                        <td style="text-align: right;">{fn}</td>
+                        <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(precision)}">{precision:.1f}%</span></td>
+                        <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(recall)}">{recall:.1f}%</span></td>
+                        <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(f1)}">{f1:.1f}%</span></td>
+                        <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(accuracy)}">{accuracy:.1f}%</span></td>
+                    </tr>
+                    """)
+
+                tolerance_content_html.append(f"""
+                <div id="tolerance-{threshold_key}" class="tab-content" style="display: {display_style};">
+                    <p style="margin-bottom: 1rem; color: #666;">
+                        Binary classification metrics (One-vs-Rest) for each heuristic at {threshold_key} tolerance level.
+                        At 0% tolerance, the ground truth is unambiguous (single best heuristic), making binary metrics fully interpretable.
+                    </p>
+                    <table class="sortable">
+                        <thead>
+                            <tr>
+                                <th>Heuristic</th>
+                                <th style="text-align: right;" title="Number of samples where this heuristic is optimal">Optimal Samples</th>
+                                <th style="text-align: right;" title="True Positives: Predicted H and H is optimal">TP</th>
+                                <th style="text-align: right;" title="False Positives: Predicted H but H is not optimal">FP</th>
+                                <th style="text-align: right;" title="False Negatives: Did not predict H but H is optimal">FN</th>
+                                <th style="text-align: right;" title="TP / (TP + FP): When we predict H, how often is it correct?">Precision</th>
+                                <th style="text-align: right;" title="TP / (TP + FN): When H is optimal, how often do we predict it?">Recall</th>
+                                <th style="text-align: right;" title="Harmonic mean of Precision and Recall">F1 Score</th>
+                                <th style="text-align: right;" title="(TP + TN) / Total: Overall correctness">Accuracy</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {''.join(heur_rows)}
+                        </tbody>
+                    </table>
+                </div>
+                """)
+            else:
+                # For 10%/20% tolerance: Show per-combination metrics
+                combo_metrics = level.get('combination_metrics', {})
+
+                if not combo_metrics:
+                    continue
+
+                # Sort combinations by support (descending)
+                sorted_combos = sorted(
+                    combo_metrics.items(),
+                    key=lambda x: x[1].get('support', 0),
+                    reverse=True
+                )
+
+                # Create table rows
+                combo_rows = []
+                for combo_name, metrics in sorted_combos:
+                    support = metrics.get('support', 0)
+                    correct = metrics.get('correct_predictions', 0)
+                    recall = metrics.get('recall', 0) * 100
+
+                    combo_rows.append(f"""
+                    <tr>
+                        <td><strong>{combo_name}</strong></td>
+                        <td style="text-align: right;">{support}</td>
+                        <td style="text-align: right;">{correct}</td>
+                        <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(recall)}">{recall:.1f}%</span></td>
+                    </tr>
+                    """)
+
+                tolerance_content_html.append(f"""
+                <div id="tolerance-{threshold_key}" class="tab-content" style="display: {display_style};">
+                    <p style="margin-bottom: 1rem; color: #666;">
+                        Per-combination ground truth metrics at {threshold_key} tolerance level.
+                        At non-zero tolerance, multiple heuristics can be near-optimal, forming combinations.
+                        Shows how well the classifier performs when specific combinations of heuristics are optimal.
+                    </p>
+                    <table class="sortable">
+                        <thead>
+                            <tr>
+                                <th>Near-Optimal Combination</th>
+                                <th style="text-align: right;" title="Number of samples with this near-optimal combination">Support</th>
+                                <th style="text-align: right;" title="How often we predicted a heuristic from this combination">Correct Predictions</th>
+                                <th style="text-align: right;" title="Correct Predictions / Support: When this combination is optimal, how often do we predict any member of it? (Combination Recall)">Recall</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {''.join(combo_rows)}
+                        </tbody>
+                    </table>
+                </div>
+                """)
+
+        return f"""
+        <section id="per-heuristic" class="section">
+            <h2>Per-Heuristic & Per-Combination Analysis</h2>
+            <p style="margin-bottom: 1rem;">
+                <strong>0% Tolerance:</strong> Binary classification metrics per heuristic (unambiguous ground truth).<br>
+                <strong>10%/20% Tolerance:</strong> Per-combination metrics showing performance when multiple heuristics are near-optimal.
+            </p>
+
+            <div class="tabs">
+                {''.join(tolerance_tabs_html)}
+            </div>
+
+            {''.join(tolerance_content_html)}
+        </section>
         """
 
     def _generate_summary_table_section(self) -> str:
