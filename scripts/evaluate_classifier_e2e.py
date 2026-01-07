@@ -29,13 +29,14 @@ from models import (
     RandomClassifier,
 )
 from models.evaluator_csv import RecommenderEvaluator
+from models.evaluation_report import EvaluationReportGenerator
 from scripts.generate_dataset import build_pipeline
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
 
 SEED = 1
-OUTPUT_DIR = Path("outputs") / "evaluate_classifier"
+OUTPUT_DIR = Path("outputs") / "evaluate_classifier_e2e_new"
 
 # Legacy code: These dictionaries are no longer used.
 # The script now automatically discovers all datasets using find_existing_tables()
@@ -89,23 +90,43 @@ def find_existing_tables(
     - test: Uses .runs.csv filtered by .test.csv combination_ids
       (complete data with all aligners per combination for proper evaluation)
     - eval: Uses .eval.csv (labels only)
+
+    Returns tables with metadata attached as attributes.
     """
     train_tables = []
     test_tables = []
     eval_tables = []
 
+    def resolve_name(path: Path, suffix: str) -> str:
+        uuid = path.stem.replace(suffix, '')
+        data_dir = Path("data") / uuid
+        if data_dir.is_dir():
+            for f in data_dir.iterdir():
+                if f.suffix in ['.xes', '.csv']:
+                    return f.stem.replace('%20', ' ')
+        return uuid
+
     # Load train tables (labels only)
     for table_path in root.glob("**/*.train.csv"):
-        train_tables.append(pd.read_csv(table_path))
+        df = pd.read_csv(table_path)
+        # Attach metadata as attributes
+        df.attrs['dataset_name'] = resolve_name(table_path, '.train')
+        df.attrs['source_file'] = str(table_path)
+        train_tables.append(df)
 
     # Load test tables: runs.csv filtered by test.csv combination_ids
     test_label_paths = list(root.glob("**/*.test.csv"))
     for test_label_path in test_label_paths:
         # Get corresponding runs.csv file
         runs_path = test_label_path.parent / test_label_path.name.replace('.test.csv', '.runs.csv')
+        dataset_name = resolve_name(test_label_path, '.test')
+
         if not runs_path.exists():
             logging.warning(f"No runs.csv found for {test_label_path}, using test.csv directly")
-            test_tables.append(pd.read_csv(test_label_path))
+            df = pd.read_csv(test_label_path)
+            df.attrs['dataset_name'] = dataset_name
+            df.attrs['source_file'] = str(test_label_path)
+            test_tables.append(df)
             continue
 
         # Load test combination_ids
@@ -116,13 +137,20 @@ def find_existing_tables(
         runs_df = pd.read_csv(runs_path)
         test_filtered = runs_df[runs_df['combination_id'].isin(test_combination_ids)]
 
-        logging.info(f"Test set {test_label_path.name}: {len(test_combination_ids)} combinations, "
+        # Attach metadata
+        test_filtered.attrs['dataset_name'] = dataset_name
+        test_filtered.attrs['source_file'] = str(test_label_path)
+
+        logging.info(f"Test set {dataset_name} ({test_label_path.name}): {len(test_combination_ids)} combinations, "
                      f"{len(test_filtered)} total rows (all aligners)")
         test_tables.append(test_filtered)
 
     # Load eval tables (labels only)
     for table_path in root.glob("**/*.eval.csv"):
-        eval_tables.append(pd.read_csv(table_path))
+        df = pd.read_csv(table_path)
+        df.attrs['dataset_name'] = resolve_name(table_path, '.eval')
+        df.attrs['source_file'] = str(table_path)
+        eval_tables.append(df)
 
     return train_tables, test_tables, eval_tables
 
@@ -240,7 +268,9 @@ if __name__ == "__main__":
         classifier=classifier, tables=test_tables
     )
 
-    metrics = evaluator.evaluate()
+    # Returns Dict[str, EvaluationMetrics] with per-dataset + 'overall'
+    all_metrics = evaluator.evaluate()
+    overall_metrics = all_metrics['overall']
 
     # Compare with baselines
     logging.info("\nComparing with baselines...")
@@ -248,9 +278,16 @@ if __name__ == "__main__":
     logging.info("\n" + comparison_df.to_string())
 
     RecommenderEvaluator.save_results(
-        metrics=metrics,
+        metrics=overall_metrics,
         comparison_df=comparison_df,
         output_dir=OUTPUT_DIR,
         train_count=len(train_tables),
         test_count=len(test_tables),
     )
+
+    # Generate HTML report
+    logging.info("\nGenerating HTML report...")
+
+    report_gen = EvaluationReportGenerator(metrics_dict=all_metrics)
+    report_gen.to_html(OUTPUT_DIR / "evaluation_report.html")
+    logging.info(f"HTML report available at: {OUTPUT_DIR / 'evaluation_report.html'}")
