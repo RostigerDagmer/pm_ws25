@@ -354,7 +354,8 @@ class ClassificationModel(ABC):
                     predicted_heuristic=predicted_heuristic,
                     confidence=float(confidence),
                     total_prediction_time=t_clf_end - t_clf_start,
-                    feature_extraction_time=feature_extraction_time,
+                    feature_extraction_time=feature_extraction_time
+                    / len(traces),
                     classification_time=classification_time,
                 )
             )

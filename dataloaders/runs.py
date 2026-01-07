@@ -191,7 +191,10 @@ class PerfCounter(Serializable[dict[str, Any]]):
             return d
         duration = d["duration"]
         stats = pstats.Stats()
-        stats.stats = marshal.loads(d["stats"])
+        try:
+            stats.stats = marshal.loads(d["stats"])
+        except:
+            stats.stats = d.get("stats")
         pc = PerfCounter()
         pc.duration = duration
         pc.stats = stats

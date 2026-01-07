@@ -47,7 +47,9 @@ class LabelDataset(Dataset):
     def _get_labels(run_ds: RunDataset) -> pd.DataFrame:
         labels = []
         dataset_id = run_ds.log_uuid
-        for comb_id in tqdm(run_ds.combinations):
+        for comb_id in tqdm(
+            run_ds.combinations, desc=f"labeling {run_ds.log_uuid}"
+        ):
             items = [
                 run_ds.serialized[item_id]
                 for item_id in run_ds.combinations[comb_id]

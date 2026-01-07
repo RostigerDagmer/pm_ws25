@@ -529,7 +529,6 @@ class RecommenderEvaluator:
 
             best_time = min(durations.values())
             worst_time = max(durations.values())
-            best_algo = run.algo
 
             all_heuristic_times.append(durations)
             optimal_times.append(best_time)

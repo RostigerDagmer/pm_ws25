@@ -162,6 +162,7 @@ def get_natural_dataset(
     base_path: Optional[str] = None,
     skip_init: bool = False,
     seed: int = 42,
+    num_workers: int = 0,
 ) -> RunDataset:
     RNG.initialize(seed)
     cfg_dict = yaml.safe_load(open(config))
@@ -171,7 +172,9 @@ def get_natural_dataset(
 
     cfg.seed = seed
     # Use SLURM_CPUS_PER_TASK if available, otherwise default to auto
-    cfg.alignment.workers = int(os.environ.get('SLURM_CPUS_PER_TASK', 0))
+    cfg.alignment.workers = int(
+        os.environ.get('SLURM_CPUS_PER_TASK', num_workers)
+    )
 
     # Skip config <-> cache check
     # (This is unsafe if process models are being referenced in the cache that are not included in the current config)

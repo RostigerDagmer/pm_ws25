@@ -498,6 +498,10 @@ class ProcessModelDataset(
                 try:
                     item = fut.result()
                     if item is None:
+                        discovered.total -= 1
+                        written.total -= 1
+                        discovered.update(0)
+                        written.update(0)
                         continue
                     assert (
                         item.hash() == key
