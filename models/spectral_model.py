@@ -50,38 +50,49 @@ def traces_to_tensors(
 def prepare_masked_batch(
     extractor,
     model,  # SpectralModel
-    tensor_net: TensorNet,
-    tok_idx: torch.Tensor,  # [B,S] values: -1 pad, 0..L-1 known/silent, L unknown
+    tensor_net,  # TensorNet
+    tok_idx: torch.Tensor,  # [B,S] values: -1 pad, 0..T-1 transition-id, T unknown sentinel (or L unknown; see below)
     unk_bucket: torch.Tensor,  # [B,S] values: -1 for non-unk, else 0..K-1
     device: torch.device,
     mask_prob: float = 0.15,
 ):
     """
+    Updated for "silent transitions are present in basis vocab" and for traces that contain
+    only *visible* transitions (but basis includes silent transitions as memory slots).
+
+    Assumptions:
+      - tensor_net.labels is length T (transition-aligned)
+      - tok_idx contains transition indices in [0, T-1], -1 for PAD.
+      - Unknown sentinel is == T (recommended). If you still use L, set unknown_id accordingly.
+
     Returns:
         model_basis:   [1, T_vocab, d_model]
         embedded_log:  [B, S, d_trace]
         final_targets: [B, S] vocab indices for masked known tokens, else -100
+        local_to_vocab: [T] maps transition-id -> vocab-id (includes silent)
     """
     pre = tensor_net.pre
     post = tensor_net.post
     labels = tensor_net.labels
     im = tensor_net.init
     fm = tensor_net.final
+
     B, S = tok_idx.shape
-    L = len(labels)  # local label vocab size; unknown sentinel is == L
+    T_local = pre.shape[0]  # number of transitions
     d_basis = model.d_model
     d_trace = model.d_trace
 
+    # Define unknown sentinel. Recommended: unknown_id == T_local.
+    unknown_id = T_local
+
     # -------------------------
-    # A) Compute Basis + local->vocab map (silent excluded, duplicates merged)
+    # A) Compute Basis + local->vocab map (silent INCLUDED; visible labels may be merged)
     # -------------------------
     basis_labels, basis, local_to_vocab = extractor.compute_basis_and_maps(
         pre, post, labels, im, fm
     )
     basis = basis.to(device)
-    local_to_vocab = local_to_vocab.to(
-        device
-    )  # [L_local], -1 for silent/excluded
+    local_to_vocab = local_to_vocab.to(device)  # [T_local], all >=0 now (includes silent)
     vocab_size = basis.shape[0]
 
     # model_basis: [1, T_vocab, d_basis]
@@ -89,49 +100,39 @@ def prepare_masked_batch(
         model_basis = torch.zeros((1, 0, d_basis), device=device)
     else:
         # pad/truncate basis to d_basis defensively
-        if basis.shape[1] < d_basis:
-            pad = torch.zeros(
-                (vocab_size, d_basis - basis.shape[1]),
-                device=device,
-                dtype=basis.dtype,
-            )
-            basis = torch.cat([basis, pad], dim=1)
-        elif basis.shape[1] > d_basis:
-            basis = basis[:, :d_basis]
+        assert basis.shape[1] == model.d_model, (basis.shape, model.d_model)
         model_basis = basis.unsqueeze(0)
-
-    # Silent local indices
-    silent_local_mask = torch.tensor(
-        [lab == "" for lab in labels], dtype=torch.bool, device=device
-    )
-
+    # -------------------------
     # B) Sequence masks
+    # -------------------------
     pad_mask = tok_idx == -1
-    unk_mask = tok_idx == L
-    valid_local = (tok_idx >= 0) & (tok_idx < L)
-    clamped_local = tok_idx.clamp(0, max(L - 1, 0))
-    silent_mask = valid_local & silent_local_mask[clamped_local]
-    known_local_mask = valid_local & (~silent_mask)
+    unk_mask = tok_idx == unknown_id
 
+    # "known local" now means: a valid transition id
+    known_local_mask = (tok_idx >= 0) & (tok_idx < T_local)
+
+    # Safe clamp for indexing
+    clamped_local = tok_idx.clamp(0, max(T_local - 1, 0))
+
+    # -------------------------
     # C) vocab indices for predictable known tokens
+    # -------------------------
     vocab_idx = torch.full((B, S), -1, dtype=torch.long, device=device)
     if known_local_mask.any():
-        mapped = local_to_vocab[clamped_local]  # [B,S], -1 if excluded
+        mapped = local_to_vocab[clamped_local]  # [B,S], valid for all transitions (incl silent)
         vocab_idx[known_local_mask] = mapped[known_local_mask]
+
     predictable_mask = vocab_idx >= 0
 
+    # -------------------------
     # D) Build embedded_log [B,S,d_trace]
+    # -------------------------
     embedded_log = torch.empty((B, S, d_trace), device=device)
 
     pad_vec = model.pad_token.to(device).view(-1)  # [d_trace]
-    silent_vec = model.silent_token.to(device).view(-1)  # [d_trace]
 
     # initialize all as PAD
     embedded_log[:] = pad_vec
-
-    # SILENT token positions
-    if silent_mask.any():
-        embedded_log[silent_mask] = silent_vec
 
     # UNK buckets
     if unk_mask.any():
@@ -144,45 +145,27 @@ def prepare_masked_batch(
             (vocab_size, d_trace), device=device, dtype=embedded_log.dtype
         )
         vocab_lookup[:, :d_basis] = model_basis[0]  # [T_vocab, d_basis]
-        embedded_log[predictable_mask] = vocab_lookup[
-            vocab_idx[predictable_mask]
-        ]
+        embedded_log[predictable_mask] = vocab_lookup[vocab_idx[predictable_mask]]
 
-    # print(f"predictable mask: {predictable_mask}")
-    # E) Targets + masking
+    # NOTE:
+    # We no longer emit a special "silent token" in the trace, because traces are assumed to
+    # contain only visible transitions. Silent transitions are instead accessible via basis memory.
+
+    # -------------------------
+    # E) Targets + masking (MLM over trace-visible transition tokens)
+    # -------------------------
     final_targets = torch.full((B, S), -100, dtype=torch.long, device=device)
 
     if model.pretraining and vocab_size > 0 and mask_prob > 0.0:
         rand = torch.rand((B, S), device=device)
-        mask_bool = (rand < mask_prob) & predictable_mask
-        # print(f"mask_bool: {mask_bool}")
+        mask_bool = (rand < mask_prob) & predictable_mask & (~pad_mask) & (~unk_mask)
+
         final_targets[mask_bool] = vocab_idx[mask_bool]
 
-        # mask token is [1,1,d_trace] -> broadcast to [B,S,d_trace]
         mask_tok = model.mask_token.to(device).expand(B, S, d_trace)
-        embedded_log = torch.where(
-            mask_bool.unsqueeze(-1), mask_tok, embedded_log
-        )
-    # print(f"final targets: {final_targets[final_targets != -100]}")
+        embedded_log = torch.where(mask_bool.unsqueeze(-1), mask_tok, embedded_log)
+
     return model_basis, embedded_log, final_targets, local_to_vocab
-
-class PositionalEncoding(nn.Module):
-
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        x = x + self.pe[:x.size(0), :]
-        return self.dropout(x)
 
 class MultiHeadAttention(nn.Module):
     """
@@ -576,7 +559,7 @@ class SpectralModel(nn.Module, ClassificationModel):
         t_clf_start = time.perf_counter()
         try:
             logits = self(
-                model_basis.repeat(trace_embedding.shape[0], 1, 1), trace_embedding, trace_mask=trace_mask, attn_pool=True
+                model_basis.repeat(trace_embedding.shape[0], 1, 1), trace_embedding, trace_mask=trace_mask
             )
         except:
             print(f"Failed to infer for model:\n{tensor_net}\nand traces:\n{traces}")

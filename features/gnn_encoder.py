@@ -110,23 +110,46 @@ class PetriNetGNNEncoder(nn.Module):
         )
 
     @torch.no_grad()
-    def _build_local_to_vocab(
-        self, labels: list[str], device
-    ) -> tuple[list[str], torch.Tensor]:
+    def _build_local_to_vocab(self, labels: list[str], device) -> tuple[list[str], torch.Tensor]:
+        """
+        Vocab construction:
+        - visible transitions: merged by label (first-occurrence order)
+        - silent transitions: each gets its own unique vocab entry (per transition id)
+        Returns:
+        basis_labels: [V] list of string identifiers
+        local_to_vocab: [T] maps every transition -> vocab id (no -1)
+        """
         T_local = len(labels)
-        local_to_vocab = torch.full(
-            (T_local,), -1, dtype=torch.long, device=device
-        )
+        local_to_vocab = torch.empty((T_local,), dtype=torch.long, device=device)
 
-        label_to_row = {}
+        label_to_row: dict[str, int] = {}
+        basis_labels: list[str] = []
+
+        # First: allocate visible label slots (merged)
         for j, lab in enumerate(labels):
             if lab == "":
                 continue
             if lab not in label_to_row:
-                label_to_row[lab] = len(label_to_row)
-            local_to_vocab[j] = label_to_row[lab]
+                label_to_row[lab] = len(basis_labels)
+                basis_labels.append(lab)
 
-        basis_labels = list(label_to_row.keys())
+        # Second: allocate one slot per silent transition
+        silent_rows = {}
+        for j, lab in enumerate(labels):
+            if lab != "":
+                continue
+            # unique name per silent transition
+            key = f"<tau:t{j:06d}>"
+            silent_rows[j] = len(basis_labels)
+            basis_labels.append(key)
+
+        # Fill local_to_vocab
+        for j, lab in enumerate(labels):
+            if lab == "":
+                local_to_vocab[j] = silent_rows[j]
+            else:
+                local_to_vocab[j] = label_to_row[lab]
+
         return basis_labels, local_to_vocab
 
     def _init_features(
@@ -242,17 +265,13 @@ class PetriNetGNNEncoder(nn.Module):
 
         # Merge transitions by label (average duplicates)
         # basis[v] = mean_{t: local_to_vocab[t]=v} h_t[t]
+        
         basis = torch.zeros((V, self.d_model), device=device, dtype=h_t.dtype)
         counts = torch.zeros((V,), device=device, dtype=h_t.dtype)
 
-        idx = local_to_vocab  # [T]
-        mask = idx >= 0
-        idx_valid = idx[mask]
-        basis.index_add_(0, idx_valid, h_t[mask])
-        counts.index_add_(
-            0, idx_valid, torch.ones_like(idx_valid, dtype=h_t.dtype)
-        )
-
+        idx = local_to_vocab  # [T], all valid
+        basis.index_add_(0, idx, h_t)
+        counts.index_add_(0, idx, torch.ones_like(idx, dtype=h_t.dtype))
         basis = basis / counts.clamp_min(1.0).unsqueeze(-1)
 
         return basis_labels, basis, local_to_vocab
