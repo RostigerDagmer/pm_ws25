@@ -465,6 +465,7 @@ class ProcessModelDataset(
             scheduled = tqdm(total=len(self.configurations), desc="Scheduled")
             discovered = tqdm(total=0, desc="Discovered")
             written = tqdm(total=0, desc="Written")
+            irrelevant = set(self.items.keys())
             for key, cfg in self.configurations.items():
                 (
                     method_name,
@@ -474,10 +475,15 @@ class ProcessModelDataset(
                     subset_idx,
                     subset,
                 ) = cfg
+                try:
+                    irrelevant.remove(key)
+                except KeyError:
+                    pass
                 if key in seen_hashes:
                     scheduled.total -= 1
                     scheduled.update(0)
                     continue
+
                 seen_hashes.add(key)
                 fut = pool.schedule(
                     ProcessModelDataset._process_item,
@@ -524,6 +530,10 @@ class ProcessModelDataset(
                 batch.clear()
             discovered.close()
             written.close()
+
+        self.items = {
+            k: v for k, v in self.items.items() if k not in irrelevant
+        }
         self.items.update(new_items)
         self.index = list(self.items.keys())
 

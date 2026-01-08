@@ -5,8 +5,6 @@
 *__pycache__
 .vscode
 data
-*.csv
-*.pkl
 *.err
 *.out
 *.json
