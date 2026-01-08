@@ -242,9 +242,16 @@ if __name__ == "__main__":
     logging.info("\n" + comparison_df.to_string())
 
     RecommenderEvaluator.save_results(
-        metrics=metrics,
+        metrics=overall_metrics,
         comparison_df=comparison_df,
         output_dir=OUTPUT_DIR,
         train_count=len(train_tables),
         test_count=len(test_tables),
     )
+
+    # Generate HTML report
+    logging.info("\nGenerating HTML report...")
+
+    report_gen = EvaluationReportGenerator(metrics_dict=all_metrics)
+    report_gen.to_html(OUTPUT_DIR / "evaluation_report.html")
+    logging.info(f"HTML report available at: {OUTPUT_DIR / 'evaluation_report.html'}")
