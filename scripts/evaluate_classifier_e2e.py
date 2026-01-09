@@ -17,6 +17,7 @@ from models.spectral_model import SpectralModel
 from argparse import ArgumentParser
 from util.rng import RNG
 import logging
+import webbrowser
 from pathlib import Path
 
 from features import CompositeFeatureExtractor
@@ -264,6 +265,12 @@ if __name__ == "__main__":
         else:
             metrics_renamed[dataset_id] = dataset_metrics
 
-    report_gen = EvaluationReportGenerator(metrics_dict=metrics_renamed)
-    report_gen.to_html(OUTPUT_DIR / "evaluation_report.html")
-    logging.info(f"HTML report available at: {OUTPUT_DIR / 'evaluation_report.html'}")
+    report_gen = EvaluationReportGenerator(
+        metrics_dict=metrics_renamed,
+        baseline_comparison=comparison_df
+    )
+    report_path = OUTPUT_DIR / "evaluation_report.html"
+    report_gen.to_html(report_path)
+    logging.info(f"HTML report available at: {report_path}")
+
+    webbrowser.open(f"file://{report_path.absolute()}")

@@ -815,6 +815,8 @@ class RecommenderEvaluator:
             'mean_alignment_time_only': main_metrics.mean_alignment_time_only,
             'mean_alignment_time_with_prediction': main_metrics.mean_alignment_time_with_prediction,
             'mean_prediction_time': main_metrics.mean_prediction_time,
+            'mean_feature_extraction_time': main_metrics.mean_feature_extraction_time,
+            'mean_classification_time': main_metrics.mean_classification_time,
         }
         # Add accuracy for each tolerance level
         for threshold, level_metrics in main_metrics.tolerance_metrics.items():
@@ -845,6 +847,8 @@ class RecommenderEvaluator:
                 'mean_alignment_time_only': baseline_metrics.mean_alignment_time_only,
                 'mean_alignment_time_with_prediction': baseline_metrics.mean_alignment_time_with_prediction,
                 'mean_prediction_time': baseline_metrics.mean_prediction_time,
+                'mean_feature_extraction_time': baseline_metrics.mean_feature_extraction_time,
+                'mean_classification_time': baseline_metrics.mean_classification_time,
             }
             # Add accuracy for each tolerance level
             for (
