@@ -6,7 +6,7 @@ heuristics (within a tolerance threshold of the best).
 """
 
 from typing import Dict, Any, List, Union, Tuple, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -115,6 +115,23 @@ class ToleranceLevelMetrics:
     macro_accuracy: float  # Average accuracy across all combinations
     total_samples: int
     prediction_counts: Dict[str, int]  # How often each heuristic was predicted
+
+
+@dataclass
+class DatasetEvaluationData:
+    """Accumulates evaluation data for a single dataset during evaluation."""
+
+    predictions: List[str] = field(default_factory=list)
+    all_heuristic_times: List[Dict[str, float]] = field(default_factory=list)
+    actual_times: List[float] = field(default_factory=list)
+    optimal_times: List[float] = field(default_factory=list)
+    worst_times: List[float] = field(default_factory=list)
+    prediction_times: List[float] = field(default_factory=list)
+    feature_extraction_times: List[float] = field(default_factory=list)
+    classification_times: List[float] = field(default_factory=list)
+    heuristic_runs: Dict[str, List[float]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
 
 
 @dataclass
@@ -359,7 +376,7 @@ class RecommenderEvaluator:
         )
         self.dataset = dataset
 
-    def evaluate_batched(self) -> Dict[str, EvaluationMetrics]:
+    def evaluate(self, batched: bool = True) -> Dict[str, EvaluationMetrics]:
         """
         Evaluate classifier on run_datasets.
 
@@ -370,24 +387,22 @@ class RecommenderEvaluator:
         logging.info("Starting evaluation...")
 
         # Collect data per dataset (including 'overall' as special key)
-        dataset_data = defaultdict(lambda: {
-            'predictions': [],
-            'all_heuristic_times': [],
-            'actual_times': [],
-            'optimal_times': [],
-            'worst_times': [],
-            'prediction_times': [],
-            'feature_extraction_times': [],
-            'classification_times': [],
-            'heuristic_runs': defaultdict(list),
-        })
+        dataset_data: Dict[str, DatasetEvaluationData] = defaultdict(
+            DatasetEvaluationData
+        )
 
         for runs in tqdm(self.dataset.iter_by_model(), desc="Evaluating"):
             dataset_ids, runs = zip(*runs)
             model = runs[0].model.deserialize()
             traces = [run.trace for run in runs]
 
-            predictions = self.classifier.predict_batched(model, traces)
+            predictions = []
+            if batched:
+                predictions = self.classifier.predict_batched(model, traces)
+            else:
+                for trace in traces:
+                    prediction = self.classifier.predict_heuristic(model.pm, model.im, model.fm, trace)
+                    predictions.append(prediction)
 
             # Process each prediction
             for dataset_id, gt, prediction in zip(dataset_ids, runs, predictions):
@@ -414,24 +429,24 @@ class RecommenderEvaluator:
                 # Store in both dataset-specific and overall
                 for key in [dataset_id, 'overall']:
                     data = dataset_data[key]
-                    data['predictions'].append(prediction.predicted_heuristic)
-                    data['all_heuristic_times'].append(durations)
-                    data['actual_times'].append(actual_time)
-                    data['optimal_times'].append(best_time)
-                    data['worst_times'].append(worst_time)
-                    data['prediction_times'].append(prediction.combined_prediction_time)
-                    data['feature_extraction_times'].append(prediction.feature_extraction_time)
-                    data['classification_times'].append(prediction.classification_time)
+                    data.predictions.append(prediction.predicted_heuristic)
+                    data.all_heuristic_times.append(durations)
+                    data.actual_times.append(actual_time)
+                    data.optimal_times.append(best_time)
+                    data.worst_times.append(worst_time)
+                    data.prediction_times.append(prediction.combined_prediction_time)
+                    data.feature_extraction_times.append(prediction.feature_extraction_time)
+                    data.classification_times.append(prediction.classification_time)
 
                     for algo, time in durations.items():
-                        data['heuristic_runs'][algo].append(time)
+                        data.heuristic_runs[algo].append(time)
 
         # Build metrics for each dataset
         all_metrics = {}
 
         logging.info(f"\nEvaluating {len(dataset_data) - 1} datasets individually...")
         for dataset_id, data in dataset_data.items():  # Includes 'overall'
-            logging.info(f"  Dataset: {dataset_id[:8]} ({len(data['predictions'])} samples)")
+            logging.info(f"  Dataset: {dataset_id[:8]} ({len(data.predictions)} samples)")
             all_metrics[dataset_id] = self._compute_metrics_from_data(data)
 
         logging.info("Evaluation complete!")
@@ -439,21 +454,23 @@ class RecommenderEvaluator:
 
         return all_metrics
 
-    def _compute_metrics_from_data(self, data: dict) -> EvaluationMetrics:
+    def _compute_metrics_from_data(
+        self, data: DatasetEvaluationData
+    ) -> EvaluationMetrics:
         """Helper to compute EvaluationMetrics from collected data."""
         # Calculate tolerance metrics
         tolerance_metrics = {}
         for threshold in self.tolerance_thresholds:
             tolerance_metrics[threshold] = self._calculate_tolerance_level_metrics(
-                data['predictions'], data['all_heuristic_times'], threshold
+                data.predictions, data.all_heuristic_times, threshold
             )
 
         # Time performance metrics
-        mean_alignment_only = np.mean(data['actual_times'])
-        mean_prediction = np.mean(data['prediction_times'])
+        mean_alignment_only = np.mean(data.actual_times)
+        mean_prediction = np.mean(data.prediction_times)
         mean_alignment_with_pred = mean_alignment_only + mean_prediction
-        mean_optimal = np.mean(data['optimal_times'])
-        mean_worst = np.mean(data['worst_times'])
+        mean_optimal = np.mean(data.optimal_times)
+        mean_worst = np.mean(data.worst_times)
 
         performance_ratio_alignment_only = (
             mean_alignment_only / mean_optimal if mean_optimal > 0 else float('inf')
@@ -468,7 +485,7 @@ class RecommenderEvaluator:
 
         # Per-heuristic timing statistics
         heuristic_timings = {}
-        for heuristic, times in data['heuristic_runs'].items():
+        for heuristic, times in data.heuristic_runs.items():
             heuristic_timings[heuristic] = {
                 'mean': np.mean(times),
                 'std': np.std(times),
@@ -491,140 +508,10 @@ class RecommenderEvaluator:
             time_savings_vs_worst=time_savings,
             heuristic_timings=heuristic_timings,
             feature_importance=feature_importance,
-            mean_prediction_time=np.mean(data['prediction_times']),
-            mean_feature_extraction_time=np.mean(data['feature_extraction_times']),
-            mean_classification_time=np.mean(data['classification_times']),
+            mean_prediction_time=np.mean(data.prediction_times),
+            mean_feature_extraction_time=np.mean(data.feature_extraction_times),
+            mean_classification_time=np.mean(data.classification_times),
         )
-
-    def evaluate(self) -> EvaluationMetrics:
-        """Evaluate classifier on run_datasets with combination-based metrics."""
-        logging.info("Starting evaluation...")
-
-        # Collect predictions and timing data
-        predictions = []
-        all_heuristic_times = []  # List of dicts: {heuristic: time}
-        actual_times = []
-        optimal_times = []
-        worst_times = []
-        prediction_times = []
-        feature_extraction_times = []
-        classification_times = []
-
-        # Track per-heuristic performance
-        heuristic_runs = defaultdict(list)
-
-        for dataset_id, run in tqdm(self.dataset, desc="Evaluating"):
-            model = run.model.deserialize()
-            trace = run.trace
-            prediction = self.classifier.predict_heuristic(
-                model.pm, model.im, model.fm, trace
-            )
-            predictions.append(prediction.predicted_heuristic)
-
-            # Track timing
-            prediction_times.append(prediction.combined_prediction_time)
-            feature_extraction_times.append(prediction.feature_extraction_time)
-            classification_times.append(prediction.classification_time)
-
-            # Find fastest heuristic (ground truth)
-            all_alignments = {
-                item.algo: item.perf
-                for item in self.dataset.get_combination_results(
-                    dataset_id, run.comb_id
-                )
-            }
-
-            durations = {
-                algo: np.mean(
-                    [
-                        (
-                            p["duration"]
-                            if p["duration"] != float('inf')
-                            else 20.0
-                        )
-                        for p in perf
-                    ]
-                )
-                for algo, perf in all_alignments.items()  # TODO: read timeout from ds
-            }
-
-            best_time = min(durations.values())
-            worst_time = max(durations.values())
-
-            all_heuristic_times.append(durations)
-            optimal_times.append(best_time)
-            worst_times.append(worst_time)
-
-            # Get actual time for predicted heuristic
-            actual_time = durations[prediction.predicted_heuristic]
-            actual_times.append(actual_time)
-
-        # Calculate metrics for each tolerance level
-        tolerance_metrics = {}
-        for threshold in self.tolerance_thresholds:
-            tolerance_metrics[threshold] = (
-                self._calculate_tolerance_level_metrics(
-                    predictions, all_heuristic_times, threshold
-                )
-            )
-
-        # Compute time performance metrics
-        mean_alignment_only = np.mean(actual_times)
-        mean_prediction = np.mean(prediction_times)
-        mean_alignment_with_pred = mean_alignment_only + mean_prediction
-        mean_optimal = np.mean(optimal_times)
-        mean_worst = np.mean(worst_times)
-
-        performance_ratio_alignment_only = (
-            mean_alignment_only / mean_optimal
-            if mean_optimal > 0
-            else float('inf')
-        )
-        performance_ratio_with_pred = (
-            mean_alignment_with_pred / mean_optimal
-            if mean_optimal > 0
-            else float('inf')
-        )
-        time_savings = (
-            (mean_worst - mean_alignment_only) / (mean_worst - mean_optimal)
-            if (mean_worst - mean_optimal) > 0
-            else 0.0
-        )
-
-        # Compute per-heuristic timing statistics
-        heuristic_timings = {}
-        for heuristic, times in heuristic_runs.items():
-            heuristic_timings[heuristic] = {
-                'mean': np.mean(times),
-                'std': np.std(times),
-                'median': np.median(times),
-                'min': np.min(times),
-                'max': np.max(times),
-                'count': len(times),
-            }
-
-        # Get feature importance
-        feature_importance = self.classifier.get_feature_importance()
-
-        metrics = EvaluationMetrics(
-            tolerance_metrics=tolerance_metrics,
-            mean_alignment_time_only=mean_alignment_only,
-            mean_alignment_time_with_prediction=mean_alignment_with_pred,
-            mean_optimal_alignment_time=mean_optimal,
-            performance_ratio_alignment_only=performance_ratio_alignment_only,
-            performance_ratio_with_prediction=performance_ratio_with_pred,
-            time_savings_vs_worst=time_savings,
-            heuristic_timings=heuristic_timings,
-            feature_importance=feature_importance,
-            mean_prediction_time=np.mean(prediction_times),
-            mean_feature_extraction_time=np.mean(feature_extraction_times),
-            mean_classification_time=np.mean(classification_times),
-        )
-
-        logging.info("Evaluation complete!")
-        logging.info(f"\n{metrics.summary()}")
-
-        return metrics
 
     def _calculate_per_heuristic_metrics_binary(
         self,
@@ -836,7 +723,7 @@ class RecommenderEvaluator:
             evaluator = RecommenderEvaluator(
                 baseline, self.dataset, self.tolerance_thresholds
             )
-            baseline_result = evaluator.evaluate_batched()
+            baseline_result = evaluator.evaluate()
             # Extract 'overall' metrics
             baseline_metrics = baseline_result['overall']
 
