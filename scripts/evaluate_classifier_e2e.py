@@ -25,6 +25,7 @@ from models import (
     SingleBestSolver,
     RandomClassifier,
     RecommenderEvaluator,
+    EvaluationReportGenerator
 )
 from dataloaders.util import (
     get_natural_dataset,
@@ -72,11 +73,11 @@ TRAIN_DATASETS = {
 TEST_DATASETS = {
     'b32c6fe5-f212-4286-9774-58dd53511cf8': ['BPIC15_5.xes'],
     '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
-    'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
-    '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
-    'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
-        'BPI_Challenge_2013_closed_problems.xes'
-    ],
+    # 'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
+    # '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
+    # 'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
+    #     'BPI_Challenge_2013_closed_problems.xes'
+    # ],
 }
 
 
@@ -92,7 +93,7 @@ if __name__ == "__main__":
     )
     args = arg_parser.parse_args()
 
-    config_path = "configs/default.yaml"
+    config_path = "configs/easy_test_config.yaml"
     cache_path = "cache/.runs"
 
     # Create train RunDatasets
@@ -212,16 +213,16 @@ if __name__ == "__main__":
             )
             test_run_datasets.append(run_dataset)
 
-    test_run_datasets.append(
-        get_synthetic_dataset(
-            Path(cache_path),
-            seed=SEED + 1,
-            num_models=100,
-            num_traces=32,
-            min_depth=2,
-            max_depth=3,
-        )
-    )
+    # test_run_datasets.append(
+    #     get_synthetic_dataset(
+    #         Path(cache_path),
+    #         seed=SEED + 1,
+    #         num_models=10,
+    #         num_traces=32,
+    #         min_depth=2,
+    #         max_depth=3,
+    #     )
+    # )
 
     test_dataset = LabelDataset(test_run_datasets)
 
@@ -237,12 +238,13 @@ if __name__ == "__main__":
     logging.info("\nComparing with baselines...")
     comparison_df = evaluator.compare_with_baselines(
         [single_best, random_clf]
-        + ([transformer_model] if has_transformer_model else [])
+        + ([transformer_model] if has_transformer_model else []),
+        main_result=metrics,
     )
     logging.info("\n" + comparison_df.to_string())
 
     RecommenderEvaluator.save_results(
-        metrics=overall_metrics,
+        metrics=metrics["overall"],
         comparison_df=comparison_df,
         output_dir=OUTPUT_DIR,
         train_count=len(train_tables),
@@ -252,6 +254,16 @@ if __name__ == "__main__":
     # Generate HTML report
     logging.info("\nGenerating HTML report...")
 
-    report_gen = EvaluationReportGenerator(metrics_dict=all_metrics)
+    # Rename dataset IDs to names for report
+    metrics_renamed = {}
+    for dataset_id, dataset_metrics in metrics.items():
+        if dataset_id == 'overall':
+            metrics_renamed['overall'] = dataset_metrics
+        elif dataset_id in TEST_DATASETS:
+            metrics_renamed[TEST_DATASETS[dataset_id][0].replace('.xes', '')] = dataset_metrics
+        else:
+            metrics_renamed[dataset_id] = dataset_metrics
+
+    report_gen = EvaluationReportGenerator(metrics_dict=metrics_renamed)
     report_gen.to_html(OUTPUT_DIR / "evaluation_report.html")
     logging.info(f"HTML report available at: {OUTPUT_DIR / 'evaluation_report.html'}")

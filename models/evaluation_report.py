@@ -39,7 +39,7 @@ class EvaluationReportGenerator:
             # Handle new format: Dict[str, EvaluationMetrics]
             if isinstance(metrics_dict, dict) and 'overall' in metrics_dict:
                 # New format: Convert all EvaluationMetrics to dicts
-                from models.evaluator_csv import EvaluationMetrics
+                from models.evaluator import EvaluationMetrics
                 self.all_metrics = {}
                 for dataset_name, eval_metrics in metrics_dict.items():
                     if isinstance(eval_metrics, EvaluationMetrics):
@@ -56,7 +56,7 @@ class EvaluationReportGenerator:
     @classmethod
     def from_evaluation_metrics(cls, metrics):
         """Create report generator from EvaluationMetrics object or Dict[str, EvaluationMetrics]."""
-        from models.evaluator_csv import EvaluationMetrics
+        from models.evaluator import EvaluationMetrics
         if isinstance(metrics, dict):
             # Could be Dict[str, EvaluationMetrics] or single dict
             return cls(metrics_dict=metrics)
