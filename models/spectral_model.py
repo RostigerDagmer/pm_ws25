@@ -567,7 +567,6 @@ class SpectralModel(nn.Module, ClassificationModel):
                 PredictionResult(
                     predicted_heuristic=self.label_map[0],
                     confidence=float(0.0),
-                    total_prediction_time=feature_extraction_time / len(traces),
                     feature_extraction_time=feature_extraction_time / len(traces),
                     classification_time=0.0,
                 )
@@ -583,14 +582,11 @@ class SpectralModel(nn.Module, ClassificationModel):
 
         pred = torch.argmax(logits, dim=1)
         confs = torch.max(logits, dim=1).values
-        t_end = time.perf_counter()
-        total_time = t_end - t_start
 
         return [
             PredictionResult(
                 predicted_heuristic=self.label_map[p.item()],
                 confidence=float(logit),
-                total_prediction_time=total_time / len(traces),
                 feature_extraction_time=feature_extraction_time / len(traces),
                 classification_time=classification_time / len(traces),
             )
