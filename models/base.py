@@ -29,17 +29,20 @@ from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
 class PredictionResult:
     predicted_heuristic: str
     confidence: Optional[float] = None  # Optional confidence score
-    total_prediction_time: float = 0.0
     feature_extraction_time: float = 0.0
     classification_time: float = 0.0
+
+    @property
+    def combined_prediction_time(self) -> float:
+        return self.feature_extraction_time + self.classification_time
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             'predicted_heuristic': self.predicted_heuristic,
             'confidence': self.confidence,
-            'total_prediction_time': self.total_prediction_time,
             'feature_extraction_time': self.feature_extraction_time,
             'classification_time': self.classification_time,
+            'combined_prediction_time': self.combined_prediction_time,
         }
 
 
@@ -279,8 +282,6 @@ class ClassificationModel(ABC):
         if not self.is_trained:
             raise RuntimeError("Model not trained. Call _train() first.")
 
-        t_start = time.perf_counter()
-
         # Extract features
         t_fe_start = time.perf_counter()
         trace_net, trace_im, trace_fm = construct_trace_net(trace)
@@ -309,13 +310,9 @@ class ClassificationModel(ABC):
         t_clf_end = time.perf_counter()
         classification_time = t_clf_end - t_clf_start
 
-        t_end = time.perf_counter()
-        total_time = t_end - t_start
-
         return PredictionResult(
             predicted_heuristic=predicted_heuristic,
             confidence=float(confidence),
-            total_prediction_time=total_time,
             feature_extraction_time=feature_extraction_time,
             classification_time=classification_time,
         )
@@ -353,7 +350,6 @@ class ClassificationModel(ABC):
                 PredictionResult(
                     predicted_heuristic=predicted_heuristic,
                     confidence=float(confidence),
-                    total_prediction_time=t_clf_end - t_clf_start,
                     feature_extraction_time=feature_extraction_time
                     / len(traces),
                     classification_time=classification_time,

@@ -419,7 +419,7 @@ class RecommenderEvaluator:
                     data['actual_times'].append(actual_time)
                     data['optimal_times'].append(best_time)
                     data['worst_times'].append(worst_time)
-                    data['prediction_times'].append(prediction.total_prediction_time)
+                    data['prediction_times'].append(prediction.combined_prediction_time)
                     data['feature_extraction_times'].append(prediction.feature_extraction_time)
                     data['classification_times'].append(prediction.classification_time)
 
@@ -522,7 +522,7 @@ class RecommenderEvaluator:
             predictions.append(prediction.predicted_heuristic)
 
             # Track timing
-            prediction_times.append(prediction.total_prediction_time)
+            prediction_times.append(prediction.combined_prediction_time)
             feature_extraction_times.append(prediction.feature_extraction_time)
             classification_times.append(prediction.classification_time)
 
