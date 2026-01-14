@@ -376,7 +376,7 @@ class RecommenderEvaluator:
         )
         self.dataset = dataset
 
-    def evaluate(self, batched: bool = True) -> Dict[str, EvaluationMetrics]:
+    def evaluate(self, batched: bool = True, print_summary: bool = True) -> Dict[str, EvaluationMetrics]:
         """
         Evaluate classifier on run_datasets.
 
@@ -450,8 +450,9 @@ class RecommenderEvaluator:
             all_metrics[dataset_id] = self._compute_metrics_from_data(data)
 
         logging.info("Evaluation complete!")
-        logging.info(f"\n{all_metrics['overall'].summary()}")
-
+        if print_summary:
+            logging.info(f"\n{all_metrics['overall'].summary()}")
+    
         return all_metrics
 
     def _compute_metrics_from_data(
