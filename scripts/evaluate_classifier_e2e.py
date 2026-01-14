@@ -74,11 +74,11 @@ TRAIN_DATASETS = {
 TEST_DATASETS = {
     'b32c6fe5-f212-4286-9774-58dd53511cf8': ['BPIC15_5.xes'],
     '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
-    'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
-    '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
-    'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
-        'BPI_Challenge_2013_closed_problems.xes'
-    ],
+#     'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
+#     '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
+#     'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
+#         'BPI_Challenge_2013_closed_problems.xes'
+#     ],
 }
 
 
@@ -94,7 +94,7 @@ if __name__ == "__main__":
     )
     args = arg_parser.parse_args()
 
-    config_path = "configs/default.yaml"
+    config_path = "configs/easy_test_config.yaml"
     cache_path = "cache/.runs"
 
     # Create train RunDatasets
