@@ -6,6 +6,7 @@ from models.base import ClassificationModel, PredictionResult
 from models.xgboost_classifier import XGBoostClassifier
 from models.baselines import SingleBestSolver, RandomClassifier
 from models.evaluator import RecommenderEvaluator, EvaluationMetrics
+from models.evaluation_report import EvaluationReportGenerator
 
 __all__ = [
     'ClassificationModel',
@@ -20,4 +21,5 @@ __all__ = [
     'normalize_datasets',
     'validate_aligner_consistency',
     'iter_combined_datasets',
+    'EvaluationReportGenerator',
 ]

@@ -17,6 +17,7 @@ from models.spectral_model import SpectralModel
 from argparse import ArgumentParser
 from util.rng import RNG
 import logging
+import webbrowser
 from pathlib import Path
 
 from features import CompositeFeatureExtractor
@@ -25,6 +26,7 @@ from models import (
     SingleBestSolver,
     RandomClassifier,
     RecommenderEvaluator,
+    EvaluationReportGenerator,
 )
 from dataloaders.util import (
     get_natural_dataset,
@@ -231,20 +233,45 @@ if __name__ == "__main__":
         classifier=classifier, dataset=test_dataset
     )
 
-    metrics = evaluator.evaluate_batched()
+    metrics = evaluator.evaluate(batched=True)
 
     # Compare with baselines
     logging.info("\nComparing with baselines...")
     comparison_df = evaluator.compare_with_baselines(
         [single_best, random_clf]
-        + ([transformer_model] if has_transformer_model else [])
+        + ([transformer_model] if has_transformer_model else []),
+        main_result=metrics,
     )
     logging.info("\n" + comparison_df.to_string())
 
     RecommenderEvaluator.save_results(
-        metrics=metrics,
+        metrics=metrics["overall"],
         comparison_df=comparison_df,
         output_dir=OUTPUT_DIR,
         train_count=len(train_tables),
         test_count=len(test_tables),
     )
+
+    # Generate HTML report
+    logging.info("\nGenerating HTML report...")
+
+    # Rename dataset IDs to names for report
+    metrics_renamed = {}
+    for dataset_id, dataset_metrics in metrics.items():
+        if dataset_id == 'overall':
+            metrics_renamed['overall'] = dataset_metrics
+        elif dataset_id in TEST_DATASETS:
+            metrics_renamed[
+                TEST_DATASETS[dataset_id][0].replace('.xes', '')
+            ] = dataset_metrics
+        else:
+            metrics_renamed[dataset_id] = dataset_metrics
+
+    report_gen = EvaluationReportGenerator(
+        metrics_dict=metrics_renamed, baseline_comparison=comparison_df
+    )
+    report_path = OUTPUT_DIR / "evaluation_report.html"
+    report_gen.to_html(report_path)
+    logging.info(f"HTML report available at: {report_path}")
+
+    webbrowser.open(f"file://{report_path.absolute()}")

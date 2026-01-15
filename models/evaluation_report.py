@@ -17,7 +17,8 @@ DATA_DIR = Path("data")
 class EvaluationReportGenerator:
     """Generate reports from evaluation metrics JSON."""
 
-    def __init__(self, metrics_path: Optional[Path] = None, metrics_dict: Optional[Dict[str, Any]] = None):
+    def __init__(self, metrics_path: Optional[Path] = None, metrics_dict: Optional[Dict[str, Any]] = None,
+                 baseline_comparison: Optional[Any] = None):
         """
         Initialize report generator from either JSON file or dict.
 
@@ -26,6 +27,7 @@ class EvaluationReportGenerator:
             metrics_dict: Can be either:
                 - Dict[str, EvaluationMetrics] (new format with per-dataset + 'overall')
                 - Single EvaluationMetrics dict (legacy format)
+            baseline_comparison: Optional pandas DataFrame with baseline comparison data
         """
         if metrics_path is None and metrics_dict is None:
             raise ValueError("Either metrics_path or metrics_dict must be provided")
@@ -39,7 +41,7 @@ class EvaluationReportGenerator:
             # Handle new format: Dict[str, EvaluationMetrics]
             if isinstance(metrics_dict, dict) and 'overall' in metrics_dict:
                 # New format: Convert all EvaluationMetrics to dicts
-                from models.evaluator_csv import EvaluationMetrics
+                from models.evaluator import EvaluationMetrics
                 self.all_metrics = {}
                 for dataset_name, eval_metrics in metrics_dict.items():
                     if isinstance(eval_metrics, EvaluationMetrics):
@@ -53,10 +55,13 @@ class EvaluationReportGenerator:
                 self.metrics = metrics_dict
                 self.all_metrics = {'overall': metrics_dict}
 
+        # Store baseline comparison data
+        self.baseline_comparison = baseline_comparison
+
     @classmethod
     def from_evaluation_metrics(cls, metrics):
         """Create report generator from EvaluationMetrics object or Dict[str, EvaluationMetrics]."""
-        from models.evaluator_csv import EvaluationMetrics
+        from models.evaluator import EvaluationMetrics
         if isinstance(metrics, dict):
             # Could be Dict[str, EvaluationMetrics] or single dict
             return cls(metrics_dict=metrics)
@@ -88,16 +93,18 @@ class EvaluationReportGenerator:
     <nav class="navbar">
         <h1>Heuristic Recommendation Evaluation Report</h1>
         <div class="nav-links">
-            <a href="#per-dataset">Per-Dataset Breakdown</a>
+            <a href="#summary-table">Per-Dataset Performance</a>
             <a href="#per-heuristic">Per-Heuristic Analysis</a>
-            <a href="#summary-table">Summary Table</a>
+            <a href="#feature-importance">Feature Importance</a>
+            <a href="#baseline-comparison">Baseline Comparison</a>
         </div>
     </nav>
 
     <div class="container">
-        {self._generate_per_dataset_section()}
-        {self._generate_per_heuristic_section()}
         {self._generate_summary_table_section()}
+        {self._generate_per_heuristic_section()}
+        {self._generate_feature_importance_section()}
+        {self._generate_baseline_comparison_section()}
     </div>
 
     <script>
@@ -212,6 +219,11 @@ class EvaluationReportGenerator:
             width: 100%;
             border-collapse: collapse;
             margin: 1.5rem 0;
+            table-layout: auto;
+        }
+
+        .section {
+            overflow-x: auto;
         }
 
         th {
@@ -220,11 +232,13 @@ class EvaluationReportGenerator:
             padding: 1rem;
             text-align: left;
             font-weight: 600;
+            vertical-align: middle;
         }
 
         td {
             padding: 0.8rem 1rem;
             border-bottom: 1px solid #e0e0e0;
+            vertical-align: middle;
         }
 
         tr:hover {
@@ -867,7 +881,16 @@ class EvaluationReportGenerator:
             overall_acc_0 = tolerance_metrics.get('0%', {}).get('overall_accuracy', 0) * 100
             overall_acc_10 = tolerance_metrics.get('10%', {}).get('overall_accuracy', 0) * 100
             overall_acc_20 = tolerance_metrics.get('20%', {}).get('overall_accuracy', 0) * 100
-            overall_perf_ratio = overall_metrics.get('performance_ratio_alignment_only', 1.0)
+
+            # Performance ratios (convert to percentage overhead)
+            perf_ratio_alignment = overall_metrics.get('performance_ratio_alignment_only', 1.0)
+            perf_ratio_with_pred = overall_metrics.get('performance_ratio_with_prediction', 1.0)
+            overhead_alignment = (perf_ratio_alignment - 1.0) * 100
+            overhead_with_pred = (perf_ratio_with_pred - 1.0) * 100
+
+            # Time metrics (convert to ms)
+            mean_alignment_only = overall_metrics.get('mean_alignment_time_only', 0) * 1000
+            mean_alignment_with_pred = overall_metrics.get('mean_alignment_time_with_prediction', 0) * 1000
 
             # Calculate overall label distribution from combination metrics
             overall_label_dist = {}
@@ -885,6 +908,10 @@ class EvaluationReportGenerator:
             overall_label_chart = self._generate_distribution_chart(overall_label_dist, overall_samples)
             overall_pred_chart = self._generate_distribution_chart(overall_pred_dist, overall_samples)
 
+            # Format overhead values
+            overhead_alignment_str = f"+{overhead_alignment:.1f}%" if overhead_alignment >= 0 else f"{overhead_alignment:.1f}%"
+            overhead_with_pred_str = f"+{overhead_with_pred:.1f}%" if overhead_with_pred >= 0 else f"{overhead_with_pred:.1f}%"
+
             rows.append(f"""
             <tr style="background-color: #f0f8ff; font-weight: 600;">
                 <td><strong>Overall</strong></td>
@@ -892,7 +919,10 @@ class EvaluationReportGenerator:
                 <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(overall_acc_0)}">{overall_acc_0:.1f}%</span></td>
                 <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(overall_acc_10)}">{overall_acc_10:.1f}%</span></td>
                 <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(overall_acc_20)}">{overall_acc_20:.1f}%</span></td>
-                <td style="text-align: right;"><span class="{self._get_perf_ratio_class(overall_perf_ratio)}">{overall_perf_ratio:.3f}</span></td>
+                <td style="text-align: right;"><span class="{self._get_perf_overhead_class(overhead_alignment)}">{overhead_alignment_str}</span></td>
+                <td style="text-align: right;"><span class="{self._get_perf_overhead_class(overhead_with_pred)}">{overhead_with_pred_str}</span></td>
+                <td style="text-align: right;">{mean_alignment_only:.1f}ms</td>
+                <td style="text-align: right;">{mean_alignment_with_pred:.1f}ms</td>
                 <td>
                     <div style="margin-bottom: 0.5rem;">
                         <small style="color: #666; font-weight: normal;">Ground Truth:</small>
@@ -920,7 +950,16 @@ class EvaluationReportGenerator:
             acc_0 = tolerance_metrics.get('0%', {}).get('overall_accuracy', 0) * 100
             acc_10 = tolerance_metrics.get('10%', {}).get('overall_accuracy', 0) * 100
             acc_20 = tolerance_metrics.get('20%', {}).get('overall_accuracy', 0) * 100
-            perf_ratio = dataset_metrics.get('performance_ratio_alignment_only', 1.0)
+
+            # Performance ratios (convert to percentage overhead)
+            perf_ratio_alignment = dataset_metrics.get('performance_ratio_alignment_only', 1.0)
+            perf_ratio_with_pred = dataset_metrics.get('performance_ratio_with_prediction', 1.0)
+            overhead_alignment = (perf_ratio_alignment - 1.0) * 100
+            overhead_with_pred = (perf_ratio_with_pred - 1.0) * 100
+
+            # Time metrics (convert to ms)
+            mean_alignment_only = dataset_metrics.get('mean_alignment_time_only', 0) * 1000
+            mean_alignment_with_pred = dataset_metrics.get('mean_alignment_time_with_prediction', 0) * 1000
 
             # Extract label distribution
             label_dist = {}
@@ -936,6 +975,10 @@ class EvaluationReportGenerator:
             label_chart = self._generate_distribution_chart(label_dist, samples)
             pred_chart = self._generate_distribution_chart(pred_dist, samples)
 
+            # Format overhead values
+            overhead_alignment_str = f"+{overhead_alignment:.1f}%" if overhead_alignment >= 0 else f"{overhead_alignment:.1f}%"
+            overhead_with_pred_str = f"+{overhead_with_pred:.1f}%" if overhead_with_pred >= 0 else f"{overhead_with_pred:.1f}%"
+
             rows.append(f"""
             <tr>
                 <td>{display_name}</td>
@@ -943,7 +986,10 @@ class EvaluationReportGenerator:
                 <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(acc_0)}">{acc_0:.1f}%</span></td>
                 <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(acc_10)}">{acc_10:.1f}%</span></td>
                 <td style="text-align: right;"><span class="{self._get_accuracy_badge_class(acc_20)}">{acc_20:.1f}%</span></td>
-                <td style="text-align: right;"><span class="{self._get_perf_ratio_class(perf_ratio)}">{perf_ratio:.3f}</span></td>
+                <td style="text-align: right;"><span class="{self._get_perf_overhead_class(overhead_alignment)}">{overhead_alignment_str}</span></td>
+                <td style="text-align: right;"><span class="{self._get_perf_overhead_class(overhead_with_pred)}">{overhead_with_pred_str}</span></td>
+                <td style="text-align: right;">{mean_alignment_only:.1f}ms</td>
+                <td style="text-align: right;">{mean_alignment_with_pred:.1f}ms</td>
                 <td>
                     <div style="margin-bottom: 0.5rem;">
                         <small style="color: #666;">Ground Truth:</small>
@@ -959,18 +1005,91 @@ class EvaluationReportGenerator:
 
         return f"""
         <section id="summary-table" class="section">
-            <h2>Summary Table: Per-Dataset Performance</h2>
+            <h2>Per-Dataset Performance</h2>
+            <p style="margin-bottom: 1rem; color: #666;">
+                Comprehensive performance metrics across all test datasets.
+                <strong>Overhead vs Optimal (Alignment):</strong> How much slower (%) compared to optimal - alignment time only.
+                <strong>Overhead vs Optimal (w/ Pred):</strong> How much slower (%) compared to optimal - including prediction overhead (feature extraction + classification).
+            </p>
             {self._generate_legend()}
             <table class="sortable">
                 <thead>
                     <tr>
                         <th>Dataset</th>
                         <th style="text-align: right;">Samples</th>
-                        <th style="text-align: right;">Acc @ 0%</th>
-                        <th style="text-align: right;">Acc @ 10%</th>
-                        <th style="text-align: right;">Acc @ 20%</th>
-                        <th style="text-align: right;">Perf Ratio</th>
-                        <th style="min-width: 300px;">Label Distribution</th>
+                        <th style="text-align: right;" title="Accuracy at 0% tolerance">Acc @<br>0%</th>
+                        <th style="text-align: right;" title="Accuracy at 10% tolerance">Acc @<br>10%</th>
+                        <th style="text-align: right;" title="Accuracy at 20% tolerance">Acc @<br>20%</th>
+                        <th style="text-align: right;" title="Overhead vs optimal (alignment only)">Overhead<br>(Alignment)</th>
+                        <th style="text-align: right;" title="Overhead vs optimal (with prediction)">Overhead<br>(w/ Pred)</th>
+                        <th style="text-align: right;" title="Mean alignment time">Mean Time<br>(Alignment)</th>
+                        <th style="text-align: right;" title="Mean total time (with prediction)">Mean Time<br>(w/ Pred)</th>
+                        <th style="min-width: 200px;">Label Distribution</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {''.join(rows)}
+                </tbody>
+            </table>
+        </section>
+        """
+
+    def _generate_feature_importance_section(self) -> str:
+        """Generate the feature importance section showing all features."""
+        feature_importance = self.metrics.get('feature_importance', {})
+
+        if not feature_importance:
+            return """
+            <section id="feature-importance" class="section">
+                <h2>Feature Importance</h2>
+                <p><em>No feature importance data available.</em></p>
+            </section>
+            """
+
+        sorted_features = sorted(
+            feature_importance.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        # Generate rows for all features
+        rows = []
+        for rank, (feature, importance) in enumerate(sorted_features, 1):
+            bar_width = importance * 100  # Assuming importance is 0-1
+
+            # Add highlighting for top features
+            row_class = ""
+            if rank <= 5:
+                row_class = 'style="background-color: #f0f8ff;"'
+
+            rows.append(f"""
+            <tr {row_class}>
+                <td style="text-align: center;">{rank}</td>
+                <td><strong>{feature}</strong></td>
+                <td style="text-align: right;">{importance:.4f}</td>
+                <td>
+                    <div style="background: #e9ecef; border-radius: 4px; height: 20px; width: 100%; max-width: 300px; border: 1px solid #dee2e6;">
+                        <div style="background: #3498db;
+                                    height: 100%; width: {bar_width}%; border-radius: 4px;"></div>
+                    </div>
+                </td>
+            </tr>
+            """)
+
+        return f"""
+        <section id="feature-importance" class="section">
+            <h2>Feature Importance</h2>
+            <p style="margin-bottom: 1rem; color: #666;">
+                Feature importance scores from the classifier showing which features contribute most to heuristic selection.
+                Top 5 features are highlighted.
+            </p>
+            <table class="sortable">
+                <thead>
+                    <tr>
+                        <th style="text-align: center; width: 60px;">Rank</th>
+                        <th>Feature Name</th>
+                        <th style="text-align: right; width: 120px;">Importance</th>
+                        <th style="width: 320px;">Visualization</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -981,7 +1100,7 @@ class EvaluationReportGenerator:
         """
 
     def _generate_feature_importance_table(self, feature_importance: Dict[str, float]) -> str:
-        """Generate HTML table for top feature importances."""
+        """Generate HTML table for top feature importances (legacy method for backwards compatibility)."""
         if not feature_importance:
             return "<p><em>No feature importance data available.</em></p>"
 
@@ -1089,3 +1208,206 @@ class EvaluationReportGenerator:
             return "perf-ratio-ok"
         else:
             return "perf-ratio-bad"
+
+    def _get_perf_overhead_class(self, overhead_pct: float) -> str:
+        """Get CSS class for performance overhead percentage."""
+        if overhead_pct <= 10.0:
+            return "perf-ratio-good"
+        elif overhead_pct <= 30.0:
+            return "perf-ratio-ok"
+        else:
+            return "perf-ratio-bad"
+
+    def _generate_baseline_comparison_section(self) -> str:
+        """Generate baseline comparison section with tabs."""
+        if self.baseline_comparison is None:
+            return """
+            <section id="baseline-comparison" class="section">
+                <h2>Baseline Comparison</h2>
+                <p><em>No baseline comparison data available.</em></p>
+            </section>
+            """
+
+        # Convert DataFrame to dict for easier processing
+        import pandas as pd
+        if isinstance(self.baseline_comparison, pd.DataFrame):
+            df = self.baseline_comparison
+        else:
+            return """
+            <section id="baseline-comparison" class="section">
+                <h2>Baseline Comparison</h2>
+                <p><em>Invalid baseline comparison data format.</em></p>
+            </section>
+            """
+
+        # Extract model names
+        models = df['model'].tolist()
+
+        # Tab buttons HTML
+        tabs_html = []
+        tabs_html.append('<button class="tab-button active" onclick="switchTab(event, \'baseline-overall\')">Overall Performance</button>')
+
+        # Extract tolerance levels from column names
+        tolerance_levels = []
+        for col in df.columns:
+            if col.startswith('accuracy_'):
+                tolerance = col.replace('accuracy_', '')
+                if tolerance not in tolerance_levels:
+                    tolerance_levels.append(tolerance)
+
+        for tolerance in sorted(tolerance_levels):
+            tabs_html.append(f'<button class="tab-button" onclick="switchTab(event, \'baseline-{tolerance}\')">Tolerance {tolerance}</button>')
+
+        # Generate tab contents
+        tab_contents = []
+
+        # Overall Performance Tab
+        overall_tab = self._generate_overall_performance_tab(df, models)
+        tab_contents.append(f'<div id="baseline-overall" class="tab-content" style="display: block;">{overall_tab}</div>')
+
+        # Per-tolerance tabs
+        for idx, tolerance in enumerate(sorted(tolerance_levels)):
+            tolerance_tab = self._generate_tolerance_tab(df, models, tolerance)
+            tab_contents.append(f'<div id="baseline-{tolerance}" class="tab-content" style="display: none;">{tolerance_tab}</div>')
+
+        return f"""
+        <section id="baseline-comparison" class="section">
+            <h2>Baseline Comparison</h2>
+            <p>Comparison of the main classifier against baseline models across different metrics.</p>
+
+            <div class="tabs">
+                {''.join(tabs_html)}
+            </div>
+
+            {''.join(tab_contents)}
+        </section>
+        """
+
+    def _generate_overall_performance_tab(self, df, models) -> str:
+        """Generate the overall performance comparison tab."""
+        rows = []
+
+        for _, row in df.iterrows():
+            model_name = row['model']
+            perf_ratio_alignment = row.get('performance_ratio_alignment_only', 'N/A')
+            perf_ratio_with_pred = row.get('performance_ratio_with_prediction', 'N/A')
+            mean_alignment = row.get('mean_alignment_time_only', 'N/A')
+            mean_alignment_with_pred = row.get('mean_alignment_time_with_prediction', 'N/A')
+            mean_pred_time = row.get('mean_prediction_time', 'N/A')
+            mean_fe_time = row.get('mean_feature_extraction_time', 'N/A')
+            mean_clf_time = row.get('mean_classification_time', 'N/A')
+
+            # Calculate percentage overhead from performance ratio
+            # If ratio is 1.2, we are 20% slower than optimal
+            perf_overhead_alignment = ((perf_ratio_alignment - 1.0) * 100) if isinstance(perf_ratio_alignment, (int, float)) else None
+            perf_overhead_with_pred = ((perf_ratio_with_pred - 1.0) * 100) if isinstance(perf_ratio_with_pred, (int, float)) else None
+
+            # Format values - all times in milliseconds
+            if perf_overhead_alignment is not None:
+                if perf_overhead_alignment >= 0:
+                    perf_overhead_alignment_str = f"+{perf_overhead_alignment:.1f}%"
+                else:
+                    perf_overhead_alignment_str = f"{perf_overhead_alignment:.1f}%"
+            else:
+                perf_overhead_alignment_str = "N/A"
+
+            if perf_overhead_with_pred is not None:
+                if perf_overhead_with_pred >= 0:
+                    perf_overhead_with_pred_str = f"+{perf_overhead_with_pred:.1f}%"
+                else:
+                    perf_overhead_with_pred_str = f"{perf_overhead_with_pred:.1f}%"
+            else:
+                perf_overhead_with_pred_str = "N/A"
+
+            mean_fe_str = f"{mean_fe_time * 1000:.2f}" if isinstance(mean_fe_time, (int, float)) else "N/A"
+            mean_clf_str = f"{mean_clf_time * 1000:.2f}" if isinstance(mean_clf_time, (int, float)) else "N/A"
+            mean_alignment_str = f"{mean_alignment * 1000:.2f}" if isinstance(mean_alignment, (int, float)) else "N/A"
+            mean_total_str = f"{mean_alignment_with_pred * 1000:.2f}" if isinstance(mean_alignment_with_pred, (int, float)) else "N/A"
+
+            # Get class for performance overhead (use same thresholds: 10%, 30%)
+            perf_class_alignment = self._get_perf_overhead_class(perf_overhead_alignment) if perf_overhead_alignment is not None else ""
+            perf_class_with_pred = self._get_perf_overhead_class(perf_overhead_with_pred) if perf_overhead_with_pred is not None else ""
+
+            rows.append(f"""
+            <tr>
+                <td><strong>{model_name}</strong></td>
+                <td style="text-align: right;"><span class="{perf_class_alignment}">{perf_overhead_alignment_str}</span></td>
+                <td style="text-align: right;"><span class="{perf_class_with_pred}">{perf_overhead_with_pred_str}</span></td>
+                <td style="text-align: right;">{mean_fe_str}</td>
+                <td style="text-align: right;">{mean_clf_str}</td>
+                <td style="text-align: right;">{mean_alignment_str}</td>
+                <td style="text-align: right;">{mean_total_str}</td>
+            </tr>
+            """)
+
+        return f"""
+        <p style="margin-bottom: 1rem; color: #666;">
+            Performance comparison across all models. All times are in <strong>milliseconds</strong>.
+            <br><strong>Overhead vs Optimal:</strong> How much slower (%) compared to always choosing the optimal heuristic (0% is perfect).
+            <br><strong>Total Time:</strong> Feature Extraction + Classification + Alignment Time (complete end-to-end time).
+        </p>
+        <table class="sortable">
+            <thead>
+                <tr>
+                    <th>Model</th>
+                    <th style="text-align: right;" title="How much slower (%) than optimal - alignment time only">Overhead vs Optimal<br>(Alignment Only)</th>
+                    <th style="text-align: right;" title="How much slower (%) than optimal - including prediction overhead">Overhead vs Optimal<br>(With Prediction)</th>
+                    <th style="text-align: right;" title="Mean time for feature extraction">Feature Extraction<br>(ms)</th>
+                    <th style="text-align: right;" title="Mean time for classification">Classification<br>(ms)</th>
+                    <th style="text-align: right;" title="Mean alignment execution time">Alignment Time<br>(ms)</th>
+                    <th style="text-align: right;" title="Feature Extraction + Classification + Alignment (end-to-end)">Total Time<br>(ms)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(rows)}
+            </tbody>
+        </table>
+        """
+
+    def _generate_tolerance_tab(self, df, models, tolerance: str) -> str:
+        """Generate a tolerance-specific comparison tab."""
+        rows = []
+
+        for _, row in df.iterrows():
+            model_name = row['model']
+            accuracy_col = f'accuracy_{tolerance}'
+            macro_accuracy_col = f'macro_accuracy_{tolerance}'
+
+            accuracy = row.get(accuracy_col, 'N/A')
+            macro_accuracy = row.get(macro_accuracy_col, 'N/A')
+
+            # Format values
+            accuracy_str = f"{accuracy * 100:.1f}%" if isinstance(accuracy, (int, float)) else accuracy
+            macro_accuracy_str = f"{macro_accuracy * 100:.1f}%" if isinstance(macro_accuracy, (int, float)) else macro_accuracy
+
+            # Get badge classes
+            accuracy_class = self._get_accuracy_badge_class(accuracy * 100) if isinstance(accuracy, (int, float)) else ""
+            macro_class = self._get_accuracy_badge_class(macro_accuracy * 100) if isinstance(macro_accuracy, (int, float)) else ""
+
+            rows.append(f"""
+            <tr>
+                <td><strong>{model_name}</strong></td>
+                <td style="text-align: right;"><span class="{accuracy_class}">{accuracy_str}</span></td>
+                <td style="text-align: right;"><span class="{macro_class}">{macro_accuracy_str}</span></td>
+            </tr>
+            """)
+
+        return f"""
+        <p style="margin-bottom: 1rem; color: #666;">
+            Accuracy metrics at <strong>{tolerance}</strong> tolerance level.
+            <strong>Micro (Overall) Accuracy:</strong> Weighted by sample frequency (common combinations dominate).
+            <strong>Macro Accuracy:</strong> Unweighted average across all combinations (treats rare combinations equally).
+        </p>
+        <table class="sortable">
+            <thead>
+                <tr>
+                    <th>Model</th>
+                    <th style="text-align: right;" title="Overall accuracy: correct predictions / total samples">Micro Accuracy (Overall)</th>
+                    <th style="text-align: right;" title="Average recall across all combinations (unweighted)">Macro Accuracy</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(rows)}
+            </tbody>
+        </table>
+        """
