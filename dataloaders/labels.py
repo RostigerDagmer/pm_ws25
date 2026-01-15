@@ -17,11 +17,9 @@ class LabelDataset(Dataset):
         }
 
         self.df = pd.DataFrame()
-        with pebble.ProcessPool(max_workers=len(run_datasets)) as pool:
-            futures = pool.map(
-                LabelDataset._get_labels, self.run_datasets.values()
-            )
-            self.df = pd.concat(futures.result())
+        self.df = pd.concat(
+            [LabelDataset._get_labels(ds) for ds in self.run_datasets.values()]
+        )
 
     def hash(self) -> str:
         return hashlib.sha1(

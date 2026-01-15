@@ -88,12 +88,10 @@ class UniqueProcessModelDataset(
                 os.path.join(parent_dir, ".cache_unique_models")
             )
 
-        # Initialize attributes
-        self.unique_indices = []
-        self.duplicate_map = {}
-        self.dedup_report = {}
+        self.rep_hashes: list[str] = []
+        self.dup_to_rep: dict[str, str] = {}
+        self.processed_hashes: set[str] = set()
 
-        # Compute cache key and path
         cache_key = self._compute_cache_key()
         self.cache_file = Path(
             os.path.join(
@@ -101,10 +99,14 @@ class UniqueProcessModelDataset(
             )
         )
 
-        # Load from cache or deduplicate
+        loaded = False
         if use_cache and not force_recompute and self.cache_file.exists():
             self._load_from_cache()
-        self._deduplicate()
+            loaded = True
+
+        # incremental update every time (even if cache loaded)
+        self._incremental_deduplicate()
+
         if use_cache:
             self._dedup_cache_dir.mkdir(parents=True, exist_ok=True)
             self._save_to_cache()
@@ -130,97 +132,195 @@ class UniqueProcessModelDataset(
         return full_hash[:16]
 
     def _save_to_cache(self):
-        """Save unique_indices, duplicate_map, and dedup_report to cache."""
         cache_data = {
-            'unique_indices': self.unique_indices,
-            'duplicate_map': self.duplicate_map,
-            'report': self.dedup_report,
+            "rep_hashes": self.rep_hashes,
+            "dup_to_rep": self.dup_to_rep,
+            "processed_hashes": list(self.processed_hashes),
+            "report": self.dedup_report,
         }
-        with open(self.cache_file, 'wb') as f:
+        with open(self.cache_file, "wb") as f:
             pickle.dump(cache_data, f)
         logging.info(f"Saved deduplication cache to {self.cache_file}")
 
     def _load_from_cache(self):
-        """Load unique_indices, duplicate_map, and dedup_report from cache."""
-        with open(self.cache_file, 'rb') as f:
+        with open(self.cache_file, "rb") as f:
             cache_data = pickle.load(f)
-        self.unique_indices = cache_data['unique_indices']
-        self.duplicate_map = cache_data['duplicate_map']
-        self.dedup_report = cache_data['report']
+        self.rep_hashes = cache_data.get("rep_hashes", [])
+        self.dup_to_rep = cache_data.get("dup_to_rep", {})
+        self.processed_hashes = set(cache_data.get("processed_hashes", []))
+        self.dedup_report = cache_data.get("report", {})
         logging.info(
-            f"Loaded {len(self.unique_indices)} unique indices from cache "
-            f"({self.cache_file})"
+            f"Loaded {len(self.rep_hashes)} representatives from cache ({self.cache_file})"
         )
 
-    def _deduplicate(self):
+    def _incremental_deduplicate(self):
         """
-        Deduplicate all cached models.
-
-        Pipeline:
-            1. Load all cached models
-            2. Create deduplicator (no normalizer needed)
-            3. Iterative deduplication
-            4. Update base_dataset.configurations
-            5. Save report
+        Incremental dedup keyed by stable item.hash().
+        Only compares unseen hashes against current representatives.
+        Also repairs missing representatives if base_dataset changed.
         """
-        logging.info("Starting deduplication of cached models...")
+        logging.info("Starting incremental deduplication of cached models...")
 
-        all_items = self._load_all_cached_models()
+        # 1) Scan current base dataset to build current hash universe + index mapping
+        current_hashes: list[str] = list(self.base_dataset.items.keys())
+        hash_to_index: dict[str, int] = {
+            k: v for v, k in enumerate(self.base_dataset.index)
+        }
 
-        if not all_items:
+        if not current_hashes:
             logging.warning("No cached models found for deduplication")
+            self.unique_indices = []
             return
 
+        current_hash_set = set(current_hashes)
+
+        # 2) Repair representatives that disappeared (base dataset changed)
+        self._repair_missing_representatives(current_hash_set)
+
+        # 3) Determine new items we have never processed
+        new_hashes = [
+            h for h in current_hashes if h not in self.processed_hashes
+        ]
+
+        # 4) Build PetriNetDeduplicator and current representative items
         deduplicator = PetriNetDeduplicator(config=self.dedup_config)
 
-        unique_nets, duplicate_map = deduplicator.deduplicate(all_items)
+        # Build unique_nets list from representatives that are present
+        unique_nets: list[PetriNetItem] = []
+        idx_to_hash: dict[int, str] = {}
 
-        # Store unique indices (sorted for consistent ordering)
-        self.unique_indices = sorted([item.idx for item in unique_nets])
+        for rep_h in self.rep_hashes:
+            if rep_h not in hash_to_index:
+                continue
+            base_idx = hash_to_index[rep_h]
+            base_item = self.base_dataset[base_idx]
+            pn_item = PetriNetItem(
+                net=base_item.pm,
+                im=base_item.im,
+                fm=base_item.fm,
+                idx=base_idx,
+                metadata={"hash": rep_h},
+            )
+            unique_nets.append(pn_item)
+            idx_to_hash[base_idx] = rep_h
 
-        # Store duplicate_map as class attribute
-        self.duplicate_map = duplicate_map
+        # 5) Incrementally place new items
+        for h in tqdm(
+            new_hashes,
+            disable=not self.dedup_config.verbose,
+            desc="Incremental dedup",
+        ):
+            base_idx = hash_to_index[h]
+            base_item = self.base_dataset[base_idx]
+            candidate = PetriNetItem(
+                net=base_item.pm,
+                im=base_item.im,
+                fm=base_item.fm,
+                idx=base_idx,
+                metadata={"hash": h},
+            )
 
-        # Get report from deduplicator
-        self.dedup_report = deduplicator.get_report()
+            is_dup, rep_idx = deduplicator._find_duplicate(
+                candidate, unique_nets
+            )
 
-        # Save deduplication report as JSON in base_dataset directory
+            if is_dup:
+                rep_h = idx_to_hash[rep_idx]
+                self.dup_to_rep[h] = rep_h
+            else:
+                self.rep_hashes.append(h)
+                unique_nets.append(candidate)
+                idx_to_hash[base_idx] = h
+
+            self.processed_hashes.add(h)
+
+        # 6) Derive unique_indices for *current* base_dataset ordering
+        reps_present = [h for h in self.rep_hashes if h in hash_to_index]
+        self.unique_indices = sorted([hash_to_index[h] for h in reps_present])
+
+        # 7) Create/refresh report
+        self.dedup_report = {
+            "num_total_current": len(current_hashes),
+            "num_unique_current": len(reps_present),
+            "num_duplicates_current": len(current_hashes) - len(reps_present),
+            "rep_hashes_present": reps_present,
+            "dup_to_rep": self.dup_to_rep,  # hash->hash
+            "thresholds": {
+                "label_threshold": self.dedup_config.label_similarity_threshold,
+                "combined_threshold": self.dedup_config.combined_similarity_threshold,
+            },
+            "stages_enabled": {
+                "stage1": self.dedup_config.enable_stage1,
+                "stage2": self.dedup_config.enable_stage2,
+            },
+            # optional: include deduplicator report only for *this run's new comparisons*
+            "last_increment": deduplicator.get_report(),
+        }
+
+        # optional: save report
         report_path = Path(
             os.path.join(
                 str(self.base_dataset.cache_dir.parent),
                 "deduplication_report.json",
             )
         )
-        with open(report_path, 'w') as f:
+        with open(report_path, "w") as f:
             json.dump(self.dedup_report, f, indent=2)
 
         logging.info(
-            f"Deduplication complete. Kept {len(unique_nets)} unique nets "
-            f"out of {len(all_items)} total. Report saved to {report_path}"
+            f"Incremental dedup complete. Unique now: {len(reps_present)} / {len(current_hashes)}. "
+            f"Processed hashes total: {len(self.processed_hashes)}."
         )
 
-    def _load_all_cached_models(self):
+    def _repair_missing_representatives(self, current_hash_set: set[str]):
         """
-        Load all cached models and wrap in PetriNetItem.
+        If a representative disappeared from the base dataset, choose a new representative
+        from the remaining members of its group and rewrite mappings.
+        """
+        if not self.rep_hashes:
+            return
 
-        Returns:
-            List of PetriNetItem instances
-        """
-        items = []
-        for idx, item in enumerate(self.base_dataset):
-            items.append(
-                PetriNetItem(
-                    net=item.pm,
-                    im=item.im,
-                    fm=item.fm,
-                    idx=idx,
-                    metadata={
-                        'variant': item.variant,
-                        'params': item.parameters,
-                    },
-                )
+        # Build groups: rep -> members (including rep)
+        rep_to_members: dict[str, set[str]] = {
+            rep: {rep} for rep in self.rep_hashes
+        }
+        for dup, rep in self.dup_to_rep.items():
+            rep_to_members.setdefault(rep, set()).add(dup)
+
+        new_rep_hashes: list[str] = []
+        new_dup_to_rep: dict[str, str] = dict(self.dup_to_rep)
+
+        for rep in self.rep_hashes:
+            members = rep_to_members.get(rep, {rep})
+            members_present = sorted(
+                [m for m in members if m in current_hash_set]
             )
-        return items
+
+            if not members_present:
+                # whole group vanished -> drop it
+                continue
+
+            if rep in current_hash_set:
+                # rep still valid
+                new_rep_hashes.append(rep)
+                continue
+
+            # rep missing: promote deterministic replacement
+            promoted = members_present[0]
+            new_rep_hashes.append(promoted)
+
+            # rewrite all members (except promoted) to point to promoted
+            for m in members_present:
+                if m == promoted:
+                    continue
+                new_dup_to_rep[m] = promoted
+
+            # promoted itself should not be marked duplicate
+            if promoted in new_dup_to_rep:
+                del new_dup_to_rep[promoted]
+
+        self.rep_hashes = new_rep_hashes
+        self.dup_to_rep = new_dup_to_rep
 
     def __len__(self):
         return len(self.unique_indices)
