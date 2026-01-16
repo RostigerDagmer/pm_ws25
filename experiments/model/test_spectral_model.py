@@ -11,32 +11,10 @@ from util.distributions import (
 )
 from experiments.simulation.models import sample_net
 from experiments.simulation.simulate import simulate_batch, apply_labels
-from features.base_extractor import SpectralFeatureExtractor
-from experiments.model.spectral_model import SpectralModel
+from features.spectral_extractor import SpectralFeatureExtractor
+from models.spectral_model import SpectralModel
 
 logging.basicConfig(level=logging.INFO)
-
-
-def trace_to_net(trace: Trace) -> tuple[PetriNet, Marking, Marking]:
-    """Convert a Trace to a linear Petri Net."""
-    net = PetriNet("trace_net")
-    p_start = PetriNet.Place("p_start")
-    net.places.add(p_start)
-    prev_place = p_start
-
-    for i, event in enumerate(trace):
-        label = event["concept:name"]
-        t = PetriNet.Transition(f"t_{i}", label)
-        net.transitions.add(t)
-        petri_utils.add_arc_from_to(prev_place, t, net)
-        p_next = PetriNet.Place(f"p_{i + 1}")
-        net.places.add(p_next)
-        petri_utils.add_arc_from_to(t, p_next, net)
-        prev_place = p_next
-
-    im = Marking({p_start: 1})
-    fm = Marking({prev_place: 1})
-    return net, im, fm
 
 
 def test_spectral_model():
@@ -55,7 +33,7 @@ def test_spectral_model():
 
     print("2. Simulating trace...")
     net_tensor = stnet.to_tensor()
-    logs_tensor = simulate_batch(
+    logs_tensor, _, _ = simulate_batch(
         (net_tensor.pre, net_tensor.post),
         net_tensor.M0,
         net_tensor.Mf,
@@ -63,18 +41,12 @@ def test_spectral_model():
         steps=50,
         batch_size=1024,
     )
-    # event_log = apply_labels(logs_tensor, net_tensor.labels)
-    # trace = event_log[0]
-    # trace_net, trace_im, trace_fm = trace_to_net(trace)
 
     print("3. Extracting tensors...")
     d_model = 64
     n_coeffs = 8
     extractor = SpectralFeatureExtractor(d_model=d_model, n_coeffs=n_coeffs)
 
-    # tensors = extractor.extract_tensors(
-    #     net, im, fm, trace_net, trace_im, trace_fm
-    # )
     tensors = extractor.extract_batch_tensors(
         (net_tensor.pre, net_tensor.post), net_tensor.labels, logs_tensor
     )

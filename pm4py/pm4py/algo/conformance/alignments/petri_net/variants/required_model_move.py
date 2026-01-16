@@ -22,6 +22,7 @@ Contact: info@processintelligence.solutions
 REACH (Required Activities) Heuristic Alignment Implementation
 Based on: Casas-Ramos, J., Mucientes, M., & Lama, M. (2024). REACH: Researching Efficient Alignment-based Conformance Checking.
 '''
+
 import heapq
 import time
 from collections import deque
@@ -49,8 +50,8 @@ from pm4py.objects.log.obj import Trace
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 from pm4py.util import typing
 
-from pm4py.pm4py.objects.petri_net import semantics
-from pm4py.pm4py.objects.petri_net.utils import reachability_graph
+from pm4py.objects.petri_net import semantics
+from pm4py.objects.petri_net.utils import reachability_graph
 
 
 class Parameters(Enum):
@@ -60,7 +61,9 @@ class Parameters(Enum):
     PARAM_ALIGNMENT_RESULT_IS_SYNC_PROD_AWARE = "ret_tuple_as_trans_desc"
     PARAM_TRACE_NET_COSTS = "trace_net_costs"
     TRACE_NET_CONSTR_FUNCTION = "trace_net_constr_function"
-    TRACE_NET_COST_AWARE_CONSTR_FUNCTION = "trace_net_cost_aware_constr_function"
+    TRACE_NET_COST_AWARE_CONSTR_FUNCTION = (
+        "trace_net_cost_aware_constr_function"
+    )
     PARAM_MAX_ALIGN_TIME_TRACE = "max_align_time_trace"
     PARAM_MAX_ALIGN_TIME = "max_align_time"
     PARAMETER_VARIANT_DELIMITER = "variant_delimiter"
@@ -81,7 +84,13 @@ class ReachHeuristic:
     3. SRLog Optimization (Algorithm 7 & 8)
     """
 
-    def __init__(self, model_net: PetriNet, mode_initial_marking: Marking, sync_net: PetriNet, skip_symb=utils.SKIP):
+    def __init__(
+        self,
+        model_net: PetriNet,
+        mode_initial_marking: Marking,
+        sync_net: PetriNet,
+        skip_symb=utils.SKIP,
+    ):
         self.model_net = model_net
         self.sync_net = sync_net
         self.skip_symb = skip_symb
@@ -97,7 +106,9 @@ class ReachHeuristic:
 
         # 3. Optimization Pre-computation (Algorithm 8)
         # Map: FrozenSet(Marking) -> Set[ActivityLabels]
-        self.alive_activities_map = self._compute_alive_activities(model_net, mode_initial_marking)
+        self.alive_activities_map = self._compute_alive_activities(
+            model_net, mode_initial_marking
+        )
 
     def _build_place_mapping(self, sync_net: PetriNet, model_net: PetriNet):
         """
@@ -113,14 +124,19 @@ class ReachHeuristic:
             # Check if this sync place represents a model place
             # PM4Py Sync Product naming: (SKIP, model_place_name)
             if isinstance(sync_p.name, tuple) and len(sync_p.name) == 2:
-                if sync_p.name[0] == self.skip_symb and sync_p.name[1] in model_places_by_name:
+                if (
+                    sync_p.name[0] == self.skip_symb
+                    and sync_p.name[1] in model_places_by_name
+                ):
                     mapping[sync_p] = model_places_by_name[sync_p.name[1]]
 
         return mapping
 
     def _get_marking_key(self, marking: Marking) -> frozenset:
-        """ Returns a robust canonical key for a marking based on Place Names. """
-        return frozenset((p.name, count) for p, count in marking.items() if count > 0)
+        """Returns a robust canonical key for a marking based on Place Names."""
+        return frozenset(
+            (p.name, count) for p, count in marking.items() if count > 0
+        )
 
     def _project_marking(self, sync_marking: Marking) -> Marking:
         """
@@ -134,7 +150,9 @@ class ReachHeuristic:
                 model_marking[model_p] += count
         return model_marking
 
-    def _compute_alive_activities(self, net: PetriNet, model_initial_marking: Marking) -> Dict[frozenset, Set[str]]:
+    def _compute_alive_activities(
+        self, net: PetriNet, model_initial_marking: Marking
+    ) -> Dict[frozenset, Set[str]]:
         """
         Algorithm 8: Initialization for SRLog.
         Pre-computes the 'alive activities' for every reachable marking in the ORIGINAL model.
@@ -146,7 +164,9 @@ class ReachHeuristic:
         # 1. Build Reachability Graph (Nodes and Edges)
         try:
             # We use the explicitly passed initial marking here
-            _, outgoing_transitions, _ = reachability_graph.marking_flow_petri(net,model_initial_marking)
+            _, outgoing_transitions, _ = reachability_graph.marking_flow_petri(
+                net, model_initial_marking
+            )
         except:
             return {}
 
@@ -156,7 +176,8 @@ class ReachHeuristic:
 
         for src_m, trans_map in outgoing_transitions.items():
             src_key = self._get_marking_key(src_m)
-            if src_key not in direct_alive: direct_alive[src_key] = set()
+            if src_key not in direct_alive:
+                direct_alive[src_key] = set()
 
             for t, tgt_m in trans_map.items():
                 tgt_key = self._get_marking_key(tgt_m)
@@ -164,7 +185,8 @@ class ReachHeuristic:
                 if t.label is not None:
                     direct_alive[src_key].add(t.label)
 
-                if tgt_key not in reverse_graph: reverse_graph[tgt_key] = []
+                if tgt_key not in reverse_graph:
+                    reverse_graph[tgt_key] = []
                 reverse_graph[tgt_key].append(src_key)
 
         # Backwards Propagation
@@ -233,8 +255,13 @@ class ReachHeuristic:
         self._cache[marking_key] = required_labels
         return required_labels
 
-    def get_heuristic_value(self, sync_marking: Marking, remaining_trace_labels: list,
-                            model_move_cost=utils.STD_MODEL_LOG_MOVE_COST, sync_move_cost=utils.STD_SYNC_COST) -> int:
+    def get_heuristic_value(
+        self,
+        sync_marking: Marking,
+        remaining_trace_labels: list,
+        model_move_cost=utils.STD_MODEL_LOG_MOVE_COST,
+        sync_move_cost=utils.STD_SYNC_COST,
+    ) -> int:
         """
         Main entry point for the A* algorithm.
 
@@ -257,12 +284,15 @@ class ReachHeuristic:
         # Sync Candidates = Required AND Remaining (Optimistically Sync)
         sync_candidates = required.intersection(remaining)
 
-        h_val = (len(missing) * model_move_cost) + (len(sync_candidates) * sync_move_cost)
+        h_val = (len(missing) * model_move_cost) + (
+            len(sync_candidates) * sync_move_cost
+        )
 
         return h_val
 
-
-    def check_sr_model(self, sync_marking: Marking, remaining_trace_labels: list) -> bool:
+    def check_sr_model(
+        self, sync_marking: Marking, remaining_trace_labels: list
+    ) -> bool:
         """
         Algorithm 6: SRModel (LessStatesLog)
         Checks if the current model state can EVER produce any of the remaining trace activities.
@@ -271,8 +301,12 @@ class ReachHeuristic:
         model_marking = self._project_marking(sync_marking)
 
         # Get all currently enabled activities in the model
-        enabled_transitions = semantics.enabled_transitions(self.model_net, model_marking)
-        enabled_labels = {t.label for t in enabled_transitions if t.label is not None}
+        enabled_transitions = semantics.enabled_transitions(
+            self.model_net, model_marking
+        )
+        enabled_labels = {
+            t.label for t in enabled_transitions if t.label is not None
+        }
 
         # If no visible transitions are enabled, we can't really "match" anyway.
         if not enabled_labels:
@@ -285,7 +319,9 @@ class ReachHeuristic:
         # Return True -> Force Model Move
         return enabled_labels.isdisjoint(remaining_set)
 
-    def check_sr_log(self, sync_marking: Marking, next_trace_label: str) -> bool:
+    def check_sr_log(
+        self, sync_marking: Marking, next_trace_label: str
+    ) -> bool:
         """
         Algorithm 7: SRLog (LessStatesModel)
         Checks if the NEXT trace activity is "Alive" (reachable) from the current model state.
@@ -307,7 +343,7 @@ class ReachHeuristic:
 
 
 def get_best_worst_cost(
-        petri_net, initial_marking, final_marking, parameters=None
+    petri_net, initial_marking, final_marking, parameters=None
 ):
     """
     Gets the best worst cost of an alignment
@@ -348,27 +384,27 @@ def apply(
     parameters: Optional[Dict[Union[str, Parameters], Any]] = None,
 ) -> typing.AlignmentResult:
     """
-       Performs the basic alignment search, given a trace and a net.
+    Performs the basic alignment search, given a trace and a net.
 
-       Parameters
-       ----------
-       trace: :class:`list` input trace, assumed to be a list of events (i.e. the code will use the activity key
-       to get the attributes)
-       petri_net: :class:`pm4py.objects.petri.net.PetriNet` the Petri net to use in the alignment
-       initial_marking: :class:`pm4py.objects.petri.net.Marking` initial marking in the Petri net
-       final_marking: :class:`pm4py.objects.petri.net.Marking` final marking in the Petri net
-       parameters: :class:`dict` (optional) dictionary containing one of the following:
-           Parameters.PARAM_TRACE_COST_FUNCTION: :class:`list` (parameter) mapping of each index of the trace to a positive cost value
-           Parameters.PARAM_MODEL_COST_FUNCTION: :class:`dict` (parameter) mapping of each transition in the model to corresponding
-           model cost
-           Parameters.PARAM_SYNC_COST_FUNCTION: :class:`dict` (parameter) mapping of each transition in the model to corresponding
-           synchronous costs
-           Parameters.ACTIVITY_KEY: :class:`str` (parameter) key to use to identify the activity described by the events
+    Parameters
+    ----------
+    trace: :class:`list` input trace, assumed to be a list of events (i.e. the code will use the activity key
+    to get the attributes)
+    petri_net: :class:`pm4py.objects.petri.net.PetriNet` the Petri net to use in the alignment
+    initial_marking: :class:`pm4py.objects.petri.net.Marking` initial marking in the Petri net
+    final_marking: :class:`pm4py.objects.petri.net.Marking` final marking in the Petri net
+    parameters: :class:`dict` (optional) dictionary containing one of the following:
+        Parameters.PARAM_TRACE_COST_FUNCTION: :class:`list` (parameter) mapping of each index of the trace to a positive cost value
+        Parameters.PARAM_MODEL_COST_FUNCTION: :class:`dict` (parameter) mapping of each transition in the model to corresponding
+        model cost
+        Parameters.PARAM_SYNC_COST_FUNCTION: :class:`dict` (parameter) mapping of each transition in the model to corresponding
+        synchronous costs
+        Parameters.ACTIVITY_KEY: :class:`str` (parameter) key to use to identify the activity described by the events
 
-       Returns
-       -------
-       dictionary: `dict` with keys **alignment**, **cost**, **visited_states**, **queued_states** and **traversed_arcs**
-       """
+    Returns
+    -------
+    dictionary: `dict` with keys **alignment**, **cost**, **visited_states**, **queued_states** and **traversed_arcs**
+    """
     if parameters is None:
         parameters = {}
 
@@ -410,7 +446,9 @@ def apply(
         parameters[Parameters.PARAM_SYNC_COST_FUNCTION] = sync_cost_function
 
     if trace_net_constr_function is not None:
-        trace_net, trace_im, trace_fm = trace_net_constr_function(trace, activity_key=activity_key)
+        trace_net, trace_im, trace_fm = trace_net_constr_function(
+            trace, activity_key=activity_key
+        )
     else:
         (
             trace_net,
@@ -584,29 +622,29 @@ def apply_trace_net(
     parameters=None,
 ):
     """
-        Performs the basic alignment search, given a trace net and a net.
+    Performs the basic alignment search, given a trace net and a net.
 
-        Parameters
-        ----------
-        trace_labels
-        trace: :class:`list` input trace, assumed to be a list of events (i.e. the code will use the activity key
-        to get the attributes)
-        petri_net: :class:`pm4py.objects.petri.net.PetriNet` the Petri net to use in the alignment
-        initial_marking: :class:`pm4py.objects.petri.net.Marking` initial marking in the Petri net
-        final_marking: :class:`pm4py.objects.petri.net.Marking` final marking in the Petri net
-        parameters: :class:`dict` (optional) dictionary containing one of the following:
-            Parameters.PARAM_TRACE_COST_FUNCTION: :class:`list` (parameter) mapping of each index of the trace to a positive cost value
-            Parameters.PARAM_MODEL_COST_FUNCTION: :class:`dict` (parameter) mapping of each transition in the model to corresponding
-            model cost
-            Parameters.PARAM_SYNC_COST_FUNCTION: :class:`dict` (parameter) mapping of each transition in the model to corresponding
-            synchronous costs
-            Parameters.ACTIVITY_KEY: :class:`str` (parameter) key to use to identify the activity described by the events
-            Parameters.PARAM_TRACE_NET_COSTS: :class:`dict` (parameter) mapping between transitions and costs
+    Parameters
+    ----------
+    trace_labels
+    trace: :class:`list` input trace, assumed to be a list of events (i.e. the code will use the activity key
+    to get the attributes)
+    petri_net: :class:`pm4py.objects.petri.net.PetriNet` the Petri net to use in the alignment
+    initial_marking: :class:`pm4py.objects.petri.net.Marking` initial marking in the Petri net
+    final_marking: :class:`pm4py.objects.petri.net.Marking` final marking in the Petri net
+    parameters: :class:`dict` (optional) dictionary containing one of the following:
+        Parameters.PARAM_TRACE_COST_FUNCTION: :class:`list` (parameter) mapping of each index of the trace to a positive cost value
+        Parameters.PARAM_MODEL_COST_FUNCTION: :class:`dict` (parameter) mapping of each transition in the model to corresponding
+        model cost
+        Parameters.PARAM_SYNC_COST_FUNCTION: :class:`dict` (parameter) mapping of each transition in the model to corresponding
+        synchronous costs
+        Parameters.ACTIVITY_KEY: :class:`str` (parameter) key to use to identify the activity described by the events
+        Parameters.PARAM_TRACE_NET_COSTS: :class:`dict` (parameter) mapping between transitions and costs
 
-        Returns
-        -------
-        dictionary: `dict` with keys **alignment**, **cost**, **visited_states**, **queued_states** and **traversed_arcs**
-        """
+    Returns
+    -------
+    dictionary: `dict` with keys **alignment**, **cost**, **visited_states**, **queued_states** and **traversed_arcs**
+    """
 
     if parameters is None:
         parameters = {}
@@ -674,13 +712,25 @@ def apply_trace_net(
     # We scan the cost function to find the minimum weights for Model and Sync moves
     h_model_cost = utils.STD_MODEL_LOG_MOVE_COST
     h_sync_cost = utils.STD_SYNC_COST
-    model_moves = [c for t, c in cost_function.items() if utils.__is_model_move(t, utils.SKIP)]
-    if model_moves: h_model_cost = min(model_moves)
-    sync_moves = [c for t, c in cost_function.items() if
-                  not utils.__is_model_move(t, utils.SKIP) and not utils.__is_log_move(t, utils.SKIP)]
-    if sync_moves: h_sync_cost = min(sync_moves)
+    model_moves = [
+        c
+        for t, c in cost_function.items()
+        if utils.__is_model_move(t, utils.SKIP)
+    ]
+    if model_moves:
+        h_model_cost = min(model_moves)
+    sync_moves = [
+        c
+        for t, c in cost_function.items()
+        if not utils.__is_model_move(t, utils.SKIP)
+        and not utils.__is_log_move(t, utils.SKIP)
+    ]
+    if sync_moves:
+        h_sync_cost = min(sync_moves)
 
-    reach_heuristic = ReachHeuristic(petri_net, initial_marking, sync_prod, utils.SKIP)
+    reach_heuristic = ReachHeuristic(
+        petri_net, initial_marking, sync_prod, utils.SKIP
+    )
 
     return apply_sync_prod(
         sync_prod,
@@ -699,18 +749,18 @@ def apply_trace_net(
 
 
 def apply_sync_prod(
-        sync_prod,
-        initial_marking,
-        final_marking,
-        cost_function,
-        skip,
-        trace_labels,
-        reach_heuristic,
-        h_model_cost,
-        h_sync_cost,
-        ret_tuple_as_trans_desc=False,
-        max_align_time_trace=sys.maxsize,
-        parameters=None,
+    sync_prod,
+    initial_marking,
+    final_marking,
+    cost_function,
+    skip,
+    trace_labels,
+    reach_heuristic,
+    h_model_cost,
+    h_sync_cost,
+    ret_tuple_as_trans_desc=False,
+    max_align_time_trace=sys.maxsize,
+    parameters=None,
 ):
     return __search(
         sync_prod,
@@ -732,6 +782,7 @@ def apply_sync_prod(
 # Greedy Upper Bound (Algorithm 9)
 # =============================================================================
 
+
 def run_greedy_search(sync_net, ini, fin, cost_function, skip, trace_labels):
     """
     Fast greedy search to find an Upper Bound cost.
@@ -751,7 +802,8 @@ def run_greedy_search(sync_net, ini, fin, cost_function, skip, trace_labels):
             return curr_cost
 
         enabled = semantics.enabled_transitions(sync_net, curr_m)
-        if not enabled: return float('inf')  # Deadlock
+        if not enabled:
+            return float('inf')  # Deadlock
 
         best_t = None
         best_score = float('inf')
@@ -788,6 +840,7 @@ def run_greedy_search(sync_net, ini, fin, cost_function, skip, trace_labels):
 
     return float('inf')
 
+
 def __search(
     sync_net,
     ini,
@@ -810,7 +863,9 @@ def __search(
     if trace_labels is None:
         trace_labels = []
 
-    enable_optimizations = exec_utils.get_param_value(Parameters.ENABLE_OPTIMIZATIONS, parameters, True)
+    enable_optimizations = exec_utils.get_param_value(
+        Parameters.ENABLE_OPTIMIZATIONS, parameters, True
+    )
     if enable_optimizations is None:
         enable_optimizations = True
 
@@ -822,7 +877,7 @@ def __search(
     )
 
     def get_trace_suffix(m):
-        """ Helper: Extract remaining trace suffix from current marking """
+        """Helper: Extract remaining trace suffix from current marking"""
         idx = 0
         found = False
         for p in m:
@@ -834,18 +889,21 @@ def __search(
                     idx = max(idx, place_to_trace_index[p])
         return trace_labels[idx:]
 
-
     # Greedy Upper Bound (Algorithm 9)
     upper_bound = float('inf')
     if enable_optimizations:
         try:
-            upper_bound = run_greedy_search(sync_net, ini, fin, cost_function, skip, trace_labels)
+            upper_bound = run_greedy_search(
+                sync_net, ini, fin, cost_function, skip, trace_labels
+            )
         except:
             upper_bound = float('inf')
 
     # Initial State
     initial_suffix = trace_labels  # Start with full trace
-    h0 = heuristic_oracle.get_heuristic_value(ini, initial_suffix, h_model_cost, h_sync_cost)
+    h0 = heuristic_oracle.get_heuristic_value(
+        ini, initial_suffix, h_model_cost, h_sync_cost
+    )
 
     ini_state = utils.SearchTuple(0 + h0, 0, h0, ini, None, None, None, True)
     open_set = [ini_state]
@@ -871,7 +929,8 @@ def __search(
         if enable_optimizations and (curr.g + curr.h > upper_bound):
             continue
 
-        if current_marking in closed: continue
+        if current_marking in closed:
+            continue
         if current_marking == fin:
             return utils.__reconstruct_alignment(
                 curr,
@@ -892,9 +951,13 @@ def __search(
         force_log = False
 
         if enable_optimizations:
-            force_model = heuristic_oracle.check_sr_model(current_marking, rem_trace)
+            force_model = heuristic_oracle.check_sr_model(
+                current_marking, rem_trace
+            )
             if rem_trace:
-                force_log = heuristic_oracle.check_sr_log(current_marking, rem_trace[0])
+                force_log = heuristic_oracle.check_sr_log(
+                    current_marking, rem_trace[0]
+                )
 
         # Conflict Resolution: If heuristics contradict, disable both to be safe
         if force_model and force_log:
@@ -915,20 +978,25 @@ def __search(
             is_sync = not is_log and not is_model
 
             # Apply Optimization Filters
-            if force_model and is_log: continue  # Skip Log if forced to Model
-            if force_log and (is_model or is_sync): continue  # Skip Model/Sync if forced to Log
+            if force_model and is_log:
+                continue  # Skip Log if forced to Model
+            if force_log and (is_model or is_sync):
+                continue  # Skip Model/Sync if forced to Log
 
             cost = cost_function[t]
             traversed += 1
             new_marking = utils.add_markings(current_marking, t.add_marking)
 
-            if new_marking in closed: continue
+            if new_marking in closed:
+                continue
 
             g = curr.g + cost
 
             # Calculate Heuristic for Neighbor
             new_rem_trace = get_trace_suffix(new_marking)
-            h = heuristic_oracle.get_heuristic_value(new_marking, new_rem_trace, h_model_cost, h_sync_cost)
+            h = heuristic_oracle.get_heuristic_value(
+                new_marking, new_rem_trace, h_model_cost, h_sync_cost
+            )
 
             new_f = g + h
 
@@ -937,7 +1005,9 @@ def __search(
                 continue
 
             queued += 1
-            tp = utils.SearchTuple(new_f, g, h, new_marking, curr, t, None, True)
+            tp = utils.SearchTuple(
+                new_f, g, h, new_marking, curr, t, None, True
+            )
             heapq.heappush(open_set, tp)
 
     return None

@@ -5,8 +5,8 @@ Uses combination-based metrics where ground truth can be multiple near-optimal
 heuristics (within a tolerance threshold of the best).
 """
 
-from typing import Dict, Any, List, Union, Tuple
-from dataclasses import dataclass
+from typing import Dict, Any, List, Union, Tuple, Optional
+from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -16,12 +16,7 @@ import json
 from collections import defaultdict, Counter
 
 from models.base import ClassificationModel
-from dataloaders.runs import RunDataset
-from models.utils import (
-    normalize_datasets,
-    validate_aligner_consistency,
-    iter_combined_datasets,
-)
+from dataloaders.labels import LabelDataset
 
 
 # Default tolerance thresholds for near-optimal heuristics
@@ -35,6 +30,7 @@ HEURISTIC_ALIASES = {
     'VERSION_REMAINING_TRACE': 'RemainingActivities',
 }
 
+
 def get_heuristic_alias(full_name: str) -> str:
     """Get short alias for heuristic name."""
     return HEURISTIC_ALIASES.get(full_name, full_name)
@@ -43,7 +39,7 @@ def get_heuristic_alias(full_name: str) -> str:
 def heuristics_are_similar(
     time_a: float, time_b: float, relative_threshold: float
 ) -> bool:
-    """ Determine if two heuristic execution times are similar using percentage comparison. """
+    """Determine if two heuristic execution times are similar using percentage comparison."""
     if relative_threshold == 0.0:
         return time_a == time_b
 
@@ -83,13 +79,29 @@ def get_near_optimal_heuristics(
 
 
 @dataclass
+class HeuristicSpecificMetrics:
+    """Binary classification metrics for a specific heuristic (One-vs-Rest)."""
+
+    heuristic_name: str
+    true_positives: int  # Predicted H AND H is in near-optimal set
+    false_positives: int  # Predicted H AND H is NOT in near-optimal set
+    false_negatives: int  # Predicted NOT H AND H is in near-optimal set
+    true_negatives: int  # Predicted NOT H AND H is NOT in near-optimal set
+    precision: float  # TP / (TP + FP) - When we predict H, how often is it correct?
+    recall: float  # TP / (TP + FN) - When H is optimal, how often do we predict it?
+    accuracy: float  # (TP + TN) / (TP + FP + FN + TN) - Overall correctness
+    f1_score: float  # 2 * (precision * recall) / (precision + recall)
+    total_optimal_samples: int  # TP + FN - Samples where this heuristic is optimal
+
+
+@dataclass
 class CombinationMetrics:
     """Metrics for a specific combination of near-optimal heuristics."""
 
     combination: Tuple[str, ...]  # e.g., ("A*", "Dijkstra")
     support: int  # How often this combination is the ground truth
     correct_predictions: int  # How often was prediction in this combination
-    accuracy: float  # correct_predictions / support
+    recall: float  # correct_predictions / support
 
 
 @dataclass
@@ -98,10 +110,28 @@ class ToleranceLevelMetrics:
 
     threshold: float
     combination_metrics: Dict[Tuple[str, ...], CombinationMetrics]
+    per_heuristic_metrics: Dict[str, HeuristicSpecificMetrics]  # Binary metrics per heuristic
     overall_accuracy: float  # Prediction is in near-optimal set
     macro_accuracy: float  # Average accuracy across all combinations
     total_samples: int
     prediction_counts: Dict[str, int]  # How often each heuristic was predicted
+
+
+@dataclass
+class DatasetEvaluationData:
+    """Accumulates evaluation data for a single dataset during evaluation."""
+
+    predictions: List[str] = field(default_factory=list)
+    all_heuristic_times: List[Dict[str, float]] = field(default_factory=list)
+    actual_times: List[float] = field(default_factory=list)
+    optimal_times: List[float] = field(default_factory=list)
+    worst_times: List[float] = field(default_factory=list)
+    prediction_times: List[float] = field(default_factory=list)
+    feature_extraction_times: List[float] = field(default_factory=list)
+    classification_times: List[float] = field(default_factory=list)
+    heuristic_runs: Dict[str, List[float]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
 
 
 @dataclass
@@ -112,8 +142,12 @@ class EvaluationMetrics:
     tolerance_metrics: Dict[float, ToleranceLevelMetrics]
 
     # Time performance metrics
-    mean_alignment_time_only: float  # Alignment time only (predicted heuristic)
-    mean_alignment_time_with_prediction: float  # Total: feature + classification + alignment
+    mean_alignment_time_only: (
+        float  # Alignment time only (predicted heuristic)
+    )
+    mean_alignment_time_with_prediction: (
+        float  # Total: feature + classification + alignment
+    )
     mean_optimal_alignment_time: float  # Fastest heuristic alignment time
     performance_ratio_alignment_only: float  # alignment_only / optimal
     performance_ratio_with_prediction: float  # with_prediction / optimal
@@ -142,13 +176,29 @@ class EvaluationMetrics:
                 combo_dict[combo_key] = {
                     'support': metrics.support,
                     'correct_predictions': metrics.correct_predictions,
-                    'accuracy': metrics.accuracy,
+                    'recall': metrics.recall,
                 }
             # Convert prediction counts to use aliases
             prediction_counts_aliased = {
                 get_heuristic_alias(h): count
                 for h, count in level_metrics.prediction_counts.items()
             }
+
+            # Convert per-heuristic metrics to use aliases
+            per_heuristic_dict = {}
+            for heuristic, metrics in level_metrics.per_heuristic_metrics.items():
+                alias = get_heuristic_alias(heuristic)
+                per_heuristic_dict[alias] = {
+                    'true_positives': metrics.true_positives,
+                    'false_positives': metrics.false_positives,
+                    'false_negatives': metrics.false_negatives,
+                    'true_negatives': metrics.true_negatives,
+                    'precision': metrics.precision,
+                    'recall': metrics.recall,
+                    'accuracy': metrics.accuracy,
+                    'f1_score': metrics.f1_score,
+                    'total_optimal_samples': metrics.total_optimal_samples,
+                }
 
             tolerance_dict[f"{threshold:.0%}"] = {
                 'threshold': threshold,
@@ -157,6 +207,7 @@ class EvaluationMetrics:
                 'total_samples': level_metrics.total_samples,
                 'prediction_counts': prediction_counts_aliased,
                 'combination_metrics': combo_dict,
+                'per_heuristic_metrics': per_heuristic_dict,
             }
 
         return {
@@ -209,16 +260,21 @@ class EvaluationMetrics:
             ]
         )
 
-        sorted_features = sorted(
-            self.feature_importance.items(), key=lambda x: x[1], reverse=True
-        )[:5]
-        for fname, importance in sorted_features:
-            lines.append(f"  {fname}: {importance:.4f}")
+        if self.feature_importance is not None:
+            sorted_features = sorted(
+                self.feature_importance.items(),
+                key=lambda x: x[1],
+                reverse=True,
+            )[:5]
+            for fname, importance in sorted_features:
+                lines.append(f"  {fname}: {importance:.4f}")
 
         lines.append("=" * 80)
         return "\n".join(lines)
 
-    def _format_tolerance_level(self, level: ToleranceLevelMetrics) -> List[str]:
+    def _format_tolerance_level(
+        self, level: ToleranceLevelMetrics
+    ) -> List[str]:
         """Format metrics for one tolerance level."""
         lines = [
             "",
@@ -234,12 +290,14 @@ class EvaluationMetrics:
         ]
 
         # Add prediction distribution
-        lines.extend([
-            "Prediction Distribution:",
-            "",
-            f"  {'Heuristic':<30} {'Count':>8} {'Percentage':>12}",
-            "  " + "-" * 52,
-        ])
+        lines.extend(
+            [
+                "Prediction Distribution:",
+                "",
+                f"  {'Heuristic':<30} {'Count':>8} {'Percentage':>12}",
+                "  " + "-" * 52,
+            ]
+        )
 
         # Sort by count (most predicted first)
         sorted_preds = sorted(
@@ -250,14 +308,20 @@ class EvaluationMetrics:
 
         for heuristic, count in sorted_preds:
             alias = get_heuristic_alias(heuristic)
-            percentage = 100.0 * count / level.total_samples if level.total_samples > 0 else 0.0
+            percentage = (
+                100.0 * count / level.total_samples
+                if level.total_samples > 0
+                else 0.0
+            )
             lines.append(f"  {alias:<30} {count:>8} {percentage:>11.2f}%")
 
-        lines.extend([
-            "",
-            "Per-Combination Ground Truth Metrics:",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "Per-Combination Ground Truth Metrics:",
+                "",
+            ]
+        )
 
         # Calculate max combination length for dynamic column width
         max_combo_len = 0
@@ -277,7 +341,7 @@ class EvaluationMetrics:
 
         # Header for combination table
         lines.append(
-            f"  {'Combination':<{combo_width}} {'Support':>8} {'Correct':>8} {'Accuracy':>10}"
+            f"  {'Combination':<{combo_width}} {'Support':>8} {'Correct':>8} {'Recall':>10}"
         )
         lines.append("  " + "-" * (combo_width + 28))
 
@@ -291,7 +355,7 @@ class EvaluationMetrics:
         for (combo, metrics), combo_str in zip(sorted_combos, combo_strs):
             lines.append(
                 f"  {combo_str:<{combo_width}} {metrics.support:>8} "
-                f"{metrics.correct_predictions:>8} {metrics.accuracy:>10.2%}"
+                f"{metrics.correct_predictions:>8} {metrics.recall:>10.2%}"
             )
 
         return lines
@@ -303,107 +367,126 @@ class RecommenderEvaluator:
     def __init__(
         self,
         classifier: ClassificationModel,
-        run_datasets: Union[RunDataset, List[RunDataset]],
-        tolerance_thresholds: List[float] = None,
+        dataset: LabelDataset,
+        tolerance_thresholds: Optional[List[float]] = None,
     ):
         self.classifier = classifier
-        self.run_datasets = normalize_datasets(run_datasets)
-        self.tolerance_thresholds = tolerance_thresholds or TOLERANCE_THRESHOLDS
-        validate_aligner_consistency(self.run_datasets)
+        self.tolerance_thresholds = (
+            tolerance_thresholds or TOLERANCE_THRESHOLDS
+        )
+        self.dataset = dataset
 
-    def evaluate(self) -> EvaluationMetrics:
-        """Evaluate classifier on run_datasets with combination-based metrics."""
+    def evaluate(self, batched: bool = True, print_summary: bool = True) -> Dict[str, EvaluationMetrics]:
+        """
+        Evaluate classifier on run_datasets.
+
+        Returns:
+            Dict mapping dataset_id to EvaluationMetrics.
+            Includes 'overall' key for combined metrics across all datasets.
+        """
         logging.info("Starting evaluation...")
 
-        # Collect predictions and timing data
-        predictions = []
-        all_heuristic_times = []  # List of dicts: {heuristic: time}
-        actual_times = []
-        optimal_times = []
-        worst_times = []
-        prediction_times = []
-        feature_extraction_times = []
-        classification_times = []
+        # Collect data per dataset (including 'overall' as special key)
+        dataset_data: Dict[str, DatasetEvaluationData] = defaultdict(
+            DatasetEvaluationData
+        )
 
-        # Track per-heuristic performance
-        heuristic_runs = defaultdict(list)
+        for runs in tqdm(self.dataset.iter_by_model(), desc="Evaluating"):
+            dataset_ids, runs = zip(*runs)
+            model = runs[0].model.deserialize()
+            traces = [run.trace for run in runs]
 
-        for model, trace, results_dict in tqdm(
-            iter_combined_datasets(self.run_datasets), desc="Evaluating"
-        ):
-            prediction = self.classifier.predict_heuristic(
-                model.pm, model.im, model.fm, trace
-            )
-            predictions.append(prediction.predicted_heuristic)
+            predictions = []
+            if batched:
+                predictions = self.classifier.predict_batched(model, traces)
+            else:
+                for trace in traces:
+                    prediction = self.classifier.predict_heuristic(model.pm, model.im, model.fm, trace)
+                    predictions.append(prediction)
 
-            # Track timing
-            prediction_times.append(prediction.total_prediction_time)
-            feature_extraction_times.append(prediction.feature_extraction_time)
-            classification_times.append(prediction.classification_time)
+            # Process each prediction
+            for dataset_id, gt, prediction in zip(dataset_ids, runs, predictions):
+                # Get all heuristic times
+                all_alignments = {
+                    item.algo: item.perf
+                    for item in self.dataset.get_combination_results(
+                        dataset_id, gt.comb_id
+                    )
+                }
 
-            # Collect all heuristic times for this sample
-            best_time = float('inf')
-            worst_time = 0.0
-            heuristic_times = {}
+                durations = {
+                    algo: np.mean([
+                        (p["duration"] if p["duration"] != float('inf') else 20.0)
+                        for p in perf
+                    ])
+                    for algo, perf in all_alignments.items()
+                }
 
-            for algo_name, (_, _, perf_list) in results_dict.items():
-                durations = [
-                    p.duration for p in perf_list if p.duration is not None
-                ]
-                durations = [
-                    20.0 if dur == float('inf') else dur for dur in durations
-                ]  # set to timeout value
-                if durations:
-                    mean_time = np.mean(durations)
-                    heuristic_times[algo_name] = mean_time
-                    heuristic_runs[algo_name].append(mean_time)
+                best_time = min(durations.values())
+                worst_time = max(durations.values())
+                actual_time = durations[prediction.predicted_heuristic]
 
-                    if mean_time < best_time:
-                        best_time = mean_time
-                    if mean_time > worst_time:
-                        worst_time = mean_time
+                # Store in both dataset-specific and overall
+                for key in [dataset_id, 'overall']:
+                    data = dataset_data[key]
+                    data.predictions.append(prediction.predicted_heuristic)
+                    data.all_heuristic_times.append(durations)
+                    data.actual_times.append(actual_time)
+                    data.optimal_times.append(best_time)
+                    data.worst_times.append(worst_time)
+                    data.prediction_times.append(prediction.combined_prediction_time)
+                    data.feature_extraction_times.append(prediction.feature_extraction_time)
+                    data.classification_times.append(prediction.classification_time)
 
-            all_heuristic_times.append(heuristic_times)
-            optimal_times.append(best_time)
-            worst_times.append(worst_time)
+                    for algo, time in durations.items():
+                        data.heuristic_runs[algo].append(time)
 
-            # Get actual time for predicted heuristic
-            actual_time = heuristic_times[prediction.predicted_heuristic]
-            actual_times.append(actual_time)
+        # Build metrics for each dataset
+        all_metrics = {}
 
-        # Calculate metrics for each tolerance level
+        logging.info(f"\nEvaluating {len(dataset_data) - 1} datasets individually...")
+        for dataset_id, data in dataset_data.items():  # Includes 'overall'
+            logging.info(f"  Dataset: {dataset_id[:8]} ({len(data.predictions)} samples)")
+            all_metrics[dataset_id] = self._compute_metrics_from_data(data)
+
+        logging.info("Evaluation complete!")
+        if print_summary:
+            logging.info(f"\n{all_metrics['overall'].summary()}")
+    
+        return all_metrics
+
+    def _compute_metrics_from_data(
+        self, data: DatasetEvaluationData
+    ) -> EvaluationMetrics:
+        """Helper to compute EvaluationMetrics from collected data."""
+        # Calculate tolerance metrics
         tolerance_metrics = {}
         for threshold in self.tolerance_thresholds:
             tolerance_metrics[threshold] = self._calculate_tolerance_level_metrics(
-                predictions, all_heuristic_times, threshold
+                data.predictions, data.all_heuristic_times, threshold
             )
 
-        # Compute time performance metrics
-        mean_alignment_only = np.mean(actual_times)
-        mean_prediction = np.mean(prediction_times)
+        # Time performance metrics
+        mean_alignment_only = np.mean(data.actual_times)
+        mean_prediction = np.mean(data.prediction_times)
         mean_alignment_with_pred = mean_alignment_only + mean_prediction
-        mean_optimal = np.mean(optimal_times)
-        mean_worst = np.mean(worst_times)
+        mean_optimal = np.mean(data.optimal_times)
+        mean_worst = np.mean(data.worst_times)
 
         performance_ratio_alignment_only = (
-            mean_alignment_only / mean_optimal
-            if mean_optimal > 0
-            else float('inf')
+            mean_alignment_only / mean_optimal if mean_optimal > 0 else float('inf')
         )
         performance_ratio_with_pred = (
-            mean_alignment_with_pred / mean_optimal
-            if mean_optimal > 0
-            else float('inf')
+            mean_alignment_with_pred / mean_optimal if mean_optimal > 0 else float('inf')
         )
         time_savings = (
             (mean_worst - mean_alignment_only) / (mean_worst - mean_optimal)
-            if (mean_worst - mean_optimal) > 0
-            else 0.0
+            if (mean_worst - mean_optimal) > 0 else 0.0
         )
 
-        # Compute per-heuristic timing statistics
+        # Per-heuristic timing statistics
         heuristic_timings = {}
-        for heuristic, times in heuristic_runs.items():
+        for heuristic, times in data.heuristic_runs.items():
             heuristic_timings[heuristic] = {
                 'mean': np.mean(times),
                 'std': np.std(times),
@@ -413,10 +496,10 @@ class RecommenderEvaluator:
                 'count': len(times),
             }
 
-        # Get feature importance
+        # Feature importance (same for all datasets)
         feature_importance = self.classifier.get_feature_importance()
 
-        metrics = EvaluationMetrics(
+        return EvaluationMetrics(
             tolerance_metrics=tolerance_metrics,
             mean_alignment_time_only=mean_alignment_only,
             mean_alignment_time_with_prediction=mean_alignment_with_pred,
@@ -426,15 +509,95 @@ class RecommenderEvaluator:
             time_savings_vs_worst=time_savings,
             heuristic_timings=heuristic_timings,
             feature_importance=feature_importance,
-            mean_prediction_time=np.mean(prediction_times),
-            mean_feature_extraction_time=np.mean(feature_extraction_times),
-            mean_classification_time=np.mean(classification_times),
+            mean_prediction_time=np.mean(data.prediction_times),
+            mean_feature_extraction_time=np.mean(data.feature_extraction_times),
+            mean_classification_time=np.mean(data.classification_times),
         )
 
-        logging.info("Evaluation complete!")
-        logging.info(f"\n{metrics.summary()}")
+    def _calculate_per_heuristic_metrics_binary(
+        self,
+        predictions: List[str],
+        all_heuristic_times: List[Dict[str, float]],
+        threshold: float,
+    ) -> Dict[str, HeuristicSpecificMetrics]:
+        """
+        Calculate binary classification metrics per heuristic (One-vs-Rest).
 
-        return metrics
+        For each heuristic H:
+        - TP: Predicted H AND H is in near-optimal set
+        - FP: Predicted H AND H is NOT in near-optimal set
+        - FN: Predicted NOT H AND H is in near-optimal set
+        - TN: Predicted NOT H AND H is NOT in near-optimal set
+
+        Args:
+            predictions: List of predicted heuristic names
+            all_heuristic_times: List of dicts mapping heuristic name to time
+            threshold: Tolerance threshold (e.g., 0.10 for 10%)
+
+        Returns:
+            Dict mapping heuristic name to HeuristicSpecificMetrics
+        """
+        heuristic_stats = defaultdict(lambda: {
+            'tp': 0,
+            'fp': 0,
+            'fn': 0,
+            'tn': 0
+        })
+
+        all_heuristics = set(all_heuristic_times[0].keys()) if all_heuristic_times else set()
+
+        for pred, heuristic_times in zip(predictions, all_heuristic_times):
+            # Get near-optimal set for this sample
+            near_optimal = get_near_optimal_heuristics(heuristic_times, threshold)
+
+            # For each heuristic, determine TP/FP/FN/TN
+            for heuristic in all_heuristics:
+                predicted_h = (pred == heuristic)
+                optimal_h = (heuristic in near_optimal)
+
+                if predicted_h and optimal_h:
+                    heuristic_stats[heuristic]['tp'] += 1
+                elif predicted_h and not optimal_h:
+                    heuristic_stats[heuristic]['fp'] += 1
+                elif not predicted_h and optimal_h:
+                    heuristic_stats[heuristic]['fn'] += 1
+                else:  # not predicted_h and not optimal_h
+                    heuristic_stats[heuristic]['tn'] += 1
+
+        # Calculate metrics
+        per_heuristic_metrics = {}
+        for heuristic, stats in heuristic_stats.items():
+            tp = stats['tp']
+            fp = stats['fp']
+            fn = stats['fn']
+            tn = stats['tn']
+
+            # Precision: When we predict H, how often is it correct?
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+
+            # Recall: When H is optimal, how often do we predict it?
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+            # Accuracy: Overall correctness for this heuristic
+            accuracy = (tp + tn) / (tp + fp + fn + tn) if (tp + fp + fn + tn) > 0 else 0.0
+
+            # F1 Score
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+
+            per_heuristic_metrics[heuristic] = HeuristicSpecificMetrics(
+                heuristic_name=heuristic,
+                true_positives=tp,
+                false_positives=fp,
+                false_negatives=fn,
+                true_negatives=tn,
+                precision=precision,
+                recall=recall,
+                accuracy=accuracy,
+                f1_score=f1,
+                total_optimal_samples=tp + fn,
+            )
+
+        return per_heuristic_metrics
 
     def _calculate_tolerance_level_metrics(
         self,
@@ -475,29 +638,37 @@ class RecommenderEvaluator:
 
         # Build CombinationMetrics for each combination
         combination_metrics = {}
-        all_accuracies = []
+        all_recalls = []
 
         for combo, support in combo_support.items():
             correct = combo_correct[combo]
-            accuracy = correct / support if support > 0 else 0.0
+            recall = correct / support if support > 0 else 0.0
 
             combination_metrics[combo] = CombinationMetrics(
                 combination=combo,
                 support=support,
                 correct_predictions=correct,
-                accuracy=accuracy,
+                recall=recall,
             )
 
-            all_accuracies.append(accuracy)
+            all_recalls.append(recall)
 
         # Calculate overall metrics
         total_samples = len(predictions)
-        overall_accuracy = overall_correct / total_samples if total_samples > 0 else 0.0
-        macro_accuracy = np.mean(all_accuracies) if all_accuracies else 0.0
+        overall_accuracy = (
+            overall_correct / total_samples if total_samples > 0 else 0.0
+        )
+        macro_accuracy = np.mean(all_recalls) if all_recalls else 0.0
+
+        # Calculate per-heuristic binary metrics
+        per_heuristic_metrics = self._calculate_per_heuristic_metrics_binary(
+            predictions, all_heuristic_times, threshold
+        )
 
         return ToleranceLevelMetrics(
             threshold=threshold,
             combination_metrics=combination_metrics,
+            per_heuristic_metrics=per_heuristic_metrics,
             overall_accuracy=overall_accuracy,
             macro_accuracy=macro_accuracy,
             total_samples=total_samples,
@@ -505,12 +676,26 @@ class RecommenderEvaluator:
         )
 
     def compare_with_baselines(
-        self, baselines: List[ClassificationModel]
+        self,
+        baselines: List[ClassificationModel],
+        main_result: Dict[str, EvaluationMetrics] = None,
     ) -> pd.DataFrame:
-        """Compare classifier with baseline models across all tolerance levels."""
+        """
+        Compare classifier with baseline models across all tolerance levels.
+
+        Args:
+            baselines: List of baseline classifiers to compare against
+            main_result: Optional pre-computed main classifier results.
+                        If None, will call evaluate_batched()
+
+        Returns:
+            DataFrame with comparison metrics
+        """
         results = []
 
-        main_metrics = self.evaluate()
+        # Extract 'overall' metrics
+        main_metrics = main_result['overall']
+
         result_row = {
             'model': self.classifier.__class__.__name__,
             'performance_ratio_alignment_only': main_metrics.performance_ratio_alignment_only,
@@ -518,11 +703,17 @@ class RecommenderEvaluator:
             'mean_alignment_time_only': main_metrics.mean_alignment_time_only,
             'mean_alignment_time_with_prediction': main_metrics.mean_alignment_time_with_prediction,
             'mean_prediction_time': main_metrics.mean_prediction_time,
+            'mean_feature_extraction_time': main_metrics.mean_feature_extraction_time,
+            'mean_classification_time': main_metrics.mean_classification_time,
         }
         # Add accuracy for each tolerance level
         for threshold, level_metrics in main_metrics.tolerance_metrics.items():
-            result_row[f'accuracy_{threshold:.0%}'] = level_metrics.overall_accuracy
-            result_row[f'macro_accuracy_{threshold:.0%}'] = level_metrics.macro_accuracy
+            result_row[f'accuracy_{threshold:.0%}'] = (
+                level_metrics.overall_accuracy
+            )
+            result_row[f'macro_accuracy_{threshold:.0%}'] = (
+                level_metrics.macro_accuracy
+            )
         results.append(result_row)
 
         # Evaluate baselines
@@ -531,9 +722,11 @@ class RecommenderEvaluator:
                 f"\nEvaluating baseline: {baseline.__class__.__name__}"
             )
             evaluator = RecommenderEvaluator(
-                baseline, self.run_datasets, self.tolerance_thresholds
+                baseline, self.dataset, self.tolerance_thresholds
             )
-            baseline_metrics = evaluator.evaluate()
+            baseline_result = evaluator.evaluate()
+            # Extract 'overall' metrics
+            baseline_metrics = baseline_result['overall']
 
             result_row = {
                 'model': baseline.__class__.__name__,
@@ -542,24 +735,23 @@ class RecommenderEvaluator:
                 'mean_alignment_time_only': baseline_metrics.mean_alignment_time_only,
                 'mean_alignment_time_with_prediction': baseline_metrics.mean_alignment_time_with_prediction,
                 'mean_prediction_time': baseline_metrics.mean_prediction_time,
+                'mean_feature_extraction_time': baseline_metrics.mean_feature_extraction_time,
+                'mean_classification_time': baseline_metrics.mean_classification_time,
             }
             # Add accuracy for each tolerance level
-            for threshold, level_metrics in baseline_metrics.tolerance_metrics.items():
-                result_row[f'accuracy_{threshold:.0%}'] = level_metrics.overall_accuracy
-                result_row[f'macro_accuracy_{threshold:.0%}'] = level_metrics.macro_accuracy
+            for (
+                threshold,
+                level_metrics,
+            ) in baseline_metrics.tolerance_metrics.items():
+                result_row[f'accuracy_{threshold:.0%}'] = (
+                    level_metrics.overall_accuracy
+                )
+                result_row[f'macro_accuracy_{threshold:.0%}'] = (
+                    level_metrics.macro_accuracy
+                )
             results.append(result_row)
 
         df = pd.DataFrame(results)
-
-        # Add relative performance columns
-        df['relative_to_best_alignment_only'] = (
-            df['performance_ratio_alignment_only']
-            / df['performance_ratio_alignment_only'].min()
-        )
-        df['relative_to_best_with_prediction'] = (
-            df['performance_ratio_with_prediction']
-            / df['performance_ratio_with_prediction'].min()
-        )
 
         return df
 

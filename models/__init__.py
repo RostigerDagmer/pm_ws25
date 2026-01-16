@@ -8,11 +8,7 @@ from models.gradient_boosting_classifier import GradientBoostingClassifier
 from models.random_forest_classifier import RandomForestClassifier
 from models.baselines import SingleBestSolver, RandomClassifier
 from models.evaluator import RecommenderEvaluator, EvaluationMetrics
-from models.utils import (
-    normalize_datasets,
-    validate_aligner_consistency,
-    iter_combined_datasets
-)
+from models.evaluation_report import EvaluationReportGenerator
 
 __all__ = [
     'ClassificationModel',
@@ -29,4 +25,5 @@ __all__ = [
     'normalize_datasets',
     'validate_aligner_consistency',
     'iter_combined_datasets',
+    'EvaluationReportGenerator',
 ]

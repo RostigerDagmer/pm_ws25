@@ -2,7 +2,58 @@ from typing import Callable
 import torch
 from torch.utils.data import Dataset
 from pm4py.objects.conversion.log import converter as log_converter
-from pm4py.objects.log.obj import EventLog, Trace
+from pm4py.objects.log.obj import EventLog, Trace, EventStream
+from collections.abc import Sequence
+import pandas as pd
+
+
+def _normalize_log_input(subset) -> pd.DataFrame | EventLog | Trace:
+    """
+    Normalize 'subset' to a pm4py-compatible pandas DataFrame.
+    Supports:
+      - pandas.DataFrame
+      - pm4py EventLog / EventStream
+      - any Sequence (e.g., list, tuple, TraceSubset) of pm4py Traces
+      - any Sequence of event dicts
+    """
+    # 1) Already a DataFrame
+    if isinstance(subset, pd.DataFrame):
+        return subset
+
+    # 2) pm4py log types
+    if isinstance(subset, (EventLog, EventStream)):
+        return log_converter.apply(
+            subset, variant=log_converter.Variants.TO_DATA_FRAME
+        )
+
+    # 3) Generic sequences (includes your TraceSubset), excluding text
+    if isinstance(subset, Sequence) and not isinstance(subset, (str, bytes)):
+        seq = list(subset)
+
+        if len(seq) == 0:
+            raise ValueError(
+                "Empty subset: cannot discover a model from zero events/traces."
+            )
+
+        # 3a) Sequence of pm4py Traces -> wrap into EventLog then to DataFrame
+        if all(isinstance(t, Trace) for t in seq):
+            evlog = EventLog(seq)
+            return log_converter.apply(
+                evlog, variant=log_converter.Variants.TO_DATA_FRAME
+            )
+
+        # 3b) Sequence of event dicts -> directly to DataFrame
+        if all(isinstance(e, dict) for e in seq):
+            return pd.DataFrame(seq)
+
+        # Mixed or unsupported element type
+        raise TypeError(
+            "Unsupported sequence element types for subset: expected all pm4py Traces or all event dicts; "
+            f"got examples like {type(seq[0])!r}."
+        )
+
+    # 4) Anything else -> unsupported
+    raise TypeError(f"Unsupported subset type: {type(subset)}")
 
 
 class BaseEventLogDataset(Dataset):
