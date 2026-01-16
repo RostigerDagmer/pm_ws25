@@ -55,7 +55,11 @@ class BaseFeatureExtractor(ABC):
         )
 
     def extract(
-        self, *args, return_as_dict: bool = False, use_cache: bool = None, **kwargs
+        self,
+        *args,
+        return_as_dict: bool = False,
+        use_cache: bool = None,
+        **kwargs,
     ) -> Union[np.ndarray, Dict[str, float]]:
         """
         Extract features from input.
@@ -95,6 +99,20 @@ class BaseFeatureExtractor(ABC):
             return feature_dict
         return self.dict_to_vector(feature_dict)
 
+    def extract_batched(
+        self,
+        *args,
+        return_as_dict: bool = False,
+        use_cache: bool = None,
+        **kwargs,
+    ) -> list[Dict[str, float]] | list[np.ndarray]:
+        """Extract features for a batch of traces."""
+        # TODO: caching
+        feats = self._extract_features_batch(*args, **kwargs)
+        if return_as_dict:
+            return feats
+        return [self.dict_to_vector(feat) for feat in feats]
+
     def dict_to_vector(self, feature_dict: Dict[str, float]) -> np.ndarray:
         """Convert feature dict to numpy array using feature_names order."""
         return np.nan_to_num(
@@ -104,4 +122,3 @@ class BaseFeatureExtractor(ABC):
     def vector_to_dict(self, feature_vector: np.ndarray) -> Dict[str, float]:
         """Convert feature vector to dict using feature_names order."""
         return dict(zip(self.feature_names, feature_vector))
-

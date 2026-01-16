@@ -1,19 +1,14 @@
 import argparse
 import logging
-import os
 import yaml
-import random
-from torch.utils.data import DataLoader, Dataset
 from configs.schema import PipelineConfig
 from dataloaders.runs import RunDataset, PerfCounter
-from scripts.generate_dataset import build_pipeline
-from pm4py.objects.petri_net.utils.petri_utils import construct_trace_net
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 from features import CompositeFeatureExtractor
 from util.rng import RNG
+from dataloaders.util import create_tables, build_pipeline
 
 DF_SCHEMA = [
     "item_id",
@@ -80,59 +75,6 @@ def format_row(
     )
 
 
-def collate(batch: list[RunDataset.SerializedItemType]) -> pd.DataFrame:
-    df_local = pd.DataFrame(columns=DF_SCHEMA)
-    fe = CompositeFeatureExtractor()
-    for run in batch:
-        run = run.deserialize()
-        model, trace, item, perf, algo = (
-            run.model,
-            run.trace,
-            run.item,
-            run.perf,
-            run.algo,
-        )
-        trace_net, trace_im, trace_fm = construct_trace_net(trace)
-        fv = fe.extract(
-            model.pm, model.im, model.fm, trace_net, trace_im, trace_fm
-        )
-        row = format_row(run, fv)
-        # supress future warning
-        df_local = (
-            pd.DataFrame([row])
-            if df_local.empty
-            else pd.concat([df_local, pd.DataFrame([row])], ignore_index=True)
-        )
-
-    return df_local
-
-
-def split_dataframes(
-    labels: pd.DataFrame,
-    train_ratio: float,
-    test_ratio: float,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    unique_ids = labels["combination_id"].unique()
-    random.shuffle(unique_ids)
-
-    n = len(unique_ids)
-    n_train = int(n * train_ratio)
-    n_test = int(n * test_ratio)
-
-    train_ids = set(unique_ids[:n_train])
-    test_ids = set(unique_ids[n_train : n_train + n_test])
-    eval_ids = set(unique_ids[n_train + n_test :])  # residual into eval
-
-    train_df = labels[labels["combination_id"].isin(train_ids)]
-    test_df = labels[labels["combination_id"].isin(test_ids)]
-    eval_df = labels[labels["combination_id"].isin(eval_ids)]
-
-    print(
-        f"SPLIT SIZES → train:{len(train_df)}  test:{len(test_df)}  eval:{len(eval_df)}"
-    )
-    return train_df, test_df, eval_df
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
@@ -143,6 +85,7 @@ if __name__ == "__main__":
     parser.add_argument("--train", type=float, default=0.7)
     parser.add_argument("--test", type=float, default=0.2)
     parser.add_argument("--eval", type=float, default=0.1)
+    parser.add_argument("--force-recompute", action="store_true")
 
     args = parser.parse_args()
     # load config
@@ -164,48 +107,12 @@ if __name__ == "__main__":
 
     run_dataset = build_pipeline(cfg)
 
-    df = pd.DataFrame(columns=DF_SCHEMA)
-
-    dataloader = DataLoader(
-        run_dataset.serialized,
-        batch_size=512,
-        shuffle=False,
-        num_workers=4,
-        persistent_workers=True,
-        collate_fn=collate,
+    _, _, _ = create_tables(
+        run_dataset,
+        args.train,
+        args.test,
+        DF_SCHEMA,
+        CompositeFeatureExtractor(),
+        format_row,
+        force_recompute=args.force_recompute,
     )
-
-    for df_batch in tqdm(dataloader, desc="Extracting features from runs"):
-        df = pd.concat(
-            [df, df_batch],
-            ignore_index=True,
-        )
-
-    best_indices = df.groupby("combination_id")["time_total_mean"].idxmin()
-    labels = df.loc[best_indices]
-
-    # print(f"labels.head(): {labels.head()}")
-    print("\nBest Aligner Labels (Head):")
-    print(labels[["aligner", "time_total_mean", "time_total_std"]].head())
-    print("Summary statistics (minimum time across aligners):")
-    print(labels["time_total_mean"].describe())
-    print("Distribution of aligners chosen:")
-    print(labels["aligner"].value_counts())
-
-    total_ratio = args.train + args.test + args.eval
-    print(
-        f"Split ratios → train:{args.train}  test:{args.test}  eval:{args.eval}  total:{total_ratio}"
-    )
-    if not np.isclose(total_ratio, 1.0):
-        raise ValueError(f"Split ratios must sum to 1.0 (got {total_ratio})")
-
-    base = run_dataset.save_path.with_suffix('')
-    train_df, test_df, eval_df = split_dataframes(
-        labels, args.train, args.test
-    )
-    train_df.to_csv(f"{base}.train.csv", index=False)
-    test_df.to_csv(f"{base}.test.csv", index=False)
-    eval_df.to_csv(f"{base}.eval.csv", index=False)
-
-    df.to_csv(f"{base}.runs.csv", index=False)
-    labels.to_csv(f"{base}.labels.csv", index=False)

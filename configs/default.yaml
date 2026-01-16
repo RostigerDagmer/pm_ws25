@@ -1,8 +1,11 @@
 seed: 1
 discovery:
-  methods: ["inductive"] # either a DISCOVERY_METHOD variant or a list of any in the set { "inductive","heuristic", "alpha", "alpha_plus", "ilp" }
+  methods: ["inductive" , "heuristic"] # either a DISCOVERY_METHOD variant or a list of any in the set { "inductive","heuristic", "alpha", "alpha_plus", "ilp" }
   params: # method-specific lists of parameters (only eligible will be applied to a method)
     noise_threshold: [0.0, 0.1, 0.2, 0.3]
+    dependency_threshold: [0.0, 0.1, 0.2]
+    and_threshold: [0.0, 0.2, 0.35, 0.5]
+    loop_two_threshold: [0.0, 0.1, 0.2, 0.3]
     disable_fallthroughs: true
 
   samplers: # Parameters for the VariantRandomDistributionSampler
@@ -37,6 +40,7 @@ discovery:
         args:
           mean: 5.0
           std: 2.0
+
     - name: variant3
       n_subsets: 20 # number of subsets to sample -> number of models that discovery can produce (per unique set of discovery parameters)
       min_len_subset: 200 # minimum length of each subset
@@ -52,6 +56,21 @@ discovery:
         args:
           mean: 5.0
           std: 2.0
+
+    - name: variant4
+      n_subsets: 50 # number of subsets to sample -> number of models that discovery can produce (per unique set of discovery parameters)
+      min_len_subset: 15 # minimum length of each subset
+      max_len_subset: 100 # maximum length of each subset
+
+      len_distribution: # distribution prior for the length of each subset
+        type: Exponential
+        args:
+          rate: 0.01
+
+      freq_distribution: # distribution prior for the frequency of each variant within a subset
+        type: Exponential
+        args:
+          rate: 0.2
     
   
 deduplication:
@@ -78,7 +97,7 @@ alignment:
     type: SubsetAwarePerturbedTraceSampler # class name of the trace sampler used during alignment runs
     slice: # optional slice of traces to align (for testing/debugging)
       from: 0
-      to: 20
+      to: 50
     args:
       pick_random: true
       noise_params:

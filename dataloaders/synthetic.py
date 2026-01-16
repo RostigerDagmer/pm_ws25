@@ -14,6 +14,7 @@ from util.distributions import DistParam
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import inspect
 import torch
 from util.rng import RNG
 
@@ -44,7 +45,7 @@ class SyntheticEventLogDataset(BaseEventLogDataset):
         for _ in range(
             (self.n_traces + self.batch_size - 1) // self.batch_size
         ):
-            batch = simulate.simulate_batch(
+            batch, _, _ = simulate.simulate_batch(
                 (self.N.pre, self.N.post),
                 self.N.M0,
                 self.N.Mf,
@@ -163,7 +164,10 @@ class SyntheticProcessModelDataset(
             config_hash = self._hash_config(self.configurations[idx])
 
         config = self.configurations[idx]
-        cfg = {k: v for k, v in config.items() if k != 'index'}
+        sig = inspect.signature(models.sample_net)
+        valid_keys = sig.parameters.keys()
+        cfg = {k: v for k, v in config.items() if k in valid_keys}
+
         # combine seed from rng and index
         sample_seed = (RNG.get_seed() + int(config_hash, 16)) % 2**32
         model = models.sample_net(

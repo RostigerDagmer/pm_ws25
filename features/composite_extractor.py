@@ -17,9 +17,12 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
 
     def __init__(self, use_cache: bool = True):
         super().__init__(use_cache=use_cache)
-        self.model_extractor = ModelFeatureExtractor(use_cache=use_cache)
-        self.trace_extractor = TraceFeatureExtractor(use_cache=use_cache)
-        self.token_replay_extractor = TokenReplayFitnessExtractor(use_cache=use_cache)
+        # set use_cache=False for sub-extractors to avoid double caching
+        self.model_extractor = ModelFeatureExtractor(use_cache=False)
+        self.trace_extractor = TraceFeatureExtractor(use_cache=False)
+        self.token_replay_extractor = TokenReplayFitnessExtractor(
+            use_cache=False
+        )
 
     def _compute_cache_key(
         self,
@@ -88,7 +91,7 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
         model_net: PetriNet,
         model_im: Marking,
         model_fm: Marking,
-        trace_net: PetriNet
+        trace_net: PetriNet,
     ) -> Dict[str, float]:
         """Extract interaction features between model and trace."""
         model_labels = {
@@ -106,7 +109,9 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
         )
 
         trace_length = len(trace_labels)
-        coverage_ratio = present_in_model / trace_length if trace_length > 0 else 0.0
+        coverage_ratio = (
+            present_in_model / trace_length if trace_length > 0 else 0.0
+        )
 
         return {
             'interaction_n_activity_present_in_model': present_in_model,
@@ -114,3 +119,48 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
             'interaction_activity_coverage_ratio': coverage_ratio,
         }
 
+    def _extract_features_batch(
+        self,
+        petri_net: PetriNet,
+        petri_net_im: Marking,
+        petri_net_fm: Marking,
+        trace_nets: list[tuple[PetriNet, Marking, Marking]],
+    ) -> list[Dict[str, float]]:
+        """Extract features for a batch of traces."""
+        model_features = self.model_extractor.extract(
+            petri_net, petri_net_im, petri_net_fm, return_as_dict=True
+        )
+        trace_features = [
+            self.trace_extractor.extract(
+                trace_net, trace_net_im, trace_net_fm, return_as_dict=True
+            )
+            for trace_net, trace_net_im, trace_net_fm in trace_nets
+        ]
+        interaction_features = [
+            self._extract_interactions(
+                petri_net, petri_net_im, petri_net_fm, trace_net
+            )
+            for trace_net, _, _ in trace_nets
+        ]
+        token_replay_features = [
+            self.token_replay_extractor.extract(
+                petri_net,
+                petri_net_im,
+                petri_net_fm,
+                trace_net,
+                trace_net_im,
+                trace_net_fm,
+                return_as_dict=True,
+            )
+            for trace_net, trace_net_im, trace_net_fm in trace_nets
+        ]
+
+        return [
+            {
+                **model_features,
+                **trace_features[i],
+                **interaction_features[i],
+                **token_replay_features[i],
+            }
+            for i in range(len(trace_nets))
+        ]

@@ -3,7 +3,7 @@ import numpy as np
 from pm4py.objects.petri_net.obj import PetriNet, Marking
 import traceback
 import logging
-            
+
 from pm4py.objects.process_tree.obj import Operator, ProcessTree
 from pm4py.convert import convert_to_process_tree
 from features.base_extractor import BaseFeatureExtractor
@@ -12,7 +12,7 @@ from features.base_extractor import BaseFeatureExtractor
 class StateSpaceSizeExtractor(BaseFeatureExtractor):
     """
     Extracts state space size feature based on Process Tree conversion.
-    
+
     Calculates a measure of state space size by converting the Petri net to a Process Tree
     and recursively combining values:
     - Leaf: 1
@@ -36,13 +36,26 @@ class StateSpaceSizeExtractor(BaseFeatureExtractor):
             tree = convert_to_process_tree(net, im, fm)
             self._check_unsupported_operators(tree)
             size = self._calculate_state_space(tree)
-            
+
             return {'state_space_size': float(size)}
         except Exception as e:
             traceback.print_exc()
             logging.error(f"Conversion failed: {repr(e)}")
             # Return -1.0 if conversion fails
             return {'state_space_size': -1.0}
+
+    def _extract_features_batch(
+        self,
+        petri_net: PetriNet,
+        petri_net_im: Marking,
+        petri_net_fm: Marking,
+        trace_nets: list[tuple[PetriNet, Marking, Marking]],
+    ) -> list[Dict[str, float]]:
+        return [
+            self._extract_features_internal(
+                petri_net, petri_net_im, petri_net_fm
+            )
+        ] * len(trace_nets)
 
     def _check_unsupported_operators(self, node: ProcessTree):
         """Recursively check for unsupported operators in the process tree."""
@@ -51,7 +64,7 @@ class StateSpaceSizeExtractor(BaseFeatureExtractor):
             Operator.PARALLEL,
             Operator.XOR,
             Operator.LOOP,
-            None, # Leaf nodes
+            None,  # Leaf nodes
         }:
             logging.warning(
                 f"Process Tree contains unsupported operator {node.operator} for state space size calculation."
@@ -63,11 +76,13 @@ class StateSpaceSizeExtractor(BaseFeatureExtractor):
 
     def _calculate_state_space(self, node: ProcessTree) -> float:
         if not node.children:
-            # log(2) because log(1) = 0 would result in 0 for and-nodes with 
+            # log(2) because log(1) = 0 would result in 0 for and-nodes with
             # multiple child leaf nodes
             return np.log(2)
 
-        child_values = [self._calculate_state_space(child) for child in node.children]
+        child_values = [
+            self._calculate_state_space(child) for child in node.children
+        ]
 
         if node.operator in [Operator.SEQUENCE, Operator.XOR, Operator.LOOP]:
             # LogSumExp

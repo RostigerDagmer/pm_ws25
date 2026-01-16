@@ -5,7 +5,6 @@ Baseline classifiers for comparison.
 from typing import Dict, Any
 import numpy as np
 from collections import Counter
-
 from models.base import ClassificationModel
 
 
@@ -20,13 +19,17 @@ class SingleBestSolver(ClassificationModel):
     def _default_hyperparameters(self) -> Dict[str, Any]:
         return {}
 
-    def _train_classifier(self, X_train: np.ndarray, y_train: np.ndarray) -> str:
+    def _train_classifier(
+        self, X_train: np.ndarray, y_train: np.ndarray
+    ) -> str:
         """Find most common label (globally fastest heuristic)."""
         counter = Counter(y_train)
         most_common_class = counter.most_common(1)[0][0]
 
         # Store the string label directly
-        return self.label_encoder.inverse_transform([most_common_class])[0]  # This will set self.model to that label
+        return self.label_encoder.inverse_transform([most_common_class])[
+            0
+        ]  # This will set self.model to that label
 
     def _predict_proba(self, X: np.ndarray) -> np.ndarray:
         """Return uniform probability for the single best solver."""
@@ -40,7 +43,13 @@ class SingleBestSolver(ClassificationModel):
         proba = np.zeros((n_samples, n_classes))
         proba[:, best_class_idx] = 1.0
         return proba
-    
+
+    # def _get_xy_dataset(self) -> tuple[np.ndarray, np.ndarray]:
+    #     return np.array([]), np.array([])
+
+    # def _get_xy_table(self) -> tuple[list, list]:
+    #     return [], []
+
     def get_feature_importance(self) -> Dict[str, float]:
         """
         Return feature importance scores.
@@ -49,7 +58,6 @@ class SingleBestSolver(ClassificationModel):
             Dictionary mapping feature names to importance scores
         """
         return {name: 0.0 for name in self.feature_extractor.feature_names}
-
 
 
 class RandomClassifier(ClassificationModel):
@@ -63,7 +71,9 @@ class RandomClassifier(ClassificationModel):
     def _default_hyperparameters(self) -> Dict[str, Any]:
         return {'random_state': 42}
 
-    def _train_classifier(self, X_train: np.ndarray, y_train: np.ndarray) -> Dict[str, Any]:
+    def _train_classifier(
+        self, X_train: np.ndarray, y_train: np.ndarray
+    ) -> Dict[str, Any]:
         """Compute label frequency distribution and initialize RNG."""
         counter = Counter(y_train)
         total = len(y_train)
@@ -76,7 +86,7 @@ class RandomClassifier(ClassificationModel):
         return {'distribution': distribution, 'rng': rng}
 
     def _predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """ Sample randomly from the training distribution for each sample. """
+        """Sample randomly from the training distribution for each sample."""
         n_samples = X.shape[0]
         n_classes = len(self.label_encoder.classes_)
 
@@ -93,7 +103,13 @@ class RandomClassifier(ClassificationModel):
             proba[i, sampled_class] = 1.0
 
         return proba
-    
+
+    # def _get_xy_dataset(self) -> tuple[np.ndarray, np.ndarray]:
+    #     return np.array([]), np.array([])
+
+    # def _get_xy_table(self) -> tuple[list, list]:
+    #     return [], []
+
     def get_feature_importance(self) -> Dict[str, float]:
         """
         Return feature importance scores.

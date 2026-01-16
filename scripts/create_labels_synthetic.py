@@ -18,7 +18,8 @@ from torch.utils.data import DataLoader
 from configs.schema import PipelineConfig
 from dataloaders.runs import RunDataset, SyntheticTraceSampler
 from dataloaders.synthetic import SyntheticProcessModelDataset
-from scripts.create_labels import collate, split_dataframes, DF_SCHEMA
+from dataloaders.util import collate, split_dataframes
+from scripts.create_labels import DF_SCHEMA
 from util.rng import RNG
 from util.distributions import (
     CategoricalSpec,
@@ -110,41 +111,52 @@ if __name__ == "__main__":
     RNG.initialize(cfg.seed)
 
     print(f"\nConfig: {args.n_models} models, {args.n_traces} traces/model")
-    print(f"Depth: {args.min_depth}-{args.max_depth}, Workers: {cfg.alignment.workers}\n")
+    print(
+        f"Depth: {args.min_depth}-{args.max_depth}, Workers: {cfg.alignment.workers}\n"
+    )
 
     # 3 model configurations
     models_per_config = args.n_models // 3
     param_grid = [
-        ({
-            "dist_params": {
-                "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
-                "seq_len": PoissonSpec(4),
-                "p_stop": BernoulliDepthLinearSpec(base=0.2, slope=0.1),
-                "width": PoissonSpec(3),
+        (
+            {
+                "dist_params": {
+                    "op": CategoricalSpec([0.3, 0.3, 0.3, 0.1]),
+                    "seq_len": PoissonSpec(4),
+                    "p_stop": BernoulliDepthLinearSpec(base=0.2, slope=0.1),
+                    "width": PoissonSpec(3),
+                },
+                "min_depth": args.min_depth,
+                "max_depth": args.max_depth,
             },
-            "min_depth": args.min_depth,
-            "max_depth": args.max_depth,
-        }, models_per_config),
-        ({
-            "dist_params": {
-                "op": CategoricalSpec([0.2, 0.2, 0.2, 0.4]),
-                "seq_len": PoissonSpec(4),
-                "p_stop": BernoulliDepthLinearSpec(base=0.2, slope=0.1),
-                "width": PoissonSpec(3),
+            models_per_config,
+        ),
+        (
+            {
+                "dist_params": {
+                    "op": CategoricalSpec([0.2, 0.2, 0.2, 0.4]),
+                    "seq_len": PoissonSpec(4),
+                    "p_stop": BernoulliDepthLinearSpec(base=0.2, slope=0.1),
+                    "width": PoissonSpec(3),
+                },
+                "min_depth": args.min_depth,
+                "max_depth": args.max_depth,
             },
-            "min_depth": args.min_depth,
-            "max_depth": args.max_depth,
-        }, models_per_config),
-        ({
-            "dist_params": {
-                "op": CategoricalSpec([0.2, 0.4, 0.2, 0.2]),
-                "seq_len": PoissonSpec(4),
-                "p_stop": BernoulliDepthLinearSpec(base=0.2, slope=0.1),
-                "width": PoissonSpec(3),
+            models_per_config,
+        ),
+        (
+            {
+                "dist_params": {
+                    "op": CategoricalSpec([0.2, 0.4, 0.2, 0.2]),
+                    "seq_len": PoissonSpec(4),
+                    "p_stop": BernoulliDepthLinearSpec(base=0.2, slope=0.1),
+                    "width": PoissonSpec(3),
+                },
+                "min_depth": args.min_depth,
+                "max_depth": args.max_depth,
             },
-            "min_depth": args.min_depth,
-            "max_depth": args.max_depth,
-        }, args.n_models - 2 * models_per_config),
+            args.n_models - 2 * models_per_config,
+        ),
     ]
 
     skip_init = not args.force_recompute
@@ -155,9 +167,12 @@ if __name__ == "__main__":
     # Check cache
     base = run_dataset.save_path.with_suffix('')
     if not args.force_recompute and all(
-        Path(f"{base}.{split}.csv").exists() for split in ["train", "test", "eval"]
+        Path(f"{base}.{split}.csv").exists()
+        for split in ["train", "test", "eval"]
     ):
-        logging.info(f"✓ Output exists: {base}.*.csv (use --force-recompute to regenerate)")
+        logging.info(
+            f"✓ Output exists: {base}.*.csv (use --force-recompute to regenerate)"
+        )
         exit(0)
 
     # Extract features
@@ -188,7 +203,9 @@ if __name__ == "__main__":
     if not np.isclose(args.train + args.test + args.eval, 1.0):
         raise ValueError("Split ratios must sum to 1.0")
 
-    train_df, test_df, eval_df = split_dataframes(labels, args.train, args.test)
+    train_df, test_df, eval_df = split_dataframes(
+        labels, args.train, args.test
+    )
 
     # Ensure directory exists
     Path(base).parent.mkdir(parents=True, exist_ok=True)
@@ -203,4 +220,6 @@ if __name__ == "__main__":
     print(f"  - train: {len(train_df)} samples")
     print(f"  - test: {len(test_df)} samples")
     print(f"  - eval: {len(eval_df)} samples")
-    print(f"\n💡 Add this path to evaluate_classifier_e2e.py to combine with real data!")
+    print(
+        "\n💡 Add this path to evaluate_classifier_e2e.py to combine with real data!"
+    )

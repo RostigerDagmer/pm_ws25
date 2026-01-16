@@ -27,6 +27,38 @@ source .venv/bin/activate.[shell] # (e.g. activate.fish) if your shell requires 
 source .venv/Scripts/activate # Windows
 ```
 
+#### Caches
+
+If you want to download prefilled dataset caches:
+Setup rclone on your machine
+```
+./scripts/setup_rclone.sh
+```
+
+Go through the prompts and choose defaults except for:
+1.	n → New remote
+2.	Name: gdrive
+3.  Option: 22 (drive)
+4.	client_id: press Enter (leave blank)
+5.	client_secret: press Enter (leave blank)
+6.	Scope: choose "drive" → full read/write access
+10.	Use auto config? → y
+•	Browser opens → log in with Google account
+•	Approve access
+11.	Configure as shared drive? → n
+
+Then you can download the cache contents
+```
+./download_gdrive_cache.sh
+```
+
+#### Important
+```
+./updload_gdrive_cache.sh
+```
+SYNCHS with the drive... it makes the remote look EXACTLY like your local folder.
+If you expanded runs or only added new files to the folder this is fine. Just be aware that remote will mirror your local EXACTLY.
+
 ---
 
 ### Read problem description [here](documents/Background%20Info.md)
