@@ -20,10 +20,6 @@ class StateSpaceSizeExtractor(BaseFeatureExtractor):
     - AND (PARALLEL): Product of children
     """
 
-    def _compute_cache_key(self, net: PetriNet, im: Marking, fm: Marking):
-        """Use hash of the Petri net as cache key."""
-        return hash(net)
-
     @property
     def feature_names(self) -> List[str]:
         return ['state_space_size']

@@ -3,9 +3,13 @@ Baseline classifiers for comparison.
 """
 
 from typing import Dict, Any
+import time
 import numpy as np
 from collections import Counter
-from models.base import ClassificationModel
+from models.base import ClassificationModel, PredictionResult
+from dataloaders.net import ProcessModelDataset
+from pm4py.objects.petri_net.obj import PetriNet, Marking
+from pm4py.objects.log.obj import Trace
 
 
 class SingleBestSolver(ClassificationModel):
@@ -24,10 +28,10 @@ class SingleBestSolver(ClassificationModel):
     ) -> str:
         """Find most common label (globally fastest heuristic)."""
         counter = Counter(y_train)
-        most_common_class = counter.most_common(1)[0][0]
+        self.most_common_class = counter.most_common(1)[0][0]
 
         # Store the string label directly
-        return self.label_encoder.inverse_transform([most_common_class])[
+        return self.label_encoder.inverse_transform([self.most_common_class])[
             0
         ]  # This will set self.model to that label
 
@@ -44,12 +48,6 @@ class SingleBestSolver(ClassificationModel):
         proba[:, best_class_idx] = 1.0
         return proba
 
-    # def _get_xy_dataset(self) -> tuple[np.ndarray, np.ndarray]:
-    #     return np.array([]), np.array([])
-
-    # def _get_xy_table(self) -> tuple[list, list]:
-    #     return [], []
-
     def get_feature_importance(self) -> Dict[str, float]:
         """
         Return feature importance scores.
@@ -58,6 +56,33 @@ class SingleBestSolver(ClassificationModel):
             Dictionary mapping feature names to importance scores
         """
         return {name: 0.0 for name in self.feature_extractor.feature_names}
+
+    def predict_heuristic(
+        self, model: PetriNet, im: Marking, fm: Marking, trace: Trace
+    ) -> PredictionResult:
+        return PredictionResult(
+            predicted_heuristic=self.label_encoder.inverse_transform(
+                [self.most_common_class]
+            )[0],
+            confidence=1.0,
+            feature_extraction_time=0.0,
+            classification_time=0.0,
+        )
+
+    def predict_batched(
+        self, model: ProcessModelDataset.ItemType, traces: list[Trace]
+    ) -> list[PredictionResult]:
+        return [
+            PredictionResult(
+                predicted_heuristic=self.label_encoder.inverse_transform(
+                    [self.most_common_class]
+                )[0],
+                confidence=1.0,
+                feature_extraction_time=0.0,
+                classification_time=0.0,
+            )
+            for _ in range(len(traces))
+        ]
 
 
 class RandomClassifier(ClassificationModel):
@@ -104,12 +129,6 @@ class RandomClassifier(ClassificationModel):
 
         return proba
 
-    # def _get_xy_dataset(self) -> tuple[np.ndarray, np.ndarray]:
-    #     return np.array([]), np.array([])
-
-    # def _get_xy_table(self) -> tuple[list, list]:
-    #     return [], []
-
     def get_feature_importance(self) -> Dict[str, float]:
         """
         Return feature importance scores.
@@ -118,3 +137,48 @@ class RandomClassifier(ClassificationModel):
             Dictionary mapping feature names to importance scores
         """
         return {name: 0.0 for name in self.feature_extractor.feature_names}
+
+    def predict_heuristic(
+        self, model: PetriNet, im: Marking, fm: Marking, trace: Trace
+    ) -> PredictionResult:
+        t_clf_start = time.perf_counter()
+        X = np.zeros(1)
+        proba = self._predict_proba(X)[0]
+        predicted_class = np.argmax(proba)
+        confidence = proba[predicted_class]
+        predicted_heuristic = self.label_encoder.inverse_transform(
+            [predicted_class]
+        )[0]
+        t_clf_end = time.perf_counter()
+        return PredictionResult(
+            predicted_heuristic=self.most_common_class,
+            confidence=1.0,
+            feature_extraction_time=0.0,
+            classification_time=0.0,
+        )
+
+    def predict_batched(
+        self, model: ProcessModelDataset.ItemType, traces: list[Trace]
+    ) -> list[PredictionResult]:
+
+        t_clf_start = time.perf_counter()
+        X = np.zeros(len(traces))
+        proba = self._predict_proba(X)
+        predicted_classes = np.argmax(proba, axis=1)
+        confidence = proba[:, predicted_classes]
+        predicted_heuristics = self.label_encoder.inverse_transform(
+            predicted_classes
+        )
+        t_clf_end = time.perf_counter()
+
+        classification_time = t_clf_end - t_clf_start
+
+        return [
+            PredictionResult(
+                predicted_heuristic=h,
+                confidence=conf,
+                feature_extraction_time=0.0,
+                classification_time=classification_time / len(traces),
+            )
+            for h, conf in zip(predicted_heuristics, confidence)
+        ]

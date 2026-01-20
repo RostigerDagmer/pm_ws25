@@ -153,7 +153,7 @@ if __name__ == "__main__":
     # Relying on existing tables can skip single threaded feature extraction
 
     logging.info("\nCreating feature extractor...")
-    feature_extractor = CompositeFeatureExtractor(use_cache=True)
+    feature_extractor = CompositeFeatureExtractor()
 
     logging.info("\nTraining XGBoostClassifier...")
     classifier = XGBoostClassifier(
@@ -166,16 +166,15 @@ if __name__ == "__main__":
     has_transformer_model = Path("transformer_model.pth").exists()
 
     if has_transformer_model:
-        device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         transformer_model = SpectralModel(
-            d_model=128,
-            d_trace=128,
-            hidden_dim=256,
-            mlp_hidden_dim=512,
+            d_model=512,
+            d_trace=512,
+            hidden_dim=512,
+            mlp_hidden_dim=1536,
             n_classes=6,
             num_heads=4,
-            n_layers=2,
+            n_layers=6,
             n_self_attn=2,
             dropout=0.1,
             pretraining=False,
