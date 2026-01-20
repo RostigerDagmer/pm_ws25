@@ -15,26 +15,12 @@ class CompositeFeatureExtractor(BaseFeatureExtractor):
     then adds interaction features that relate model and trace characteristics.
     """
 
-    def __init__(self, use_cache: bool = True):
-        super().__init__(use_cache=use_cache)
+    def __init__(self):
+        super().__init__()
         # set use_cache=False for sub-extractors to avoid double caching
-        self.model_extractor = ModelFeatureExtractor(use_cache=False)
-        self.trace_extractor = TraceFeatureExtractor(use_cache=False)
-        self.token_replay_extractor = TokenReplayFitnessExtractor(
-            use_cache=False
-        )
-
-    def _compute_cache_key(
-        self,
-        petri_net: PetriNet,
-        petri_net_im: Marking,
-        petri_net_fm: Marking,
-        trace_net: PetriNet,
-        trace_net_im: Marking,
-        trace_net_fm: Marking,
-    ):
-        """Use tuple of both net hashes as cache key."""
-        return (hash(petri_net), hash(trace_net))
+        self.model_extractor = ModelFeatureExtractor()
+        self.trace_extractor = TraceFeatureExtractor()
+        self.token_replay_extractor = TokenReplayFitnessExtractor()
 
     @property
     def feature_names(self) -> List[str]:
