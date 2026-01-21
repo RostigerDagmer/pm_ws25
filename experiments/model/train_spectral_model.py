@@ -20,12 +20,13 @@ from models.spectral_model import (
     traces_to_tensors,
     prepare_masked_batch,
 )
+from experiments.model.train_spectral_model_representations import is_cuda_oom
 from util.rng import RNG
 
 # Configuration
 LOGGING_LEVEL = logging.INFO
 SEED = 1
-EPOCHS = 50
+EPOCHS = 150
 
 
 @torch.no_grad()
@@ -37,16 +38,26 @@ def evaluate(model, batches, criterion, device):
 
     with torch.no_grad():
         for batch in batches:
-            model_basis, trace_embedding, batch_y, trace_mask = batch
+            tensor_net, tok_idx, unk_idx, batch_y = batch
 
+            model_basis, trace_embedding, _, _ = prepare_masked_batch(
+                extractor=model.feature_extractor,
+                model=model,  # Need model to access the learnable mask token
+                tensor_net=tensor_net,
+                tok_idx=tok_idx,
+                unk_bucket=unk_idx,
+                device=device,
+                mask_prob=0.0,
+            )
+            trace_mask = tok_idx == -1
+            trace_mask[:, 0] = False
             # Expand model basis for batch
-            model_basis = model_basis.expand(len(batch_y), -1, -1)
+            model_basis = model_basis.repeat(trace_embedding.shape[0], 1, 1)
 
             logits = model(model_basis, trace_embedding, trace_mask=trace_mask)
             # pool logits
             logits = model.pool_logits(logits, trace_mask)
             loss = criterion(logits, batch_y)
-            # loss = loss.mean()
 
             total_loss += loss.item() * len(batch_y)
             preds = logits.argmax(dim=1)
@@ -57,6 +68,7 @@ def evaluate(model, batches, criterion, device):
         return 0.0, 0.0
 
     return total_loss / total_samples, correct / total_samples
+
 
 Mode = Literal["oversample", "undersample", "both"]
 Target = Union[Literal["max", "min", "mean", "median"], int]
@@ -74,14 +86,19 @@ class BalanceStats:
 
 @torch.no_grad()
 def rebalance_label_distribution(
-    batches: Sequence[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    batches: Sequence[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ],
     *,
     mode: Mode = "oversample",
     target: Target = "max",
     classes: Optional[Sequence[int]] = None,
     seed: int = 0,
     drop_empty_labels: bool = True,
-) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]], BalanceStats]:
+) -> Tuple[
+    List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    BalanceStats,
+]:
     """
     Rebalances label distribution across `batches` by sampling indices within each original batch.
 
@@ -122,15 +139,12 @@ def rebalance_label_distribution(
     locs_by_label: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
 
     total_samples_before = 0
-    for b_idx, (_, trace_embedding, batch_y, _) in enumerate(batches):
+    for b_idx, (tnet, tok_idx, unk_idx, batch_y) in enumerate(batches):
         if batch_y.ndim != 1:
-            raise ValueError(f"Expected batch_y to be 1D [B], got shape {tuple(batch_y.shape)} in batch {b_idx}")
-        B = int(batch_y.shape[0])
-        if trace_embedding.shape[0] != B:
             raise ValueError(
-                f"trace_embedding[0] != batch_y[0] in batch {b_idx}: "
-                f"{trace_embedding.shape[0]} vs {B}"
+                f"Expected batch_y to be 1D [B], got shape {tuple(batch_y.shape)} in batch {b_idx}"
             )
+        B = int(batch_y.shape[0])
         total_samples_before += B
         y_cpu = batch_y.detach().to("cpu")
         for i in range(B):
@@ -147,7 +161,9 @@ def rebalance_label_distribution(
             if drop_empty_labels:
                 labels = [c for c in labels if c in locs_by_label]
             else:
-                raise ValueError(f"Requested classes contain absent labels: {missing}")
+                raise ValueError(
+                    f"Requested classes contain absent labels: {missing}"
+                )
 
     if not labels:
         # Nothing to do
@@ -246,10 +262,12 @@ def rebalance_label_distribution(
     for b_idx, i_idx in selected_locs:
         by_batch[b_idx].append(i_idx)
 
-    new_batches: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    new_batches: List[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ] = []
     after_counts: Dict[int, int] = {c: 0 for c in labels}
 
-    for b_idx, (model_basis, trace_embedding, batch_y, trace_mask) in enumerate(batches):
+    for b_idx, (tnet, tok_idx, unk_idx, batch_y) in enumerate(batches):
         sel = by_batch.get(b_idx)
         if not sel:
             continue
@@ -257,11 +275,11 @@ def rebalance_label_distribution(
         sel_t = torch.tensor(sel, dtype=torch.long, device=batch_y.device)
 
         # index_select supports repeats -> oversampling works naturally
-        new_trace_embedding = trace_embedding.index_select(0, sel_t)
+        new_tok_ids = tok_idx.index_select(0, sel_t)
         new_batch_y = batch_y.index_select(0, sel_t)
 
         # trace_mask is [B, ...], so index on dim0 as well
-        new_trace_mask = trace_mask.index_select(0, sel_t)
+        new_unk_ids = unk_idx.index_select(0, sel_t)
 
         # Update after-counts on CPU
         y_cpu = new_batch_y.detach().to("cpu")
@@ -269,7 +287,7 @@ def rebalance_label_distribution(
             if int(v) in after_counts:
                 after_counts[int(v)] += 1
 
-        new_batches.append((model_basis, new_trace_embedding, new_batch_y, new_trace_mask))
+        new_batches.append((tnet, new_tok_ids, new_unk_ids, new_batch_y))
 
     stats = BalanceStats(
         before=counts,
@@ -280,6 +298,7 @@ def rebalance_label_distribution(
         total_samples_after=sum(after_counts.values()),
     )
     return new_batches, stats
+
 
 @torch.no_grad()
 def get_batches(
@@ -304,43 +323,16 @@ def get_batches(
             model.device,
             model.num_unk_buckets,
         )
-        model_basis, trace_embedding, _, _ = prepare_masked_batch(
-            extractor=model.feature_extractor,
-            model=model,  # Need model to access the learnable mask token
-            tensor_net=tensor_net,
-            tok_idx=tok_idx,
-            unk_bucket=unk_idx,
-            device=device,
-            mask_prob=0.0,
-        )
-        trace_mask = tok_idx == -1
+
         labels = [item.algo for item in items]
 
         batch_y = torch.tensor(
-            [model.inv_label_map[l] for l in labels], dtype=torch.long, device=model.device
+            [model.inv_label_map[l] for l in labels],
+            dtype=torch.long,
+            device=model.device,
         )
 
-        # model_basis [1, T, d_model]
-        # trace_embedding [B, S, d_trace]
-        if trace_embedding.shape[1] < 2:
-            continue
-
-        if (
-            trace_embedding.shape[0] != batch_y.shape[0]
-            or trace_embedding.shape[-1] != model.d_trace
-            or trace_embedding.ndim != 3
-        ):
-            print(f"Mismatch in batch sizes: {tensor_net}")
-            print(f"token ids tensor: {tok_idx}")
-            print(f"unk ids tensor: {unk_idx}")
-            print(f"Model basis: {model_basis}")
-            print(f"Model basis shape: {model_basis.shape}")
-            print(f"Trace embedding: {trace_embedding}")
-            print(f"Trace embedding shape: {trace_embedding.shape}")
-            print(f"Batch y: {batch_y}")
-            raise ValueError("Batch size mismatch")
-
-        all_batches.append((model_basis, trace_embedding, batch_y, trace_mask))
+        all_batches.append((tensor_net, tok_idx, unk_idx, batch_y))
 
     gc.collect()
 
@@ -350,38 +342,47 @@ def get_batches(
 def train():
     logging.basicConfig(level=LOGGING_LEVEL)
     RNG.initialize(SEED)
-    device = "cuda:1" if torch.cuda.is_available() else "cpu"
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
     config_path = "./configs/default.yaml"
 
     DATASETS = {
-        # 'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
-        # '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
-        #     'Sepsis%20Cases%20-%20Event%20Log.xes'
-        # ],
-        # '500573e6-accc-4b0c-9576-aa5468b10cee': [
-        #     'BPI_Challenge_2013_incidents.xes'
-        # ],
-        # '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': [
-        #     'InternationalDeclarations.xes'
-        # ],
-        # 'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
+        # 'ed445cdd-27d5-4d77-a1f7-59fe7360cfbe': ['BPIC15_3.xes'],
+        '679b11cf-47cd-459e-a6de-9ca614e25985': ['BPIC15_4.xes'],
+        '3301445f-95e8-4ff0-98a4-901f1f204972': ['BPI%20Challenge%202018.xes'],
+        '3926db30-f712-4394-aebc-75976070e91f': ['BPI_Challenge_2012.xes'],
+        '6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd': [
+            'Hospital%20Billing%20-%20Event%20Log.xes'
+        ],
+        'd06aff4b-79f0-45e6-8ec8-e19730c248f1': ['BPI_Challenge_2019.xes'],
+        '3537c19d-6c64-4b1d-815d-915ab0e479da': [
+            'BPI_Challenge_2013_open_problems.xes'
+        ],
+        # 'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
+        'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
+        '500573e6-accc-4b0c-9576-aa5468b10cee': [
+            'BPI_Challenge_2013_incidents.xes'
+        ],
+        '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': [
+            'InternationalDeclarations.xes'
+        ],
+        'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
         # '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
-        # '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
-        # 'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
-        # '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
+        '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
+            'Sepsis%20Cases%20-%20Event%20Log.xes'
+        ],
         "synthetic": ["synthetic"],
     }
     # 3. Model Initialization
     model = SpectralModel(
-        d_model=128,
-        d_trace=128,
-        hidden_dim=256,
-        mlp_hidden_dim=512,
+        d_model=512,
+        d_trace=512,
+        hidden_dim=512,
+        mlp_hidden_dim=1536,
         n_classes=6,
         num_heads=4,
-        n_layers=2,
+        n_layers=6,
         n_self_attn=2,
         dropout=0.1,
         pretraining=False,  # Important!
@@ -393,11 +394,10 @@ def train():
             run_dataset = get_synthetic_dataset(
                 Path("cache/.runs"),
                 seed=SEED,
-                device=device,
                 num_models=200,
                 num_traces=32,
                 min_depth=2,
-                max_depth=3
+                max_depth=3,
             )
         else:
             run_dataset = get_natural_dataset(
@@ -405,64 +405,106 @@ def train():
                 config_path,
                 "cache/.runs",
                 seed=SEED,
+                skip_init=True,
             )
         run_datasets.append(run_dataset)
 
     label_dataset = LabelDataset(run_datasets)
     print(f"Label distribution: {label_dataset.df["algo"].value_counts()}")
     batches = get_batches(label_dataset, model, device)
-    batches, stats = rebalance_label_distribution(batches, mode="oversample", target="max", seed=SEED)
+    batches, stats = rebalance_label_distribution(
+        batches, mode="oversample", target="max", seed=SEED
+    )
 
     random.shuffle(batches)
     split = [int(q * len(batches)) for q in [0.8, 0.1, 0.1]]
     train_batches, test_batches, val_batches = (
         batches[: split[0]],
-        batches[split[0] : split[1]],
-        batches[split[1] :],
+        batches[split[0] : split[0] + split[1]],
+        batches[split[0] + split[1] :],
     )
 
     aligners = label_dataset.labels
     print(f"Aligner classes: {aligners}")
-
-    model.load_state_dict(
-        torch.load("outputs/runs/pretrain_20260105_011924/spectral_model_pretrained_epoch1.pth", map_location=device), strict=False
+    print(
+        f"Num params: {sum([p.numel() for p in model.parameters() if p.requires_grad])}"
     )
 
-    optimizer = optim.AdamW(model.parameters(), lr=5e-5)
-    lr_schedule = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=len(train_batches) * EPOCHS)
+    # model.load_state_dict(
+    #     torch.load("outputs/runs/pretrain_20260117_144928/spectral_model_pretrained_epoch2.pth", map_location=device), strict=False
+    # )
+
+    optimizer = optim.AdamW(model.parameters(), lr=2e-5)
+    lr_schedule = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=len(train_batches) * EPOCHS
+    )
 
     criterion = nn.CrossEntropyLoss(reduction="mean")
-
+    skip = set()
     for epoch in range(EPOCHS):
         model.train()
         total_loss = 0
         correct = 0
         total_samples = 0
+        permutation = list(range(len(train_batches)))
 
-        random.shuffle(train_batches)
+        random.shuffle(permutation)
 
-        pbar = tqdm(train_batches, desc=f"Epoch {epoch + 1}/{EPOCHS}")
-        for batch in pbar:
-            model_basis, trace_embeddings, batch_y, trace_mask = batch
-            trace_mask[:, 0] = False
-            # Expand model basis for batch
-            model_basis = model_basis.repeat(trace_embeddings.shape[0], 1, 1)
+        pbar = tqdm(permutation, desc=f"Epoch {epoch + 1}/{EPOCHS}")
+        for index in pbar:
+            if index in skip:
+                continue
+            batch = train_batches[index]
+            try:
+                tensor_net, tok_idx, unk_idx, batch_y = batch
 
-            # Forward
-            optimizer.zero_grad()
-            logits = model(model_basis, trace_embeddings, trace_mask=trace_mask)
-            # pool logits
-            logits = model.pool_logits(logits, trace_mask)
-            loss = criterion(logits, batch_y)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            lr_schedule.step()
+                model_basis, trace_embedding, _, _ = prepare_masked_batch(
+                    extractor=model.feature_extractor,
+                    model=model,  # Need model to access the learnable mask token
+                    tensor_net=tensor_net,
+                    tok_idx=tok_idx,
+                    unk_bucket=unk_idx,
+                    device=device,
+                    mask_prob=0.0,
+                )
+                trace_mask = tok_idx == -1
+                trace_mask[:, 0] = False
+                # Expand model basis for batch
+                model_basis = model_basis.repeat(
+                    trace_embedding.shape[0], 1, 1
+                )
 
-            total_loss += loss.item() * len(batch_y)
-            preds = logits.argmax(dim=1)
-            correct += (preds == batch_y).sum().item()
-            total_samples += len(batch_y)
+                # Forward
+                optimizer.zero_grad()
+                logits = model(
+                    model_basis, trace_embedding, trace_mask=trace_mask
+                )
+                # pool logits
+                logits = model.pool_logits(logits, trace_mask)
+                loss = criterion(logits, batch_y)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                lr_schedule.step()
+
+                total_loss += loss.item() * len(batch_y)
+                preds = logits.argmax(dim=1)
+                correct += (preds == batch_y).sum().item()
+                total_samples += len(batch_y)
+            except (RuntimeError, torch.OutOfMemoryError) as e:
+                if not is_cuda_oom(e):
+                    raise  # not an OOM -> real bug
+                skip.add(index)
+                optimizer.zero_grad(set_to_none=True)
+
+                # free cached blocks + python refs
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                gc.collect()
+
+                print("[WARN] CUDA OOM skipping batch")
+                continue
 
         avg_loss = total_loss / total_samples
         accuracy = correct / total_samples
