@@ -17,8 +17,13 @@ DATA_DIR = Path("data")
 class EvaluationReportGenerator:
     """Generate reports from evaluation metrics JSON."""
 
-    def __init__(self, metrics_path: Optional[Path] = None, metrics_dict: Optional[Dict[str, Any]] = None,
-                 baseline_comparison: Optional[Any] = None):
+    def __init__(
+        self,
+        metrics_path: Optional[Path] = None,
+        metrics_dict: Optional[Dict[str, Any]] = None,
+        baseline_comparison: Optional[Any] = None,
+        eval_mode: str = "ood",
+    ):
         """
         Initialize report generator from either JSON file or dict.
 
@@ -28,11 +33,14 @@ class EvaluationReportGenerator:
                 - Dict[str, EvaluationMetrics] (new format with per-dataset + 'overall')
                 - Single EvaluationMetrics dict (legacy format)
             baseline_comparison: Optional pandas DataFrame with baseline comparison data
+            eval_mode: Evaluation mode ("ood" or "iid")
         """
         if metrics_path is None and metrics_dict is None:
             raise ValueError("Either metrics_path or metrics_dict must be provided")
         if metrics_path is not None and metrics_dict is not None:
             raise ValueError("Cannot provide both metrics_path and metrics_dict")
+
+        self.eval_mode = eval_mode
 
         if metrics_path:
             with open(metrics_path) as f:
@@ -79,19 +87,21 @@ class EvaluationReportGenerator:
 
     def _generate_html(self) -> str:
         """Generate complete HTML report."""
+        mode_label = "Out-of-Distribution (OOD)" if self.eval_mode == "ood" else "In-Distribution (i.i.d.)"
+        mode_badge = f'<span class="mode-badge mode-{self.eval_mode}">{mode_label}</span>'
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Evaluation Report</title>
+    <title>Evaluation Report ({self.eval_mode.upper()})</title>
     <style>
         {self._get_css()}
     </style>
 </head>
 <body>
     <nav class="navbar">
-        <h1>Heuristic Recommendation Evaluation Report</h1>
+        <h1>Heuristic Recommendation Evaluation Report {mode_badge}</h1>
         <div class="nav-links">
             <a href="#summary-table">Per-Dataset Performance</a>
             <a href="#per-heuristic">Per-Heuristic Analysis</a>
@@ -142,6 +152,25 @@ class EvaluationReportGenerator:
         .navbar h1 {
             font-size: 1.8rem;
             margin-bottom: 0.5rem;
+        }
+
+        .mode-badge {
+            font-size: 0.7rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 4px;
+            margin-left: 0.8rem;
+            vertical-align: middle;
+            font-weight: 500;
+        }
+
+        .mode-ood {
+            background-color: #e74c3c;
+            color: white;
+        }
+
+        .mode-iid {
+            background-color: #27ae60;
+            color: white;
         }
 
         .nav-links a {
@@ -1328,23 +1357,31 @@ class EvaluationReportGenerator:
             perf_class_alignment = self._get_perf_overhead_class(perf_overhead_alignment) if perf_overhead_alignment is not None else ""
             perf_class_with_pred = self._get_perf_overhead_class(perf_overhead_with_pred) if perf_overhead_with_pred is not None else ""
 
+            # Feature extraction column only for OOD mode
+            fe_cell = f'<td style="text-align: right;">{mean_fe_str}</td>' if self.eval_mode == "ood" else ""
+
             rows.append(f"""
             <tr>
                 <td><strong>{model_name}</strong></td>
                 <td style="text-align: right;"><span class="{perf_class_alignment}">{perf_overhead_alignment_str}</span></td>
                 <td style="text-align: right;"><span class="{perf_class_with_pred}">{perf_overhead_with_pred_str}</span></td>
-                <td style="text-align: right;">{mean_fe_str}</td>
+                {fe_cell}
                 <td style="text-align: right;">{mean_clf_str}</td>
                 <td style="text-align: right;">{mean_alignment_str}</td>
                 <td style="text-align: right;">{mean_total_str}</td>
             </tr>
             """)
 
+        # Feature extraction header only for OOD mode
+        fe_header = '<th style="text-align: right;" title="Mean time for feature extraction">Feature Extraction<br>(ms)</th>' if self.eval_mode == "ood" else ""
+        total_desc = "Feature Extraction + Classification + Alignment" if self.eval_mode == "ood" else "Classification + Alignment"
+
         return f"""
         <p style="margin-bottom: 1rem; color: #666;">
             Performance comparison across all models. All times are in <strong>milliseconds</strong>.
             <br><strong>Overhead vs Optimal:</strong> How much slower (%) compared to always choosing the optimal heuristic (0% is perfect).
-            <br><strong>Total Time:</strong> Feature Extraction + Classification + Alignment Time (complete end-to-end time).
+            <br><strong>Total Time:</strong> {total_desc} (complete end-to-end time).
+            {' <br><em>Note: Feature extraction time not measured in i.i.d. mode (features pre-computed).</em>' if self.eval_mode == "iid" else ""}
         </p>
         <table class="sortable">
             <thead>
@@ -1352,10 +1389,10 @@ class EvaluationReportGenerator:
                     <th>Model</th>
                     <th style="text-align: right;" title="How much slower (%) than optimal - alignment time only">Overhead vs Optimal<br>(Alignment Only)</th>
                     <th style="text-align: right;" title="How much slower (%) than optimal - including prediction overhead">Overhead vs Optimal<br>(With Prediction)</th>
-                    <th style="text-align: right;" title="Mean time for feature extraction">Feature Extraction<br>(ms)</th>
+                    {fe_header}
                     <th style="text-align: right;" title="Mean time for classification">Classification<br>(ms)</th>
                     <th style="text-align: right;" title="Mean alignment execution time">Alignment Time<br>(ms)</th>
-                    <th style="text-align: right;" title="Feature Extraction + Classification + Alignment (end-to-end)">Total Time<br>(ms)</th>
+                    <th style="text-align: right;" title="{total_desc} (end-to-end)">Total Time<br>(ms)</th>
                 </tr>
             </thead>
             <tbody>
