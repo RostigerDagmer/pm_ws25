@@ -10,7 +10,7 @@ This script:
 6. Evaluates on test datasets and compares with baselines
 """
 
-from dataloaders.labels import LabelDataset
+from dataloaders.labels import LabelDataset, TableLabelDataset
 from scripts.create_labels import DF_SCHEMA, format_row
 import torch
 from models.spectral_model import SpectralModel
@@ -45,40 +45,40 @@ OUTPUT_DIR = (
 )
 
 TRAIN_DATASETS = {
-    # 'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
-    # '63a8435a-077d-4ece-97cd-2c76d394d99c': ['BPIC15_2.xes'],
-    # 'ed445cdd-27d5-4d77-a1f7-59fe7360cfbe': ['BPIC15_3.xes'],
-    # '679b11cf-47cd-459e-a6de-9ca614e25985': ['BPIC15_4.xes'],
-    # '3301445f-95e8-4ff0-98a4-901f1f204972': ['BPI%20Challenge%202018.xes'],
-    # '3926db30-f712-4394-aebc-75976070e91f': ['BPI_Challenge_2012.xes'],
-    # '6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd': [
-    #     'Hospital%20Billing%20-%20Event%20Log.xes'
-    # ],
-    # 'd06aff4b-79f0-45e6-8ec8-e19730c248f1': ['BPI_Challenge_2019.xes'],
-    # '3537c19d-6c64-4b1d-815d-915ab0e479da': [
-    #     'BPI_Challenge_2013_open_problems.xes'
-    # ],
-    # 'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
-    # 'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
-    # '500573e6-accc-4b0c-9576-aa5468b10cee': [
-    #     'BPI_Challenge_2013_incidents.xes'
-    # ],
+    'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
+    '63a8435a-077d-4ece-97cd-2c76d394d99c': ['BPIC15_2.xes'],
+    'ed445cdd-27d5-4d77-a1f7-59fe7360cfbe': ['BPIC15_3.xes'],
+    '679b11cf-47cd-459e-a6de-9ca614e25985': ['BPIC15_4.xes'],
+    '3301445f-95e8-4ff0-98a4-901f1f204972': ['BPI%20Challenge%202018.xes'],
+    '3926db30-f712-4394-aebc-75976070e91f': ['BPI_Challenge_2012.xes'],
+    '6af6d5f0-f44c-49be-aac8-8eaa5fe4f6fd': [
+        'Hospital%20Billing%20-%20Event%20Log.xes'
+    ],
+    'd06aff4b-79f0-45e6-8ec8-e19730c248f1': ['BPI_Challenge_2019.xes'],
+    '3537c19d-6c64-4b1d-815d-915ab0e479da': [
+        'BPI_Challenge_2013_open_problems.xes'
+    ],
+    'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
+    'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
+    '500573e6-accc-4b0c-9576-aa5468b10cee': [
+        'BPI_Challenge_2013_incidents.xes'
+    ],
     '91fd1fa8-4df4-4b1a-9a3f-0116c412378f': ['InternationalDeclarations.xes'],
     'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
-    # '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
-    # '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
-    #     'Sepsis%20Cases%20-%20Event%20Log.xes'
-    # ],
+    '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
+    '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
+        'Sepsis%20Cases%20-%20Event%20Log.xes'
+    ],
 }
 
 TEST_DATASETS = {
-    # 'b32c6fe5-f212-4286-9774-58dd53511cf8': ['BPIC15_5.xes'],
-    # '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
+    'b32c6fe5-f212-4286-9774-58dd53511cf8': ['BPIC15_5.xes'],
+    '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
     'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
     '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
-    # 'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
-    #     'BPI_Challenge_2013_closed_problems.xes'
-    # ],
+    'c2c3b154-ab26-4b31-a0e8-8f2350ddac11': [
+        'BPI_Challenge_2013_closed_problems.xes'
+    ],
 }
 
 
@@ -88,28 +88,36 @@ if __name__ == "__main__":
 
     arg_parser = ArgumentParser()
     arg_parser.add_argument(
-        "--use-tables",
-        action="store_true",
-        help="Use existing feature tables to shortcut feature extraction",
+        "--eval-mode",
+        choices=["ood", "iid"],
+        default="ood",
+        help="ood: Out-of-distribution (separate test datasets), "
+        "iid: In-distribution (cached table splits)",
     )
     args = arg_parser.parse_args()
 
     config_path = "configs/default.yaml"
     cache_path = "cache/.runs"
 
-    # Create train RunDatasets
-    logging.info(
-        f"\nCreating {sum(len(f) for f in TRAIN_DATASETS.values())} train RunDatasets..."
-    )
+    eval_mode = args.eval_mode
+    logging.info(f"\nEvaluation mode: {eval_mode.upper()}")
 
-    train_run_datasets = None
-    train_tables, test_tables, eval_tables = None, None, None
-
-    if args.use_tables:
-        train_tables, test_tables, eval_tables = find_existing_tables(
-            Path(cache_path)
+    # Load tables (both modes need train tables for classifier training)
+    if eval_mode == "iid":
+        logging.info("\nLoading cached tables for i.i.d. evaluation...")
+        train_tables, test_tables, eval_tables, runs_tables = (
+            find_existing_tables(Path(cache_path), include_runs=True)
+        )
+        logging.info(
+            f"  Found {len(train_tables)} train, {len(test_tables)} test, "
+            f"{len(runs_tables)} runs tables"
         )
     else:
+        # OOD mode: may need to generate tables from RunDatasets
+        logging.info(
+            f"\nCreating {sum(len(f) for f in TRAIN_DATASETS.values())} "
+            "train RunDatasets..."
+        )
         train_run_datasets = []
         for dataset_uuid, files in TRAIN_DATASETS.items():
             for filename in files:
@@ -149,8 +157,6 @@ if __name__ == "__main__":
             train_tables.append(t_train)
             test_tables.append(t_test)
             eval_tables.append(t_eval)
-
-    # Relying on existing tables can skip single threaded feature extraction
 
     logging.info("\nCreating feature extractor...")
     feature_extractor = CompositeFeatureExtractor(use_cache=True)
@@ -200,32 +206,42 @@ if __name__ == "__main__":
         force_retrain=True,
     )
 
-    logging.info("\nLoading test RunDatasets (using cached alignment runs)...")
-    test_run_datasets = []
-    for dataset_uuid, files in TEST_DATASETS.items():
-        for filename in files:
-            logging.info(f"Loading: {filename}")
-            run_dataset = get_natural_dataset(
-                str(Path("data") / dataset_uuid / filename),
-                config_path,
-                cache_path,
-                seed=SEED,
-                num_workers=16,
-            )
-            test_run_datasets.append(run_dataset)
-
-    test_run_datasets.append(
-        get_synthetic_dataset(
-            Path(cache_path),
-            seed=SEED + 1,
-            num_models=200,
-            num_traces=32,
-            min_depth=2,
-            max_depth=3,
+    # Create test dataset based on evaluation mode
+    if eval_mode == "iid":
+        logging.info("\nCreating i.i.d. test dataset from tables...")
+        test_dataset = TableLabelDataset(
+            test_tables=test_tables,
+            runs_tables=runs_tables,
         )
-    )
+        logging.info(f"  Test samples: {len(test_dataset)}")
+    else:
+        logging.info(
+            "\nLoading OOD test RunDatasets (using cached alignment runs)..."
+        )
+        test_run_datasets = []
+        for dataset_uuid, files in TEST_DATASETS.items():
+            for filename in files:
+                logging.info(f"Loading: {filename}")
+                run_dataset = get_natural_dataset(
+                    str(Path("data") / dataset_uuid / filename),
+                    config_path,
+                    cache_path,
+                    seed=SEED,
+                    num_workers=16,
+                )
+                test_run_datasets.append(run_dataset)
 
-    test_dataset = LabelDataset(test_run_datasets)
+        test_run_datasets.append(
+            get_synthetic_dataset(
+                Path(cache_path),
+                seed=SEED + 1,
+                num_models=200,
+                num_traces=32,
+                min_depth=2,
+                max_depth=3,
+            )
+        )
+        test_dataset = LabelDataset(test_run_datasets)
 
     # Evaluate
     logging.info(f"\nEvaluating on test datasets [{len(test_dataset)}]")
@@ -256,19 +272,23 @@ if __name__ == "__main__":
     logging.info("\nGenerating HTML report...")
 
     # Rename dataset IDs to names for report
+    # Combine all known datasets for name lookup
+    all_datasets = {**TRAIN_DATASETS, **TEST_DATASETS}
     metrics_renamed = {}
     for dataset_id, dataset_metrics in metrics.items():
         if dataset_id == 'overall':
             metrics_renamed['overall'] = dataset_metrics
-        elif dataset_id in TEST_DATASETS:
+        elif dataset_id in all_datasets:
             metrics_renamed[
-                TEST_DATASETS[dataset_id][0].replace('.xes', '')
+                all_datasets[dataset_id][0].replace('.xes', '')
             ] = dataset_metrics
         else:
             metrics_renamed[dataset_id] = dataset_metrics
 
     report_gen = EvaluationReportGenerator(
-        metrics_dict=metrics_renamed, baseline_comparison=comparison_df
+        metrics_dict=metrics_renamed,
+        baseline_comparison=comparison_df,
+        eval_mode=eval_mode,
     )
     report_path = OUTPUT_DIR / "evaluation_report.html"
     report_gen.to_html(report_path)

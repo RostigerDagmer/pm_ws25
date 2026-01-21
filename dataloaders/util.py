@@ -298,23 +298,37 @@ def get_synthetic_dataset(
     )
 
 
+def _load_table_with_dataset_id(table_path: Path) -> pd.DataFrame:
+    """Load CSV and add dataset_id column from filename."""
+    df = pd.read_csv(table_path)
+    # Extract dataset_id from filename (e.g., "91fd1fa8-...-0116c412378f.test.csv")
+    dataset_id = table_path.stem.rsplit(".", 1)[0]  # Remove .test/.train/.runs
+    df["dataset_id"] = dataset_id
+    return df
+
+
 def find_existing_tables(
     root: Path,
+    include_runs: bool = False,
 ):
-    # find files ending in .train.csv / .test.csv and .eval.csv
-    train_tables = []
-    test_tables = []
-    eval_tables = []
-    for table_path in root.glob("**/*.train.csv"):
-        train_tables.append(table_path)
-    for table_path in root.glob("**/*.test.csv"):
-        test_tables.append(table_path)
-    for table_path in root.glob("**/*.eval.csv"):
-        eval_tables.append(table_path)
+    """Load existing CSV tables from cache directory.
 
-    train_tables = [pd.read_csv(table_path) for table_path in train_tables]
-    test_tables = [pd.read_csv(table_path) for table_path in test_tables]
-    eval_tables = [pd.read_csv(table_path) for table_path in eval_tables]
+    Args:
+        root: Cache directory path
+        include_runs: If True, also load .runs.csv files (for all heuristic times)
+    """
+    train_paths = list(root.glob("**/*.train.csv"))
+    test_paths = list(root.glob("**/*.test.csv"))
+    eval_paths = list(root.glob("**/*.eval.csv"))
+
+    train_tables = [_load_table_with_dataset_id(p) for p in train_paths]
+    test_tables = [_load_table_with_dataset_id(p) for p in test_paths]
+    eval_tables = [_load_table_with_dataset_id(p) for p in eval_paths]
+
+    if include_runs:
+        runs_paths = list(root.glob("**/*.runs.csv"))
+        runs_tables = [_load_table_with_dataset_id(p) for p in runs_paths]
+        return train_tables, test_tables, eval_tables, runs_tables
 
     return train_tables, test_tables, eval_tables
 

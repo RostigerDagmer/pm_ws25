@@ -1,10 +1,11 @@
 import json
-import pebble
 import hashlib
+from dataclasses import dataclass
+from pathlib import Path
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from typing import Iterator
-from dataloaders.util import get_natural_dataset
+from typing import Iterator, Optional
 from dataloaders.runs import RunDataset
 from torch.utils.data import Dataset
 
@@ -107,8 +108,113 @@ class LabelDataset(Dataset):
         )
 
 
+@dataclass
+class TableSampleItem:
+    """Lightweight sample for table-based evaluation (no model/trace objects)."""
+
+    dataset_id: str
+    model_id: str
+    combination_id: str
+    feature_vector: np.ndarray
+    algo: str  # best heuristic (label)
+
+
+class TableLabelDataset(Dataset):
+    """Dataset for i.i.d. evaluation using pre-computed CSV tables."""
+
+    def __init__(
+        self,
+        test_tables: list[pd.DataFrame],
+        runs_tables: Optional[list[pd.DataFrame]] = None,
+    ):
+        """
+        Args:
+            test_tables: List of test split DataFrames (.test.csv)
+            runs_tables: List of full runs DataFrames (.runs.csv) for
+                all heuristic timings. If None, only labels are available.
+        """
+        self.test_df = pd.concat(test_tables, ignore_index=True)
+        self._parse_feature_vectors()
+
+        # Build runs lookup for all heuristic times (for performance ratio)
+        self.runs_by_combination: dict[str, pd.DataFrame] = {}
+        if runs_tables:
+            runs_df = pd.concat(runs_tables, ignore_index=True)
+            for comb_id, group in runs_df.groupby("combination_id"):
+                self.runs_by_combination[comb_id] = group
+
+    def _parse_feature_vectors(self):
+        """Parse feature_vector strings to numpy arrays."""
+        def parse_fv(fv_str):
+            if isinstance(fv_str, np.ndarray):
+                return fv_str
+            fv_str = fv_str.replace("[", "").replace("]", "").replace("\n", " ")
+            return np.fromstring(fv_str, sep=" ")
+
+        self.test_df["feature_vector_parsed"] = self.test_df[
+            "feature_vector"
+        ].apply(parse_fv)
+
+    def hash(self) -> str:
+        return hashlib.sha1(
+            str(len(self.test_df)).encode()
+        ).hexdigest()[:16]
+
+    @property
+    def labels(self) -> list[str]:
+        return sorted(self.test_df["aligner"].unique().tolist())
+
+    def __len__(self):
+        return len(self.test_df)
+
+    def __getitem__(self, idx) -> tuple[str, TableSampleItem]:
+        row = self.test_df.iloc[idx]
+        item = TableSampleItem(
+            dataset_id=row["dataset_id"],
+            model_id=row["model_id"],
+            combination_id=row["combination_id"],
+            feature_vector=row["feature_vector_parsed"],
+            algo=row["aligner"],
+        )
+        return item.dataset_id, item
+
+    def iter_by_model(self) -> Iterator[list[tuple[str, TableSampleItem]]]:
+        """Iterate samples grouped by model_id."""
+        for model_id in self.test_df["model_id"].unique():
+            model_rows = self.test_df[self.test_df["model_id"] == model_id]
+            yield [
+                (
+                    row["dataset_id"],
+                    TableSampleItem(
+                        dataset_id=row["dataset_id"],
+                        model_id=row["model_id"],
+                        combination_id=row["combination_id"],
+                        feature_vector=row["feature_vector_parsed"],
+                        algo=row["aligner"],
+                    ),
+                )
+                for _, row in model_rows.iterrows()
+            ]
+
+    def get_combination_times(
+        self, combination_id: str, timeout_value: float = 20.0
+    ) -> dict[str, float]:
+        """Get execution times for all heuristics for a combination."""
+        if combination_id not in self.runs_by_combination:
+            return {}
+        group = self.runs_by_combination[combination_id]
+        return {
+            row["aligner"]: (
+                row["time_total_mean"]
+                if row["time_total_mean"] != float("inf")
+                else timeout_value
+            )
+            for _, row in group.iterrows()
+        }
+
+
 if __name__ == "__main__":
-    from pathlib import Path
+    from dataloaders.util import get_natural_dataset
     from util.rng import RNG
 
     SEED = 1
@@ -116,7 +222,6 @@ if __name__ == "__main__":
 
     TEST_DATASETS = {
         'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
-        # '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
     }
     config_path = "configs/default.yaml"
     cache_path = "cache/.runs"
@@ -133,7 +238,7 @@ if __name__ == "__main__":
             )
             if run_dataset is not None:
                 test_run_datasets.append(run_dataset)
-                print(f"  ✓ Loaded {len(run_dataset)} runs from cache")
+                print(f"  Loaded {len(run_dataset)} runs from cache")
 
     label_dataset = LabelDataset(test_run_datasets)
     print(label_dataset.df.head())
