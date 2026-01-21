@@ -542,10 +542,8 @@ class RunDataset(
         self.n_workers = n_workers
         self.write_batch_size = write_batch_size
         self.timeout = timeout
-        if skip_init:
-            self._tryload()
-        else:
-            self._init_cache_mp()
+        self.skip_init = skip_init
+        self._init_cache_mp()
 
     @property
     def log_uuid(self) -> str:
@@ -726,6 +724,8 @@ class RunDataset(
                             scheduled.total -= 1
                             continue
                         seen_hashes.add(item_id)
+                        if self.skip_init:
+                            continue
                         fut = pool.schedule(
                             RunDataset._process_item,
                             args=(

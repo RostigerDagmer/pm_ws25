@@ -135,6 +135,7 @@ def build_pipeline(cfg: PipelineConfig, skip_init: bool = False) -> RunDataset:
         },
         cached=True,
         num_workers=cfg.discovery.workers or cfg.alignment.workers,
+        skip_checks=skip_init,
     )
 
     if cfg.deduplication:
@@ -298,24 +299,24 @@ def get_synthetic_dataset(
     )
 
 
-def find_existing_tables(
-    root: Path,
-):
+def find_existing_tables(root: Path, selection: Optional[list[str]] = None):
     # find files ending in .train.csv / .test.csv and .eval.csv
     train_tables = []
     test_tables = []
     eval_tables = []
-    for table_path in root.glob("**/*.train.csv"):
-        train_tables.append(table_path)
-    for table_path in root.glob("**/*.test.csv"):
-        test_tables.append(table_path)
-    for table_path in root.glob("**/*.eval.csv"):
-        eval_tables.append(table_path)
 
+    for table_path in root.glob("**/*.train.csv"):
+        if selection is None or table_path.name.split('.')[0] in selection:
+            train_tables.append(table_path)
+    for table_path in root.glob("**/*.test.csv"):
+        if selection is None or table_path.name.split('.')[0] in selection:
+            test_tables.append(table_path)
+    for table_path in root.glob("**/*.eval.csv"):
+        if selection is None or table_path.name.split('.')[0] in selection:
+            eval_tables.append(table_path)
     train_tables = [pd.read_csv(table_path) for table_path in train_tables]
     test_tables = [pd.read_csv(table_path) for table_path in test_tables]
     eval_tables = [pd.read_csv(table_path) for table_path in eval_tables]
-
     return train_tables, test_tables, eval_tables
 
 
