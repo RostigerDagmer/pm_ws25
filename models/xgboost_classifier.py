@@ -19,13 +19,17 @@ class XGBoostClassifier(ClassificationModel):
     """
 
     def _default_hyperparameters(self) -> Dict[str, Any]:
-        """Default XGBoost hyperparameters."""
+        """Default XGBoost hyperparameters (tuned via Optuna)."""
         return {
-            'n_estimators': 100,
-            'max_depth': 6,
-            'learning_rate': 0.1,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
+            'n_estimators': 533,
+            'max_depth': 11,
+            'learning_rate': 0.12569934993361237,
+            'min_child_weight': 6,
+            'subsample': 0.8115774028224416,
+            'colsample_bytree': 0.9729372088216127,
+            'gamma': 0.2749957128855179,
+            'reg_alpha': 0.0023339698190697543,
+            'reg_lambda': 0.011253742096301794,
             'objective': 'multi:softprob',
             'eval_metric': 'mlogloss',
             'random_state': 42,
