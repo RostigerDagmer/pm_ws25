@@ -135,7 +135,7 @@ def build_pipeline(cfg: PipelineConfig, skip_init: bool = False) -> RunDataset:
         },
         cached=True,
         num_workers=cfg.discovery.workers or cfg.alignment.workers,
-        skip_checks=skip_init,
+        skip_init=skip_init,
     )
 
     if cfg.deduplication:
