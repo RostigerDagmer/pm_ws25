@@ -293,7 +293,6 @@ class ClassificationModel(ABC):
             trace_im,
             trace_fm,
             return_as_dict=False,
-            use_cache=False,  # Disable cache to measure actual extraction time
         )
         t_fe_end = time.perf_counter()
         feature_extraction_time = t_fe_end - t_fe_start
@@ -329,46 +328,35 @@ class ClassificationModel(ABC):
             model.fm,
             trace_nets,
             return_as_dict=False,
-            use_cache=False,
         )
         t_fe_end = time.perf_counter()
         feature_extraction_time = t_fe_end - t_fe_start
 
-        predictions = []
-        for feature in features:
-            t_clf_start = time.perf_counter()
-            X = feature.reshape(1, -1)
-            proba = self._predict_proba(X)[0]
-            predicted_class = np.argmax(proba)
-            confidence = proba[predicted_class]
-            predicted_heuristic = self.label_encoder.inverse_transform(
-                [predicted_class]
-            )[0]
-            t_clf_end = time.perf_counter()
-            classification_time = t_clf_end - t_clf_start
-            predictions.append(
-                PredictionResult(
-                    predicted_heuristic=predicted_heuristic,
-                    confidence=float(confidence),
-                    feature_extraction_time=feature_extraction_time
-                    / len(traces),
-                    classification_time=classification_time,
-                )
-            )
+        t_clf_start = time.perf_counter()
+        X = features
+        proba = self._predict_proba(X)
+        predicted_classes = np.argmax(proba, axis=1)
+        confidence = proba[:, predicted_classes]
+        predicted_heuristics = self.label_encoder.inverse_transform(
+            predicted_classes
+        )
+        t_clf_end = time.perf_counter()
+        classification_time = t_clf_end - t_clf_start
 
-        return predictions
+        return [
+            PredictionResult(
+                predicted_heuristic=h,
+                confidence=conf,
+                feature_extraction_time=feature_extraction_time / len(traces),
+                classification_time=classification_time / len(traces),
+            )
+            for h, conf in zip(predicted_heuristics, confidence)
+        ]
 
     def predict_from_features(
         self, feature_vectors: np.ndarray
     ) -> List[PredictionResult]:
-        """Predict heuristics directly from pre-computed feature vectors.
-
-        Args:
-            feature_vectors: Array of shape (n_samples, n_features)
-
-        Returns:
-            List of PredictionResult objects (feature_extraction_time=0.0)
-        """
+        """Predict heuristics directly from pre-computed feature vectors."""
         if not self.is_trained:
             raise RuntimeError("Model not trained. Call _train() first.")
 
@@ -377,19 +365,18 @@ class ClassificationModel(ABC):
         t_end = time.perf_counter()
         classification_time = (t_end - t_start) / len(feature_vectors)
 
-        predictions = []
-        for i in range(len(feature_vectors)):
-            pred_idx = np.argmax(proba[i])
-            predicted_heuristic = self.label_encoder.inverse_transform(
-                [pred_idx]
-            )[0]
-            predictions.append(
-                PredictionResult(
-                    predicted_heuristic=predicted_heuristic,
-                    confidence=float(proba[i][pred_idx]),
-                    feature_extraction_time=0.0,
-                    classification_time=classification_time,
-                )
-            )
+        predicted_classes = np.argmax(proba, axis=1)
+        confidences = proba[np.arange(len(proba)), predicted_classes]
+        predicted_heuristics = self.label_encoder.inverse_transform(
+            predicted_classes
+        )
 
-        return predictions
+        return [
+            PredictionResult(
+                predicted_heuristic=h,
+                confidence=float(conf),
+                feature_extraction_time=0.0,
+                classification_time=classification_time,
+            )
+            for h, conf in zip(predicted_heuristics, confidences)
+        ]

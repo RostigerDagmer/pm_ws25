@@ -18,16 +18,6 @@ class BaseFeatureExtractor(ABC):
     from the same Petri net multiple times.
     """
 
-    def __init__(self, use_cache: bool = True):
-        """
-        Initialize feature extractor.
-
-        Args:
-            use_cache: Whether to cache extracted features
-        """
-        self.use_cache = use_cache
-        self._feature_cache = {} if use_cache else None
-
     @property
     @abstractmethod
     def feature_names(self) -> List[str]:
@@ -39,26 +29,10 @@ class BaseFeatureExtractor(ABC):
         """Internal feature extraction method. Must return a flat dict."""
         pass
 
-    @abstractmethod
-    def _compute_cache_key(self, *args, **kwargs):
-        """
-        Compute cache key from arguments.
-
-        Subclasses must implement this to define how to generate unique
-        cache keys for their specific inputs.
-
-        Returns:
-            Hashable cache key (typically int from id(), or tuple of ids)
-        """
-        raise NotImplementedError(
-            "Subclasses must implement _compute_cache_key"
-        )
-
     def extract(
         self,
         *args,
         return_as_dict: bool = False,
-        use_cache: bool = None,
         **kwargs,
     ) -> Union[np.ndarray, Dict[str, float]]:
         """
@@ -66,21 +40,10 @@ class BaseFeatureExtractor(ABC):
 
         Args:
             return_as_dict: If True, return dict. Otherwise return numpy array.
-            use_cache: Override instance cache setting. If None, uses self.use_cache.
 
         Returns:
             Feature vector as numpy array or dict.
         """
-        should_cache = self.use_cache if use_cache is None else use_cache
-
-        # Check cache if enabled
-        if should_cache:
-            cache_key = self._compute_cache_key(*args, **kwargs)
-            if cache_key is not None and cache_key in self._feature_cache:
-                cached_dict = self._feature_cache[cache_key]
-                if return_as_dict:
-                    return cached_dict
-                return self.dict_to_vector(cached_dict)
 
         # Extract features
         feature_dict = self._extract_features_internal(*args, **kwargs)
@@ -88,12 +51,6 @@ class BaseFeatureExtractor(ABC):
             f"Extracted features do not match expected feature names. "
             f"Expected: {self.feature_names}, but got: {feature_dict.keys()}"
         )
-
-        # Cache if enabled
-        if should_cache:
-            cache_key = self._compute_cache_key(*args, **kwargs)
-            if cache_key is not None:
-                self._feature_cache[cache_key] = feature_dict
 
         if return_as_dict:
             return feature_dict
@@ -103,11 +60,17 @@ class BaseFeatureExtractor(ABC):
         self,
         *args,
         return_as_dict: bool = False,
-        use_cache: bool = None,
         **kwargs,
     ) -> list[Dict[str, float]] | list[np.ndarray]:
-        """Extract features for a batch of traces."""
-        # TODO: caching
+        """
+        Extract features from batch of inputs.
+
+        Args:
+            return_as_dict: If True, return dict. Otherwise return numpy array.
+
+        Returns:
+            Feature vector as numpy array or dict.
+        """
         feats = self._extract_features_batch(*args, **kwargs)
         if return_as_dict:
             return feats

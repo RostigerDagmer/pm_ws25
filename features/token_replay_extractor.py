@@ -22,18 +22,6 @@ class TokenReplayFitnessExtractor(BaseFeatureExtractor):
     - produced_tokens: Number of produced tokens during replay
     """
 
-    def _compute_cache_key(
-        self,
-        petri_net: PetriNet,
-        petri_net_im: Marking,
-        petri_net_fm: Marking,
-        trace_net: PetriNet,
-        trace_net_im: Marking,
-        trace_net_fm: Marking,
-    ):
-        """Use tuple of both net hashes as cache key."""
-        return (hash(petri_net), hash(trace_net))
-
     @property
     def feature_names(self) -> List[str]:
         return [
@@ -87,12 +75,22 @@ class TokenReplayFitnessExtractor(BaseFeatureExtractor):
         result = aligned_traces[0]
 
         return {
-            'token_replay_trace_is_fit': float(result.get('trace_is_fit', False)),
+            'token_replay_trace_is_fit': float(
+                result.get('trace_is_fit', False)
+            ),
             'token_replay_trace_fitness': result.get('trace_fitness', 0.0),
-            'token_replay_missing_tokens': float(result.get('missing_tokens', 0)),
-            'token_replay_consumed_tokens': float(result.get('consumed_tokens', 0)),
-            'token_replay_remaining_tokens': float(result.get('remaining_tokens', 0)),
-            'token_replay_produced_tokens': float(result.get('produced_tokens', 0)),
+            'token_replay_missing_tokens': float(
+                result.get('missing_tokens', 0)
+            ),
+            'token_replay_consumed_tokens': float(
+                result.get('consumed_tokens', 0)
+            ),
+            'token_replay_remaining_tokens': float(
+                result.get('remaining_tokens', 0)
+            ),
+            'token_replay_produced_tokens': float(
+                result.get('produced_tokens', 0)
+            ),
         }
 
     def _trace_net_to_trace(self, trace_net: PetriNet) -> Trace:
@@ -110,7 +108,7 @@ class TokenReplayFitnessExtractor(BaseFeatureExtractor):
         """
         transitions = sorted(
             trace_net.transitions,
-            key=lambda t: int(t.name.split('_')[-1]) if '_' in t.name else 0
+            key=lambda t: int(t.name.split('_')[-1]) if '_' in t.name else 0,
         )
 
         activity_key = xes_util.DEFAULT_NAME_KEY

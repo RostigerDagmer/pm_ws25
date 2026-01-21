@@ -5,7 +5,6 @@ from pathlib import Path
 from dataloaders.runs import AlignerSpec
 from dataloaders.synthetic import SyntheticProcessModelDataset
 from sklearn.preprocessing._label import LabelEncoder
-from features.spectral_extractor import SpectralFeatureExtractor
 from models.base import ClassificationModel, PredictionResult
 from experiments.simulation.structured_net import StructuredNet
 from pm4py.objects.log.obj import Trace
@@ -82,7 +81,7 @@ def prepare_masked_batch(
     d_basis = model.d_model
     d_trace = model.d_trace
 
-    # Define unknown sentinel. Recommended: unknown_id == T_local.
+    # Define unknown sentinel.
     unknown_id = T_local
 
     # -------------------------
@@ -92,7 +91,9 @@ def prepare_masked_batch(
         pre, post, labels, im, fm
     )
     basis = basis.to(device)
-    local_to_vocab = local_to_vocab.to(device)  # [T_local], all >=0 now (includes silent)
+    local_to_vocab = local_to_vocab.to(
+        device
+    )  # [T_local], all >=0 now (includes silent)
     vocab_size = basis.shape[0]
 
     # model_basis: [1, T_vocab, d_basis]
@@ -115,11 +116,13 @@ def prepare_masked_batch(
     clamped_local = tok_idx.clamp(0, max(T_local - 1, 0))
 
     # -------------------------
-    # C) vocab indices for predictable known tokens
+    # C) vocab indices for learnable known tokens
     # -------------------------
     vocab_idx = torch.full((B, S), -1, dtype=torch.long, device=device)
     if known_local_mask.any():
-        mapped = local_to_vocab[clamped_local]  # [B,S], valid for all transitions (incl silent)
+        mapped = local_to_vocab[
+            clamped_local
+        ]  # [B,S], valid for all transitions (incl silent)
         vocab_idx[known_local_mask] = mapped[known_local_mask]
 
     predictable_mask = vocab_idx >= 0
@@ -145,7 +148,9 @@ def prepare_masked_batch(
             (vocab_size, d_trace), device=device, dtype=embedded_log.dtype
         )
         vocab_lookup[:, :d_basis] = model_basis[0]  # [T_vocab, d_basis]
-        embedded_log[predictable_mask] = vocab_lookup[vocab_idx[predictable_mask]]
+        embedded_log[predictable_mask] = vocab_lookup[
+            vocab_idx[predictable_mask]
+        ]
 
     # NOTE:
     # We no longer emit a special "silent token" in the trace, because traces are assumed to
@@ -158,14 +163,19 @@ def prepare_masked_batch(
 
     if model.pretraining and vocab_size > 0 and mask_prob > 0.0:
         rand = torch.rand((B, S), device=device)
-        mask_bool = (rand < mask_prob) & predictable_mask & (~pad_mask) & (~unk_mask)
+        mask_bool = (
+            (rand < mask_prob) & predictable_mask & (~pad_mask) & (~unk_mask)
+        )
 
         final_targets[mask_bool] = vocab_idx[mask_bool]
 
         mask_tok = model.mask_token.to(device).expand(B, S, d_trace)
-        embedded_log = torch.where(mask_bool.unsqueeze(-1), mask_tok, embedded_log)
+        embedded_log = torch.where(
+            mask_bool.unsqueeze(-1), mask_tok, embedded_log
+        )
 
     return model_basis, embedded_log, final_targets, local_to_vocab
+
 
 class MultiHeadAttention(nn.Module):
     """
@@ -201,14 +211,18 @@ class MultiHeadAttention(nn.Module):
         self.dropout = dropout
         self._qkv_same_embed_dim = E_q == E_k and E_q == E_v
         if self._qkv_same_embed_dim:
-            self.packed_proj = nn.Linear(E_q, E_total * 3, bias=bias, **factory_kwargs)
+            self.packed_proj = nn.Linear(
+                E_q, E_total * 3, bias=bias, **factory_kwargs
+            )
         else:
             self.q_proj = nn.Linear(E_q, E_total, bias=bias, **factory_kwargs)
             self.k_proj = nn.Linear(E_k, E_total, bias=bias, **factory_kwargs)
             self.v_proj = nn.Linear(E_v, E_total, bias=bias, **factory_kwargs)
         E_out = E_q
         self.out_proj = nn.Linear(E_total, E_out, bias=bias, **factory_kwargs)
-        assert E_total % nheads == 0, "Embedding dim is not divisible by nheads"
+        assert (
+            E_total % nheads == 0
+        ), "Embedding dim is not divisible by nheads"
         self.E_head = E_total // nheads
         self.bias = bias
         self.pos_enc = pos_enc
@@ -218,7 +232,9 @@ class MultiHeadAttention(nn.Module):
             return q, k
         if isinstance(self.pos_enc, RotaryEmbedding):
             return self.pos_enc.rotate_queries_and_keys(q, k, seq_dim=1)
-        raise ValueError(f"unknown positional encoding type: {type(self.pos_enc)}")
+        raise ValueError(
+            f"unknown positional encoding type: {type(self.pos_enc)}"
+        )
 
     def forward(
         self,
@@ -297,6 +313,7 @@ class MultiHeadAttention(nn.Module):
 
         return attn_output
 
+
 class SpectralModel(nn.Module, ClassificationModel):
     def __init__(
         self,
@@ -330,13 +347,11 @@ class SpectralModel(nn.Module, ClassificationModel):
         self.n_classes = n_classes
         self.n_self_attn = n_self_attn
 
-        # self.positional_encoding = PositionalEncoding(hidden_dim, dropout=dropout)
-        self.positional_encoding = RotaryEmbedding(hidden_dim, use_xpos=True, learned_freq=True)
-        # self.feature_extractor = SpectralFeatureExtractor(
-        #     d_model=d_model, n_coeffs=8
-        # )
+        self.positional_encoding = RotaryEmbedding(
+            hidden_dim, use_xpos=True, learned_freq=True
+        )
         self.feature_extractor = PetriNetGNNEncoder(
-            d_model=d_model, n_layers=8, dropout=0.2
+            d_model=d_model, n_layers=12, dropout=0.2
         )
         self.label_encoder = LabelEncoder()
 
@@ -354,7 +369,7 @@ class SpectralModel(nn.Module, ClassificationModel):
                     E_total=hidden_dim,
                     nheads=num_heads,
                     dropout=dropout,
-                    pos_enc=self.positional_encoding
+                    pos_enc=self.positional_encoding,
                 )
                 for _ in range(n_self_attn)
             ]
@@ -384,8 +399,9 @@ class SpectralModel(nn.Module, ClassificationModel):
                 dim_feedforward=mlp_hidden_dim,
                 dropout=dropout,
                 activation=nn.GELU(),
-                batch_first=True),
-            num_layers=n_layers
+                batch_first=True,
+            ),
+            num_layers=n_layers,
         )
 
         # # MLP Head
@@ -443,27 +459,35 @@ class SpectralModel(nn.Module, ClassificationModel):
     def pool(self, x: torch.Tensor, pad_mask: torch.Tensor) -> torch.Tensor:
         if pad_mask is None:
             return x.mean(dim=1)
-        keep = (~pad_mask).float()                      # 1 where real tokens
+        keep = (~pad_mask).float()  # 1 where real tokens
         denom = keep.sum(dim=1, keepdim=True).clamp_min(1.0)
         return (x * keep.unsqueeze(-1)).sum(dim=1) / denom
-    
-    def pool_logits(self, logits: torch.Tensor, pad_mask: torch.Tensor) -> torch.Tensor:
+
+    def pool_logits(
+        self, logits: torch.Tensor, pad_mask: torch.Tensor
+    ) -> torch.Tensor:
         if pad_mask is not None:
             logits = logits.masked_fill(pad_mask.unsqueeze(-1), float("-inf"))
         pooled = torch.logsumexp(logits, dim=1)  # [B,C]
         return pooled
 
-    def attn_pool(self, x: torch.Tensor, pad_mask: torch.Tensor) -> torch.Tensor:
+    def attn_pool(
+        self, x: torch.Tensor, pad_mask: torch.Tensor
+    ) -> torch.Tensor:
         # x: [B,S,H]
         scores = self.pooler(x).squeeze(-1)  # [B,S]
         if pad_mask is not None:
             scores = scores.masked_fill(pad_mask, float("-inf"))
         w = scores.softmax(dim=1).unsqueeze(-1)  # [B,S,1]
-        return (x * w).sum(dim=1) # [B,H]
+        return (x * w).sum(dim=1)  # [B,H]
 
     def forward(
-        self, model_basis: torch.Tensor, trace_embedding: torch.Tensor, trace_mask: torch.Tensor | None = None, net_mask: torch.Tensor | None = None,
-        attn_pool: bool = False
+        self,
+        model_basis: torch.Tensor,
+        trace_embedding: torch.Tensor,
+        trace_mask: torch.Tensor | None = None,
+        net_mask: torch.Tensor | None = None,
+        attn_pool: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -483,7 +507,9 @@ class SpectralModel(nn.Module, ClassificationModel):
         # 2. Cross Attention
         # Query: Trace, Key/Value: Model
         # attn_output: [B, 1, hidden_dim]
-        for attn_block, mlp_block in zip(self.self_attn_blocks, self.self_mlp_blocks):
+        for attn_block, mlp_block in zip(
+            self.self_attn_blocks, self.self_mlp_blocks
+        ):
             # print(f"q shape: {q.shape}, k_v shape: {k_v.shape}")
             attn_output = attn_block(query=q, key=q, value=q)
             attn_output = self.self_attn_norm(attn_output)
@@ -492,7 +518,12 @@ class SpectralModel(nn.Module, ClassificationModel):
             q = attn_output + q  # skip connection
 
         # 3. Cross Attention
-        q = self.decoder(tgt=q, memory=k_v, tgt_key_padding_mask=trace_mask, memory_mask=net_mask)
+        q = self.decoder(
+            tgt=q,
+            memory=k_v,
+            tgt_key_padding_mask=trace_mask,
+            memory_mask=net_mask,
+        )
 
         if self.pretraining:
             k_v_t = k_v.transpose(1, 2)
@@ -521,9 +552,7 @@ class SpectralModel(nn.Module, ClassificationModel):
     ) -> list[PredictionResult]:
         """Predict best heuristics for a batch of traces for a given model."""
 
-        t_start = time.perf_counter()
-        max_len = max(len(trace) for trace in traces)
-
+        t_fe_start = time.perf_counter()
         if hasattr(model_item, "net"):
             tensor_net = model_item.net.to(device=self.device)
         else:
@@ -539,9 +568,7 @@ class SpectralModel(nn.Module, ClassificationModel):
             unk_buckets=self.num_unk_buckets,
         )
         trace_mask = tok_ids == -1
-        trace_mask[:, 0] = False # unmask at least one position
-
-        t_fe_start = time.perf_counter()
+        trace_mask[:, 0] = False  # unmask at least one position
 
         model_basis, trace_embedding, _, _ = prepare_masked_batch(
             extractor=self.feature_extractor,
@@ -559,15 +586,20 @@ class SpectralModel(nn.Module, ClassificationModel):
         t_clf_start = time.perf_counter()
         try:
             logits = self(
-                model_basis.repeat(trace_embedding.shape[0], 1, 1), trace_embedding, trace_mask=trace_mask
+                model_basis.repeat(trace_embedding.shape[0], 1, 1),
+                trace_embedding,
+                trace_mask=trace_mask,
             )
         except:
-            print(f"Failed to infer for model:\n{tensor_net}\nand traces:\n{traces}")
+            print(
+                f"Failed to infer for model:\n{tensor_net}\nand traces:\n{traces}"
+            )
             return [
                 PredictionResult(
                     predicted_heuristic=self.label_map[0],
                     confidence=float(0.0),
-                    feature_extraction_time=feature_extraction_time / len(traces),
+                    feature_extraction_time=feature_extraction_time
+                    / len(traces),
                     classification_time=0.0,
                 )
                 for _ in range(len(traces))

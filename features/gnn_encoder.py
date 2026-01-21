@@ -110,7 +110,9 @@ class PetriNetGNNEncoder(nn.Module):
         )
 
     @torch.no_grad()
-    def _build_local_to_vocab(self, labels: list[str], device) -> tuple[list[str], torch.Tensor]:
+    def _build_local_to_vocab(
+        self, labels: list[str], device
+    ) -> tuple[list[str], torch.Tensor]:
         """
         Vocab construction:
         - visible transitions: merged by label (first-occurrence order)
@@ -120,7 +122,9 @@ class PetriNetGNNEncoder(nn.Module):
         local_to_vocab: [T] maps every transition -> vocab id (no -1)
         """
         T_local = len(labels)
-        local_to_vocab = torch.empty((T_local,), dtype=torch.long, device=device)
+        local_to_vocab = torch.empty(
+            (T_local,), dtype=torch.long, device=device
+        )
 
         label_to_row: dict[str, int] = {}
         basis_labels: list[str] = []
@@ -265,7 +269,7 @@ class PetriNetGNNEncoder(nn.Module):
 
         # Merge transitions by label (average duplicates)
         # basis[v] = mean_{t: local_to_vocab[t]=v} h_t[t]
-        
+
         basis = torch.zeros((V, self.d_model), device=device, dtype=h_t.dtype)
         counts = torch.zeros((V,), device=device, dtype=h_t.dtype)
 
@@ -304,7 +308,7 @@ if __name__ == "__main__":
         dist_params, max_depth=3, generator=RNG.torch_generator()
     )
 
-    # view_petri_net(stnet.net, stnet.im, stnet.fm, format="svg")
+    view_petri_net(stnet.net, stnet.im, stnet.fm, format="svg")
 
     encoder = PetriNetGNNEncoder(d_model=128, n_layers=8, dropout=0.2)
     t_net = stnet.to_tensor()
