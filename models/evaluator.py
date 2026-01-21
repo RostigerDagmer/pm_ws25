@@ -14,9 +14,10 @@ from tqdm import tqdm
 import logging
 import json
 from collections import defaultdict, Counter
+import time
 
 from models.base import ClassificationModel
-from dataloaders.labels import LabelDataset
+from dataloaders.labels import LabelDataset, TableLabelDataset, TableSampleItem
 
 
 # Default tolerance thresholds for near-optimal heuristics
@@ -367,7 +368,7 @@ class RecommenderEvaluator:
     def __init__(
         self,
         classifier: ClassificationModel,
-        dataset: LabelDataset,
+        dataset: Union[LabelDataset, TableLabelDataset],
         tolerance_thresholds: Optional[List[float]] = None,
     ):
         self.classifier = classifier
@@ -376,55 +377,88 @@ class RecommenderEvaluator:
         )
         self.dataset = dataset
 
-    def evaluate(self, batched: bool = True, print_summary: bool = True) -> Dict[str, EvaluationMetrics]:
+    def evaluate(
+        self, batched: bool = True, print_summary: bool = True
+    ) -> Dict[str, EvaluationMetrics]:
         """
-        Evaluate classifier on run_datasets.
+        Evaluate classifier on dataset.
+
+        Automatically detects dataset type:
+        - TableLabelDataset: i.i.d. mode (pre-computed features)
+        - LabelDataset: OOD mode (feature extraction during prediction)
 
         Returns:
             Dict mapping dataset_id to EvaluationMetrics.
             Includes 'overall' key for combined metrics across all datasets.
         """
-        logging.info("Starting evaluation...")
+        is_table_dataset = isinstance(self.dataset, TableLabelDataset)
+        mode_str = "i.i.d." if is_table_dataset else "OOD"
+        logging.info(f"Starting {mode_str} evaluation...")
 
-        # Collect data per dataset (including 'overall' as special key)
         dataset_data: Dict[str, DatasetEvaluationData] = defaultdict(
             DatasetEvaluationData
         )
 
-        for runs in tqdm(self.dataset.iter_by_model(), desc="Evaluating"):
-            dataset_ids, runs = zip(*runs)
-            model = runs[0].model.deserialize()
-            traces = [run.trace for run in runs]
+        for samples in tqdm(
+            self.dataset.iter_by_model(), desc=f"Evaluating ({mode_str})"
+        ):
+            dataset_ids, items = zip(*samples)
 
-            predictions = []
-            if batched:
-                predictions = self.classifier.predict_batched(model, traces)
+            if is_table_dataset:
+                # i.i.d.: Features already available, classification only
+                feature_vectors = np.array(
+                    [item.feature_vector for item in items]
+                )
+                predictions = self.classifier.predict_from_features(
+                    feature_vectors
+                )
             else:
-                for trace in traces:
-                    prediction = self.classifier.predict_heuristic(model.pm, model.im, model.fm, trace)
-                    predictions.append(prediction)
+                # OOD: Extract features and predict
+                model = items[0].model.deserialize()
+                traces = [item.trace for item in items]
+
+                if batched:
+                    predictions = self.classifier.predict_batched(model, traces)
+                else:
+                    predictions = [
+                        self.classifier.predict_heuristic(
+                            model.pm, model.im, model.fm, trace
+                        )
+                        for trace in traces
+                    ]
 
             # Process each prediction
-            for dataset_id, gt, prediction in zip(dataset_ids, runs, predictions):
+            for dataset_id, item, prediction in zip(
+                dataset_ids, items, predictions
+            ):
                 # Get all heuristic times
-                all_alignments = {
-                    item.algo: item.perf
-                    for item in self.dataset.get_combination_results(
-                        dataset_id, gt.comb_id
+                if is_table_dataset:
+                    durations = self.dataset.get_combination_times(
+                        item.combination_id
                     )
-                }
-
-                durations = {
-                    algo: np.mean([
-                        (p["duration"] if p["duration"] != float('inf') else 20.0)
-                        for p in perf
-                    ])
-                    for algo, perf in all_alignments.items()
-                }
+                    if not durations:
+                        continue
+                else:
+                    all_alignments = {
+                        run.algo: run.perf
+                        for run in self.dataset.get_combination_results(
+                            dataset_id, item.comb_id
+                        )
+                    }
+                    durations = {
+                        algo: np.mean([
+                            p["duration"] if p["duration"] != float('inf')
+                            else 20.0
+                            for p in perf
+                        ])
+                        for algo, perf in all_alignments.items()
+                    }
 
                 best_time = min(durations.values())
                 worst_time = max(durations.values())
-                actual_time = durations[prediction.predicted_heuristic]
+                actual_time = durations.get(
+                    prediction.predicted_heuristic, worst_time
+                )
 
                 # Store in both dataset-specific and overall
                 for key in [dataset_id, 'overall']:
@@ -434,25 +468,35 @@ class RecommenderEvaluator:
                     data.actual_times.append(actual_time)
                     data.optimal_times.append(best_time)
                     data.worst_times.append(worst_time)
-                    data.prediction_times.append(prediction.combined_prediction_time)
-                    data.feature_extraction_times.append(prediction.feature_extraction_time)
-                    data.classification_times.append(prediction.classification_time)
+                    data.prediction_times.append(
+                        prediction.combined_prediction_time
+                    )
+                    data.feature_extraction_times.append(
+                        prediction.feature_extraction_time
+                    )
+                    data.classification_times.append(
+                        prediction.classification_time
+                    )
 
-                    for algo, time in durations.items():
-                        data.heuristic_runs[algo].append(time)
+                    for algo, t in durations.items():
+                        data.heuristic_runs[algo].append(t)
 
         # Build metrics for each dataset
         all_metrics = {}
 
-        logging.info(f"\nEvaluating {len(dataset_data) - 1} datasets individually...")
-        for dataset_id, data in dataset_data.items():  # Includes 'overall'
-            logging.info(f"  Dataset: {dataset_id[:8]} ({len(data.predictions)} samples)")
+        logging.info(
+            f"\nComputing metrics for {len(dataset_data) - 1} datasets..."
+        )
+        for dataset_id, data in dataset_data.items():
+            logging.info(
+                f"  Dataset: {dataset_id[:8]} ({len(data.predictions)} samples)"
+            )
             all_metrics[dataset_id] = self._compute_metrics_from_data(data)
 
         logging.info("Evaluation complete!")
         if print_summary:
             logging.info(f"\n{all_metrics['overall'].summary()}")
-    
+
         return all_metrics
 
     def _compute_metrics_from_data(
