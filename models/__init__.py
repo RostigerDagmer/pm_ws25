@@ -4,6 +4,8 @@ ML models for alignment heuristic recommendation.
 
 from models.base import ClassificationModel, PredictionResult
 from models.xgboost_classifier import XGBoostClassifier
+from models.gradient_boosting_classifier import GradientBoostingClassifier
+from models.random_forest_classifier import RandomForestClassifier
 from models.baselines import SingleBestSolver, RandomClassifier
 from models.evaluator import RecommenderEvaluator, EvaluationMetrics
 from models.evaluation_report import EvaluationReportGenerator
@@ -12,6 +14,8 @@ __all__ = [
     'ClassificationModel',
     'PredictionResult',
     'XGBoostClassifier',
+    'GradientBoostingClassifier',
+    'RandomForestClassifier',
     'SingleBestSolver',
     'RandomClassifier',
     'RecommenderEvaluator',
