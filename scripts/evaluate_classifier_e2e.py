@@ -45,8 +45,8 @@ OUTPUT_DIR = (
 )
 
 TRAIN_DATASETS = {
-    'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
-    '63a8435a-077d-4ece-97cd-2c76d394d99c': ['BPIC15_2.xes'],
+    # 'd9769f3d-0ab0-4fb8-803b-0d1120ffcf54': ['Hospital_log.xes'],
+    # '63a8435a-077d-4ece-97cd-2c76d394d99c': ['BPIC15_2.xes'],
     'ed445cdd-27d5-4d77-a1f7-59fe7360cfbe': ['BPIC15_3.xes'],
     '679b11cf-47cd-459e-a6de-9ca614e25985': ['BPIC15_4.xes'],
     '3301445f-95e8-4ff0-98a4-901f1f204972': ['BPI%20Challenge%202018.xes'],
@@ -72,7 +72,7 @@ TRAIN_DATASETS = {
 }
 
 TEST_DATASETS = {
-    'b32c6fe5-f212-4286-9774-58dd53511cf8': ['BPIC15_5.xes'],
+    # 'b32c6fe5-f212-4286-9774-58dd53511cf8': ['BPIC15_5.xes'],
     '5f3067df-f10b-45da-b98b-86ae4c7a310b': ['BPI%20Challenge%202017.xes'],
     'db35afac-2133-40f3-a565-2dc77a9329a3': ['PermitLog.xes'],
     '6a0a26d2-82d0-4018-b1cd-89afb0e8627f': ['DomesticDeclarations.xes'],
@@ -128,6 +128,7 @@ if __name__ == "__main__":
                     cache_path,
                     seed=SEED,
                     num_workers=16,
+                    skip_init=True,
                 )
                 if run_dataset is not None:
                     train_run_datasets.append(run_dataset)
@@ -159,7 +160,7 @@ if __name__ == "__main__":
             eval_tables.append(t_eval)
 
     logging.info("\nCreating feature extractor...")
-    feature_extractor = CompositeFeatureExtractor(use_cache=True)
+    feature_extractor = CompositeFeatureExtractor()
 
     logging.info("\nTraining XGBoostClassifier...")
     classifier = XGBoostClassifier(
@@ -172,16 +173,15 @@ if __name__ == "__main__":
     has_transformer_model = Path("transformer_model.pth").exists()
 
     if has_transformer_model:
-        device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         transformer_model = SpectralModel(
-            d_model=128,
-            d_trace=128,
-            hidden_dim=256,
-            mlp_hidden_dim=512,
+            d_model=512,
+            d_trace=512,
+            hidden_dim=512,
+            mlp_hidden_dim=1536,
             n_classes=6,
             num_heads=4,
-            n_layers=2,
+            n_layers=6,
             n_self_attn=2,
             dropout=0.1,
             pretraining=False,
@@ -228,6 +228,7 @@ if __name__ == "__main__":
                     cache_path,
                     seed=SEED,
                     num_workers=16,
+                    skip_init=True,
                 )
                 test_run_datasets.append(run_dataset)
 

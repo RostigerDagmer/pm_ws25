@@ -13,14 +13,14 @@ from torch.utils.data import Dataset
 class LabelDataset(Dataset):
 
     def __init__(self, run_datasets: list[RunDataset]):
-        self.run_datasets = {
-            run_ds.log_uuid: run_ds for run_ds in run_datasets
-        }
 
         self.df = pd.DataFrame()
         self.df = pd.concat(
-            [LabelDataset._get_labels(ds) for ds in self.run_datasets.values()]
+            [LabelDataset._get_labels(ds) for ds in run_datasets]
         )
+        self.run_datasets = {
+            run_ds.log_uuid: run_ds for run_ds in run_datasets
+        }
 
     def hash(self) -> str:
         return hashlib.sha1(

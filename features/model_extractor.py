@@ -19,10 +19,6 @@ class ModelFeatureExtractor(BaseFeatureExtractor):
     - Degree statistics per transition/place type
     """
 
-    def _compute_cache_key(self, net: PetriNet, im: Marking, fm: Marking):
-        """Use hash of the Petri net as cache key."""
-        return hash(net)
-
     @property
     def feature_names(self) -> List[str]:
         return [
@@ -111,7 +107,9 @@ class ModelFeatureExtractor(BaseFeatureExtractor):
 
         # AND split out degree statistics
         if and_splits:
-            and_split_out_degs = [G.out_degree(node_ids[t]) for t in and_splits]
+            and_split_out_degs = [
+                G.out_degree(node_ids[t]) for t in and_splits
+            ]
             and_split_avg = np.mean(and_split_out_degs)
             and_split_max = np.max(and_split_out_degs)
             and_split_std = np.std(and_split_out_degs)
@@ -122,7 +120,9 @@ class ModelFeatureExtractor(BaseFeatureExtractor):
 
         # XOR split out degree statistics
         if xor_splits:
-            xor_split_out_degs = [G.out_degree(node_ids[p]) for p in xor_splits]
+            xor_split_out_degs = [
+                G.out_degree(node_ids[p]) for p in xor_splits
+            ]
             xor_split_avg = np.mean(xor_split_out_degs)
             xor_split_max = np.max(xor_split_out_degs)
             xor_split_std = np.std(xor_split_out_degs)
@@ -175,7 +175,9 @@ class ModelFeatureExtractor(BaseFeatureExtractor):
         features['model_place_out_deg_std'] = np.std(place_out_degs)
 
         all_trans_in_degs = [G.in_degree(node_ids[t]) for t in net.transitions]
-        all_trans_out_degs = [G.out_degree(node_ids[t]) for t in net.transitions]
+        all_trans_out_degs = [
+            G.out_degree(node_ids[t]) for t in net.transitions
+        ]
         features['model_tran_in_deg_mean'] = np.mean(all_trans_in_degs)
         features['model_tran_in_deg_std'] = np.std(all_trans_in_degs)
         features['model_tran_out_deg_mean'] = np.mean(all_trans_out_degs)
@@ -190,9 +192,13 @@ class ModelFeatureExtractor(BaseFeatureExtractor):
         n_places = len(net.places)
         n_total_nodes = n_transitions + n_places
 
-        density_arcs_per_transition = n_arcs / n_transitions if n_transitions > 0 else 0.0
+        density_arcs_per_transition = (
+            n_arcs / n_transitions if n_transitions > 0 else 0.0
+        )
         density_arcs_per_place = n_arcs / n_places if n_places > 0 else 0.0
-        density_arcs_per_total = n_arcs / n_total_nodes if n_total_nodes > 0 else 0.0
+        density_arcs_per_total = (
+            n_arcs / n_total_nodes if n_total_nodes > 0 else 0.0
+        )
 
         return {
             'model_density_arcs_per_transition': density_arcs_per_transition,

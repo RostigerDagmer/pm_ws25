@@ -1,9 +1,9 @@
 import pebble
 from util.distributions import deserialize
 from dataclasses import asdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from dataclasses import dataclass
-from typing import Callable, Generator, Optional, Any, Union
+from typing import Callable, Optional, Any, Union
 import torch
 from torch.utils.data import Dataset
 from dataloaders.base import BaseEventLogDataset, _normalize_log_input
@@ -25,7 +25,6 @@ import pickle
 import hashlib
 import json
 import inspect
-import random
 import os
 import pandas as pd
 from tqdm import tqdm
@@ -33,7 +32,6 @@ from enum import Enum
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from collections import defaultdict, Counter
 from dataloaders.serializable import (
     WithSerializedView,
     Serializable,
@@ -46,6 +44,7 @@ from pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.objects.petri_net.importer import importer as pnml_importer
 from pm4py.objects.petri_net.exporter import exporter as pnml_exporter
 import traceback
+import gc
 
 from util.rng import RNG
 from util.distributions import (
@@ -348,6 +347,7 @@ class ProcessModelDataset(
         timeout: float = 300.0,
         write_batch_size: int = 100,
         filter_unsound: bool = True,
+        skip_init: bool = False,
         **kwargs,
     ):
         """
@@ -382,6 +382,7 @@ class ProcessModelDataset(
         self.num_workers = num_workers or os.cpu_count()
         self.timeout = timeout
         self.filter_unsound = filter_unsound
+        self.skip_init = skip_init
         if cached:
             self.cache_dir = (
                 Path(cache_dir)
@@ -485,6 +486,8 @@ class ProcessModelDataset(
                     continue
 
                 seen_hashes.add(key)
+                if self.skip_init:
+                    continue
                 fut = pool.schedule(
                     ProcessModelDataset._process_item,
                     args=(cfg, self.filter_unsound),
@@ -536,7 +539,7 @@ class ProcessModelDataset(
         }
         self.items.update(new_items)
         self.index = list(self.items.keys())
-
+        gc.collect()
         logging.info(
             "Cache population done (%d models).",
             len(self.items),
