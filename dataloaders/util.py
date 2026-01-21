@@ -299,24 +299,44 @@ def get_synthetic_dataset(
     )
 
 
-def find_existing_tables(root: Path, selection: Optional[list[str]] = None):
-    # find files ending in .train.csv / .test.csv and .eval.csv
-    train_tables = []
-    test_tables = []
-    eval_tables = []
+def _load_table_with_dataset_id(table_path: Path) -> pd.DataFrame:
+    """Load CSV and add dataset_id column from filename."""
+    df = pd.read_csv(table_path)
+    dataset_id = table_path.stem.rsplit(".", 1)[0]
+    df["dataset_id"] = dataset_id
+    return df
 
-    for table_path in root.glob("**/*.train.csv"):
-        if selection is None or table_path.name.split('.')[0] in selection:
-            train_tables.append(table_path)
-    for table_path in root.glob("**/*.test.csv"):
-        if selection is None or table_path.name.split('.')[0] in selection:
-            test_tables.append(table_path)
-    for table_path in root.glob("**/*.eval.csv"):
-        if selection is None or table_path.name.split('.')[0] in selection:
-            eval_tables.append(table_path)
-    train_tables = [pd.read_csv(table_path) for table_path in train_tables]
-    test_tables = [pd.read_csv(table_path) for table_path in test_tables]
-    eval_tables = [pd.read_csv(table_path) for table_path in eval_tables]
+
+def find_existing_tables(
+    root: Path,
+    selection: Optional[list[str]] = None,
+    include_runs: bool = False,
+):
+    """Load existing CSV tables from cache directory.
+
+    Args:
+        root: Cache directory path
+        selection: Optional list of dataset IDs to filter by
+        include_runs: If True, also load .runs.csv files
+    """
+    def matches_selection(path: Path) -> bool:
+        if selection is None:
+            return True
+        return path.name.split('.')[0] in selection
+
+    train_paths = [p for p in root.glob("**/*.train.csv") if matches_selection(p)]
+    test_paths = [p for p in root.glob("**/*.test.csv") if matches_selection(p)]
+    eval_paths = [p for p in root.glob("**/*.eval.csv") if matches_selection(p)]
+
+    train_tables = [_load_table_with_dataset_id(p) for p in train_paths]
+    test_tables = [_load_table_with_dataset_id(p) for p in test_paths]
+    eval_tables = [_load_table_with_dataset_id(p) for p in eval_paths]
+
+    if include_runs:
+        runs_paths = [p for p in root.glob("**/*.runs.csv") if matches_selection(p)]
+        runs_tables = [_load_table_with_dataset_id(p) for p in runs_paths]
+        return train_tables, test_tables, eval_tables, runs_tables
+
     return train_tables, test_tables, eval_tables
 
 

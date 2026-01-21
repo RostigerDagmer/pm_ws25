@@ -10,7 +10,7 @@ This script:
 6. Evaluates on test datasets and compares with baselines
 """
 
-from dataloaders.labels import LabelDataset
+from dataloaders.labels import LabelDataset, TableLabelDataset
 from scripts.create_labels import DF_SCHEMA, format_row
 import torch
 from models.spectral_model import SpectralModel
@@ -88,28 +88,36 @@ if __name__ == "__main__":
 
     arg_parser = ArgumentParser()
     arg_parser.add_argument(
-        "--use-tables",
-        action="store_true",
-        help="Use existing feature tables to shortcut feature extraction",
+        "--eval-mode",
+        choices=["ood", "iid"],
+        default="ood",
+        help="ood: Out-of-distribution (separate test datasets), "
+        "iid: In-distribution (cached table splits)",
     )
     args = arg_parser.parse_args()
 
     config_path = "configs/default.yaml"
     cache_path = "cache/.runs"
 
-    # Create train RunDatasets
-    logging.info(
-        f"\nCreating {sum(len(f) for f in TRAIN_DATASETS.values())} train RunDatasets..."
-    )
+    eval_mode = args.eval_mode
+    logging.info(f"\nEvaluation mode: {eval_mode.upper()}")
 
-    train_run_datasets = None
-    train_tables, test_tables, eval_tables = None, None, None
-
-    if args.use_tables:
-        train_tables, test_tables, eval_tables = find_existing_tables(
-            Path(cache_path), list(TRAIN_DATASETS.keys())
+    # Load tables (both modes need train tables for classifier training)
+    if eval_mode == "iid":
+        logging.info("\nLoading cached tables for i.i.d. evaluation...")
+        train_tables, test_tables, eval_tables, runs_tables = (
+            find_existing_tables(Path(cache_path), include_runs=True)
+        )
+        logging.info(
+            f"  Found {len(train_tables)} train, {len(test_tables)} test, "
+            f"{len(runs_tables)} runs tables"
         )
     else:
+        # OOD mode: may need to generate tables from RunDatasets
+        logging.info(
+            f"\nCreating {sum(len(f) for f in TRAIN_DATASETS.values())} "
+            "train RunDatasets..."
+        )
         train_run_datasets = []
         for dataset_uuid, files in TRAIN_DATASETS.items():
             for filename in files:
@@ -150,8 +158,6 @@ if __name__ == "__main__":
             train_tables.append(t_train)
             test_tables.append(t_test)
             eval_tables.append(t_eval)
-
-    # Relying on existing tables can skip single threaded feature extraction
 
     logging.info("\nCreating feature extractor...")
     feature_extractor = CompositeFeatureExtractor()
@@ -200,33 +206,43 @@ if __name__ == "__main__":
         force_retrain=True,
     )
 
-    logging.info("\nLoading test RunDatasets (using cached alignment runs)...")
-    test_run_datasets = []
-    for dataset_uuid, files in TEST_DATASETS.items():
-        for filename in files:
-            logging.info(f"Loading: {filename}")
-            run_dataset = get_natural_dataset(
-                str(Path("data") / dataset_uuid / filename),
-                config_path,
-                cache_path,
-                seed=SEED,
-                num_workers=16,
-                skip_init=True,
-            )
-            test_run_datasets.append(run_dataset)
-
-    test_run_datasets.append(
-        get_synthetic_dataset(
-            Path(cache_path),
-            seed=SEED + 1,
-            num_models=200,
-            num_traces=32,
-            min_depth=2,
-            max_depth=3,
+    # Create test dataset based on evaluation mode
+    if eval_mode == "iid":
+        logging.info("\nCreating i.i.d. test dataset from tables...")
+        test_dataset = TableLabelDataset(
+            test_tables=test_tables,
+            runs_tables=runs_tables,
         )
-    )
+        logging.info(f"  Test samples: {len(test_dataset)}")
+    else:
+        logging.info(
+            "\nLoading OOD test RunDatasets (using cached alignment runs)..."
+        )
+        test_run_datasets = []
+        for dataset_uuid, files in TEST_DATASETS.items():
+            for filename in files:
+                logging.info(f"Loading: {filename}")
+                run_dataset = get_natural_dataset(
+                    str(Path("data") / dataset_uuid / filename),
+                    config_path,
+                    cache_path,
+                    seed=SEED,
+                    num_workers=16,
+                    skip_init=True,
+                )
+                test_run_datasets.append(run_dataset)
 
-    test_dataset = LabelDataset(test_run_datasets)
+        test_run_datasets.append(
+            get_synthetic_dataset(
+                Path(cache_path),
+                seed=SEED + 1,
+                num_models=200,
+                num_traces=32,
+                min_depth=2,
+                max_depth=3,
+            )
+        )
+        test_dataset = LabelDataset(test_run_datasets)
 
     # Evaluate
     logging.info(f"\nEvaluating on test datasets [{len(test_dataset)}]")
@@ -257,19 +273,23 @@ if __name__ == "__main__":
     logging.info("\nGenerating HTML report...")
 
     # Rename dataset IDs to names for report
+    # Combine all known datasets for name lookup
+    all_datasets = {**TRAIN_DATASETS, **TEST_DATASETS}
     metrics_renamed = {}
     for dataset_id, dataset_metrics in metrics.items():
         if dataset_id == 'overall':
             metrics_renamed['overall'] = dataset_metrics
-        elif dataset_id in TEST_DATASETS:
+        elif dataset_id in all_datasets:
             metrics_renamed[
-                TEST_DATASETS[dataset_id][0].replace('.xes', '')
+                all_datasets[dataset_id][0].replace('.xes', '')
             ] = dataset_metrics
         else:
             metrics_renamed[dataset_id] = dataset_metrics
 
     report_gen = EvaluationReportGenerator(
-        metrics_dict=metrics_renamed, baseline_comparison=comparison_df
+        metrics_dict=metrics_renamed,
+        baseline_comparison=comparison_df,
+        eval_mode=eval_mode,
     )
     report_path = OUTPUT_DIR / "evaluation_report.html"
     report_gen.to_html(report_path)

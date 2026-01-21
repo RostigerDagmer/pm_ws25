@@ -352,3 +352,31 @@ class ClassificationModel(ABC):
             )
             for h, conf in zip(predicted_heuristics, confidence)
         ]
+
+    def predict_from_features(
+        self, feature_vectors: np.ndarray
+    ) -> List[PredictionResult]:
+        """Predict heuristics directly from pre-computed feature vectors."""
+        if not self.is_trained:
+            raise RuntimeError("Model not trained. Call _train() first.")
+
+        t_start = time.perf_counter()
+        proba = self._predict_proba(feature_vectors)
+        t_end = time.perf_counter()
+        classification_time = (t_end - t_start) / len(feature_vectors)
+
+        predicted_classes = np.argmax(proba, axis=1)
+        confidences = proba[np.arange(len(proba)), predicted_classes]
+        predicted_heuristics = self.label_encoder.inverse_transform(
+            predicted_classes
+        )
+
+        return [
+            PredictionResult(
+                predicted_heuristic=h,
+                confidence=float(conf),
+                feature_extraction_time=0.0,
+                classification_time=classification_time,
+            )
+            for h, conf in zip(predicted_heuristics, confidences)
+        ]
