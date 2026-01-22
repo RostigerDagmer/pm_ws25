@@ -46,6 +46,11 @@ from pm4py.util import exec_utils
 from pm4py.util.constants import PARAMETER_CONSTANT_ACTIVITY_KEY
 from pm4py.util.xes_constants import DEFAULT_NAME_KEY
 
+# We define a Unit Cost for synchronous moves
+# Standard PM4Py uses 0, but using 1 allows the 'Remaining Trace' heuristic
+# to act as a valid lower bound (h = remaining_steps * 1).
+DEFAULT_UNIT_SYNC_COST = 1
+
 
 class Parameters(Enum):
     PARAM_TRACE_COST_FUNCTION = "trace_cost_function"
@@ -113,26 +118,27 @@ def apply(trace: Trace, petri_net: PetriNet, initial_marking: Marking, final_mar
     trace_net_constr_function = exec_utils.get_param_value(Parameters.TRACE_NET_CONSTR_FUNCTION, parameters, None)
     trace_net_cost_aware_constr_function = exec_utils.get_param_value(Parameters.TRACE_NET_COST_AWARE_CONSTR_FUNCTION,
                                                                       parameters, construct_trace_net_cost_aware)
-
+    # 1. Configure Log Move Costs (Default: 10000)
     if trace_cost_function is None:
         trace_cost_function = list(
             map(lambda e: utils.STD_MODEL_LOG_MOVE_COST, trace)
         )
         parameters[Parameters.PARAM_TRACE_COST_FUNCTION] = trace_cost_function
 
-
-    if model_cost_function is None:
-        # reset variables value
-        model_cost_function = dict()
-        sync_cost_function = dict()
-        for t in petri_net.transitions:
-            if t.label is not None:
-                model_cost_function[t] = utils.STD_MODEL_LOG_MOVE_COST
-                sync_cost_function[t] = utils.STD_SYNC_COST
-            else:
-                model_cost_function[t] = utils.STD_TAU_COST
-        parameters[Parameters.PARAM_MODEL_COST_FUNCTION] = model_cost_function
-        parameters[Parameters.PARAM_SYNC_COST_FUNCTION] = sync_cost_function
+        # 2. Configure Model & Sync Costs
+        if model_cost_function is None:
+            model_cost_function = dict()
+            sync_cost_function = dict()
+            for t in petri_net.transitions:
+                if t.label is not None:
+                    model_cost_function[t] = utils.STD_MODEL_LOG_MOVE_COST
+                    # We enforce a strictly positive cost (1) for synchronous moves
+                    # This ensures min(Sync, Log) > 0, making the heuristic admissible and non-zero
+                    sync_cost_function[t] = DEFAULT_UNIT_SYNC_COST
+                else:
+                    model_cost_function[t] = utils.STD_TAU_COST
+            parameters[Parameters.PARAM_MODEL_COST_FUNCTION] = model_cost_function
+            parameters[Parameters.PARAM_SYNC_COST_FUNCTION] = sync_cost_function
 
 
     if trace_net_constr_function is not None:
@@ -439,20 +445,43 @@ def apply_sync_prod(
         log_costs=log_costs,
     )
 
+
 def _compute_place_remaining_dist(
-    sync_net,
-    trace_len: int,
-    log_costs: Optional[list] = None,
+        sync_net,
+        trace_len: int,
+        log_costs: Optional[list] = None,
+        sync_costs: Optional[dict] = None,
 ) -> Dict[Any, float]:
     """
-    Precompute, for each place in the sync net, the heuristic estimate of the
-    remaining alignment cost (remaining trace events * heuristic_weight).
+    Precomputes the 'Trace Length' heuristic.
+
+    Logic:
+    1. Check provided Log Costs (Default 10000).
+    2. Check provided Sync Costs (Default 0).
+    3. Take min(Log, Sync) as the weight.
+
+    If Sync Cost is 0 (Standard), weight is 0 -> Admissible (Dijkstra).
+    If Sync Cost is 1 (Unit), weight is 1 -> Admissible (Trace Length).
     """
-    # use unit cost 1 if no log costs, otherwise min log cost
-    if log_costs:
-        heuristic_weight = min(log_costs)
-    else:
-        heuristic_weight = 1
+
+    # 1. Determine Minimum Log Cost
+    # If not provided, assume standard high cost (10000)
+    min_log = 10000
+    if log_costs is not None and len(log_costs) > 0:
+        min_log = min(log_costs)
+
+    # 2. Determine Minimum Sync Cost
+    # If not provided, we assume 0 (Standard PM4Py behavior) to be safe/admissible.
+    min_sync = 0
+    if sync_costs is not None and len(sync_costs) > 0:
+        # sync_costs is a dict: {transition: cost}
+        # We find the cheapest sync move available in the entire model.
+        min_sync = min(sync_costs.values())
+
+    # 3. Calculate Admissible Weight
+    # We use the minimum of both
+    # If min_sync is 0, weight becomes 0
+    heuristic_weight = min(min_log, min_sync)
 
     place_to_remaining_dist: Dict[Any, float] = {}
 
@@ -464,8 +493,11 @@ def _compute_place_remaining_dist(
 
     # for each place, compute remaining distance (heuristic)
     for place, idx in place_to_trace_index.items():
-        remaining = max(0, trace_len - idx)
-        dist = remaining * heuristic_weight
+        # How many events are left from this point?
+        remaining_events = max(0, trace_len - idx)
+
+        # Heuristic = (Events Left) * (Cheapest Cost per Event)
+        dist = remaining_events * heuristic_weight
         place_to_remaining_dist[place] = dist
 
     return place_to_remaining_dist
