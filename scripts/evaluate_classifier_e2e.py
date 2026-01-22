@@ -94,6 +94,11 @@ if __name__ == "__main__":
         help="ood: Out-of-distribution (separate test datasets), "
         "iid: In-distribution (cached table splits)",
     )
+    arg_parser.add_argument(
+        "--train-tables",
+        action="store_true",
+        help="use csv's to fit the model",
+    )
     args = arg_parser.parse_args()
 
     config_path = "configs/default.yaml"
@@ -103,10 +108,14 @@ if __name__ == "__main__":
     logging.info(f"\nEvaluation mode: {eval_mode.upper()}")
 
     # Load tables (both modes need train tables for classifier training)
-    if eval_mode == "iid":
+    if eval_mode == "iid" or args.train_tables:
         logging.info("\nLoading cached tables for i.i.d. evaluation...")
         train_tables, test_tables, eval_tables, runs_tables = (
-            find_existing_tables(Path(cache_path), include_runs=True)
+            find_existing_tables(
+                Path(cache_path),
+                selection=list(TRAIN_DATASETS.keys()) + ["synthetic"],
+                include_runs=True,
+            )
         )
         logging.info(
             f"  Found {len(train_tables)} train, {len(test_tables)} test, "
@@ -172,7 +181,7 @@ if __name__ == "__main__":
 
     has_transformer_model = Path("transformer_model.pth").exists()
 
-    if has_transformer_model:
+    if has_transformer_model and not eval_mode == "iid":
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         transformer_model = SpectralModel(
             d_model=512,
@@ -187,7 +196,9 @@ if __name__ == "__main__":
             pretraining=False,
         ).to(device)
 
-        transformer_model.load_state_dict(torch.load("transformer_model.pth"))
+        transformer_model.load_state_dict(
+            torch.load("transformer_model_fixed_1.pth")
+        )
         transformer_model.eval()
 
     # Train baselines
@@ -256,7 +267,11 @@ if __name__ == "__main__":
     logging.info("\nComparing with baselines...")
     comparison_df = evaluator.compare_with_baselines(
         [single_best, random_clf]
-        + ([transformer_model] if has_transformer_model else []),
+        + (
+            [transformer_model]
+            if has_transformer_model and not eval_mode == "iid"
+            else []
+        ),
         main_result=metrics,
     )
     logging.info("\n" + comparison_df.to_string())
