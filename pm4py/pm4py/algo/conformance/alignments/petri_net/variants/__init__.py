@@ -28,5 +28,4 @@ from pm4py.algo.conformance.alignments.petri_net.variants import (
     incremental_a_star,
     remaining_trace,
     required_model_move,
-    required_activities,
 )
