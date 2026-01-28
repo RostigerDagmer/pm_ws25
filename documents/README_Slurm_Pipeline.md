@@ -8,7 +8,7 @@ This pipeline generates training data from real and synthetic sources, then trai
 
 | Script | Purpose | Partition | CPUs | Memory | Runs | Expected Runtime |
 |--------|---------|-----------|------|--------|------|------------------|
-| **run_create_labels_parallel.slurm** | Real data (21 XES datasets) | cm4_inter | 224<br>(7 datasets × 32 CPUs per batch) | 480GB | 5 | **~6.6 hours** |
+| **run_create_labels_parallel.slurm** | Real data (21 XES datasets) | cm4_inter | 224<br>(7 datasets × 32 CPUs, dynamic queue) | 480GB | 5 | **~24-35 hours** (3-5 jobs) |
 | **run_create_labels_synthetic.slurm** | Synthetic data | cm4_inter | 96 | 256GB | 10 | **30-40 min** |
 | **run_evaluate_classifier.slurm** | Train & test classifier | serial_std | 32 | 128GB | - | **5 min** |
 
@@ -50,12 +50,12 @@ cat outputs/evaluate_classifier/summary.txt
 
 **Configuration:**
 - **Single Slurm job** with **224 CPUs** total (cm4_inter partition)
-- **21 datasets processed in 3 sequential batches** (32 CPUs each, 7+7+7 per batch)
-- **Uses /tmp (1.5TB) for temporary cache** to avoid home directory quota limits
+- **21 datasets processed with dynamic queue** (32 CPUs each, max 7 parallel)
+- **Uses scratch storage** for cache - files persist even if job times out
 - **480GB RAM** total
 - **5 alignment runs** per model-trace pair (`--runs 5`)
 - **5 alignment algorithms** tested
-- **3 batches** to process all 21 datasets (batch size = 7)
+- **Dynamic queue**: when a dataset finishes, next one starts immediately
 
 **Submit:**
 ```bash
@@ -218,11 +218,11 @@ pm_ws25/
 
 ### Resource Usage:
 
-**Real Data Processing (bash background jobs approach):**
+**Real Data Processing (dynamic queue approach):**
 - Needs: **1 Slurm job** with **224 CPUs** (cm4_inter)
-- Runs: 21 datasets in **3 sequential batches** (32 CPUs each, batches of 7+7+7)
-- Processes 7 datasets at a time per batch
-- Uses /tmp (1.5TB) for cache to avoid disk quota limits
+- Runs: 21 datasets with **dynamic queue** (32 CPUs each, max 7 parallel)
+- When a dataset finishes, next one starts immediately
+- Uses **scratch storage** for cache - files persist even if job times out
 - Fits in cm4_inter: ✅ (uses ~24% of partition CPUs)
 - **Workaround for MaxSubmit=2 limit** ✅
 
@@ -242,12 +242,13 @@ All scripts use intelligent caching to avoid recomputing alignments:
 - **First run:** Requires `--force-recompute` flag (uncomment in script) to generate alignment data from scratch
 - **Subsequent runs:** Reuses cached alignment results unless you uncomment `--force-recompute` to regenerate everything
 
-### Disk Quota Optimization
+### Scratch Storage for Persistence
 
-**run_create_labels_parallel.slurm** uses a smart caching strategy:
-- **During execution:** Writes all cache directories to `/tmp` (1.5TB available, no quota limits)
-- **After completion:** Automatically moves cache back to `~/pm_ws25/cache/` (`.runs`, `.cache_unique_models`, `.cache_process_models`)
-- **Benefit:** Avoids home directory disk quota issues during large parallel writes
+**run_create_labels_parallel.slurm** uses scratch storage for cache:
+- **Location:** `/dss/lxclscratch/0B/re34waq2/re34waq2/pm_ws25_scratch_cache/`
+- **Symlinks:** `cache/.runs`, `cache/.cache_unique_models`, `cache/.cache_process_models` → scratch
+- **Persistence:** Files persist even if job times out (unlike /tmp which is wiped)
+- **Benefit:** Avoids home directory disk quota issues and protects against data loss
 
 To regenerate data (e.g., after changing parameters), uncomment the `--force-recompute` line in the respective Slurm script.
 
