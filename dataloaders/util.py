@@ -206,7 +206,9 @@ def get_synthetic_dataset(
             (
                 {  # and dominant
                     "dist_params": {
-                        "op": CategoricalSpec([0.1, 0.6, 0.2, 0.1]),
+                        "op": CategoricalSpec(
+                            [0.1, 0.6, 0.2, 0.1]
+                        ),  # XOR, AND, LOOP, SEQ
                         "seq_len": PoissonSpec(4),
                         "p_stop": BernoulliDepthLinearSpec(
                             base=0.2, slope=0.1
@@ -319,22 +321,42 @@ def find_existing_tables(
         selection: Optional list of dataset IDs to filter by
         include_runs: If True, also load .runs.csv files
     """
+
+    def _uuid(path: Path) -> str:
+        return path.name.split('.')[0]
+
     def matches_selection(path: Path) -> bool:
         if selection is None:
             return True
-        return path.name.split('.')[0] in selection
+        return _uuid(path) in selection
 
-    train_paths = [p for p in root.glob("**/*.train.csv") if matches_selection(p)]
-    test_paths = [p for p in root.glob("**/*.test.csv") if matches_selection(p)]
-    eval_paths = [p for p in root.glob("**/*.eval.csv") if matches_selection(p)]
+    train_paths = [
+        p for p in root.glob("**/*.train.csv") if matches_selection(p)
+    ]
+    test_paths = [
+        p for p in root.glob("**/*.test.csv") if matches_selection(p)
+    ]
+    eval_paths = [
+        p for p in root.glob("**/*.eval.csv") if matches_selection(p)
+    ]
 
-    train_tables = [_load_table_with_dataset_id(p) for p in train_paths]
-    test_tables = [_load_table_with_dataset_id(p) for p in test_paths]
-    eval_tables = [_load_table_with_dataset_id(p) for p in eval_paths]
+    train_tables = {
+        _uuid(p): _load_table_with_dataset_id(p) for p in train_paths
+    }
+    test_tables = {
+        _uuid(p): _load_table_with_dataset_id(p) for p in test_paths
+    }
+    eval_tables = {
+        _uuid(p): _load_table_with_dataset_id(p) for p in eval_paths
+    }
 
     if include_runs:
-        runs_paths = [p for p in root.glob("**/*.runs.csv") if matches_selection(p)]
-        runs_tables = [_load_table_with_dataset_id(p) for p in runs_paths]
+        runs_paths = [
+            p for p in root.glob("**/*.runs.csv") if matches_selection(p)
+        ]
+        runs_tables = {
+            _uuid(p): _load_table_with_dataset_id(p) for p in runs_paths
+        }
         return train_tables, test_tables, eval_tables, runs_tables
 
     return train_tables, test_tables, eval_tables

@@ -48,8 +48,8 @@ def traces_to_tensors(
 
 def prepare_masked_batch(
     extractor,
-    model,  # SpectralModel
-    tensor_net,  # TensorNet
+    model,
+    tensor_net: TensorNet,
     tok_idx: torch.Tensor,  # [B,S] values: -1 pad, 0..T-1 transition-id, T unknown sentinel (or L unknown; see below)
     unk_bucket: torch.Tensor,  # [B,S] values: -1 for non-unk, else 0..K-1
     device: torch.device,
@@ -314,7 +314,7 @@ class MultiHeadAttention(nn.Module):
         return attn_output
 
 
-class SpectralModel(nn.Module, ClassificationModel):
+class GNNTransformer(nn.Module, ClassificationModel):
     def __init__(
         self,
         d_model: int,
@@ -325,6 +325,7 @@ class SpectralModel(nn.Module, ClassificationModel):
         num_heads: int = 1,
         n_layers: int = 1,
         n_self_attn: int = 1,
+        n_gnn_layers: int = 12,
         dropout: float = 0.1,
         pretraining: bool = False,
         num_unk_buckets: int = 32,
@@ -351,7 +352,7 @@ class SpectralModel(nn.Module, ClassificationModel):
             hidden_dim, use_xpos=True, learned_freq=True
         )
         self.feature_extractor = PetriNetGNNEncoder(
-            d_model=d_model, n_layers=12, dropout=0.2
+            d_model=d_model, n_layers=n_gnn_layers, dropout=0.2
         )
         self.label_encoder = LabelEncoder()
 
@@ -561,24 +562,36 @@ class SpectralModel(nn.Module, ClassificationModel):
                 "sample", model_item.pm, model_item.im, model_item.fm
             ).to_tensor(device=self.device)
 
-        tok_ids, unk_ids = traces_to_tensors(
-            traces,
-            tensor_net.labels,
-            device=self.device,
-            unk_buckets=self.num_unk_buckets,
-        )
-        trace_mask = tok_ids == -1
-        trace_mask[:, 0] = False  # unmask at least one position
+        try:
+            tok_ids, unk_ids = traces_to_tensors(
+                traces,
+                tensor_net.labels,
+                device=self.device,
+                unk_buckets=self.num_unk_buckets,
+            )
+            trace_mask = tok_ids == -1
+            trace_mask[:, 0] = False  # unmask at least one position
 
-        model_basis, trace_embedding, _, _ = prepare_masked_batch(
-            extractor=self.feature_extractor,
-            model=self,
-            tensor_net=tensor_net,
-            tok_idx=tok_ids,
-            unk_bucket=unk_ids,
-            device=self.device,
-            mask_prob=0.0,
-        )
+            model_basis, trace_embedding, _, _ = prepare_masked_batch(
+                extractor=self.feature_extractor,
+                model=self,
+                tensor_net=tensor_net,
+                tok_idx=tok_ids,
+                unk_bucket=unk_ids,
+                device=self.device,
+                mask_prob=0.0,
+            )
+
+        except:
+            return [
+                PredictionResult(
+                    predicted_heuristic=self.label_map[0],
+                    confidence=float(0.0),
+                    feature_extraction_time=0.0 / len(traces),
+                    classification_time=0.0,
+                )
+                for _ in range(len(traces))
+            ]
 
         t_fe_end = time.perf_counter()
         feature_extraction_time = t_fe_end - t_fe_start
@@ -590,7 +603,8 @@ class SpectralModel(nn.Module, ClassificationModel):
                 trace_embedding,
                 trace_mask=trace_mask,
             )
-        except:
+        except Exception as e:
+            print(f"E: {e}")
             print(
                 f"Failed to infer for model:\n{tensor_net}\nand traces:\n{traces}"
             )
@@ -676,7 +690,7 @@ if __name__ == "__main__":
         n_workers=20,
     )
 
-    model = SpectralModel(
+    model = GNNTransformer(
         d_model=64,
         d_trace=64,
         hidden_dim=64,

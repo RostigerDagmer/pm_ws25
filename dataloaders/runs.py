@@ -15,7 +15,7 @@ import pickle
 import time
 import torch
 from torch.utils.data import Dataset
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union, Callable
 import os
 import hashlib
 import json
@@ -774,23 +774,7 @@ class RunDataset(
                 RunDataset._flush_batch(f, batch)
                 written.update(len(batch))
         # finalize
-        self.items = {
-            k: v for k, v in self.items.items() if k not in irrelevant
-        }
-        self.combinations = {
-            k: [v for v in vals if v not in irrelevant]
-            for k, vals in self.combinations.items()
-        }
-        self.combinations = {
-            k: v for k, v in self.combinations.items() if v
-        }  # filter empty
-        self.models = {
-            k: [v for v in vals if v not in irrelevant]
-            for k, vals in self.models.items()
-        }
-        self.models = {
-            k: v for k, v in self.models.items() if v
-        }  # filter empty
+        self.filter_items(lambda k: k not in irrelevant)
         self.items.update(new_items)
         self.combinations.update(new_combinations)
         self.models.update(new_models)
@@ -873,6 +857,26 @@ class RunDataset(
             items = [self.serialized[item_id] for item_id in item_ids]
             model = items[0].model
             yield (model, items)
+
+    def filter_items(self, fn: Callable[[str], bool]) -> None:
+        """Filter items by fn from item_id -> bool"""
+
+        self.items = {k: v for k, v in self.items.items() if fn(k)}
+        self.combinations = {
+            k: [v for v in vals if fn(v)]
+            for k, vals in self.combinations.items()
+        }
+        self.combinations = {
+            k: v for k, v in self.combinations.items() if v
+        }  # filter empty
+        self.models = {
+            k: [v for v in vals if fn(v)] for k, vals in self.models.items()
+        }
+        self.models = {
+            k: v for k, v in self.models.items() if v
+        }  # filter empty
+        self.index = list(self.items.keys())
+        gc.collect()
 
 
 def get_stats(stats: list[PerfCounter]) -> dict[str, float]:

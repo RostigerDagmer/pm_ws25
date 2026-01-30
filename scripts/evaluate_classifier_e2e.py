@@ -13,11 +13,12 @@ This script:
 from dataloaders.labels import LabelDataset, TableLabelDataset
 from scripts.create_labels import DF_SCHEMA, format_row
 import torch
-from models.spectral_model import SpectralModel
+from models.gnn_transformer_model import GNNTransformer
 from argparse import ArgumentParser
 from util.rng import RNG
 import logging
 import webbrowser
+import json
 from pathlib import Path
 
 from features import CompositeFeatureExtractor
@@ -58,7 +59,7 @@ TRAIN_DATASETS = {
     '3537c19d-6c64-4b1d-815d-915ab0e479da': [
         'BPI_Challenge_2013_open_problems.xes'
     ],
-    'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
+    # 'a0addfda-2044-4541-a450-fdcc9fe16d17': ['BPIC15_1.xes'],
     'a6f651a7-5ce0-4bc6-8be1-a7747effa1cc': ['RequestForPayment.xes'],
     '500573e6-accc-4b0c-9576-aa5468b10cee': [
         'BPI_Challenge_2013_incidents.xes'
@@ -105,11 +106,11 @@ if __name__ == "__main__":
     cache_path = "cache/.runs"
 
     eval_mode = args.eval_mode
-    logging.info(f"\nEvaluation mode: {eval_mode.upper()}")
+    logging.info(f"Evaluation mode: {eval_mode.upper()}")
 
     # Load tables (both modes need train tables for classifier training)
     if eval_mode == "iid" or args.train_tables:
-        logging.info("\nLoading cached tables for i.i.d. evaluation...")
+        logging.info("Loading train tables...")
         train_tables, test_tables, eval_tables, runs_tables = (
             find_existing_tables(
                 Path(cache_path),
@@ -118,19 +119,19 @@ if __name__ == "__main__":
             )
         )
         logging.info(
-            f"  Found {len(train_tables)} train, {len(test_tables)} test, "
+            f"Found {len(train_tables)} train, {len(test_tables)} test, "
             f"{len(runs_tables)} runs tables"
         )
     else:
         # OOD mode: may need to generate tables from RunDatasets
         logging.info(
-            f"\nCreating {sum(len(f) for f in TRAIN_DATASETS.values())} "
+            f"Creating {sum(len(f) for f in TRAIN_DATASETS.values()) + 1} "
             "train RunDatasets..."
         )
         train_run_datasets = []
         for dataset_uuid, files in TRAIN_DATASETS.items():
             for filename in files:
-                print(f"Loading: {filename}")
+                logging.info(f"Loading: {filename}")
                 run_dataset = get_natural_dataset(
                     str(Path("data") / dataset_uuid / filename),
                     config_path,
@@ -173,7 +174,7 @@ if __name__ == "__main__":
 
     logging.info("\nTraining XGBoostClassifier...")
     classifier = XGBoostClassifier(
-        tables=train_tables,
+        tables=train_tables.values(),
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
@@ -181,37 +182,40 @@ if __name__ == "__main__":
 
     has_transformer_model = Path("transformer_model.pth").exists()
 
-    if has_transformer_model and not eval_mode == "iid":
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        transformer_model = SpectralModel(
-            d_model=512,
-            d_trace=512,
-            hidden_dim=512,
-            mlp_hidden_dim=1536,
+    if has_transformer_model:
+        device = torch.device(
+            "cuda:0"
+            if torch.cuda.is_available()
+            else "mps" if torch.backends.mps.is_available() else "cpu"
+        )
+        transformer_model = GNNTransformer(
+            d_model=768,
+            d_trace=768,
+            hidden_dim=768,
+            mlp_hidden_dim=768 * 2,
             n_classes=6,
-            num_heads=4,
-            n_layers=6,
+            num_heads=6,
+            n_layers=4,
+            n_gnn_layers=10,
             n_self_attn=2,
             dropout=0.1,
             pretraining=False,
         ).to(device)
 
-        transformer_model.load_state_dict(
-            torch.load("transformer_model_fixed_1.pth")
-        )
+        transformer_model.load_state_dict(torch.load("transformer_model.pth"))
         transformer_model.eval()
 
     # Train baselines
-    logging.info("\nTraining baseline classifiers...")
+    logging.info("Training baseline classifiers...")
     single_best = SingleBestSolver(
-        tables=train_tables,
+        tables=train_tables.values(),
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
     )
 
     random_clf = RandomClassifier(
-        tables=train_tables,
+        tables=train_tables.values(),
         feature_extractor=feature_extractor,
         cache_dir=Path("cache") / "models",
         force_retrain=True,
@@ -219,16 +223,55 @@ if __name__ == "__main__":
 
     # Create test dataset based on evaluation mode
     if eval_mode == "iid":
-        logging.info("\nCreating i.i.d. test dataset from tables...")
-        test_dataset = TableLabelDataset(
-            test_tables=test_tables,
-            runs_tables=runs_tables,
+        logging.info("Constructing i.i.d. test dataset")
+        test_run_datasets = []
+        for dataset_uuid, files in TRAIN_DATASETS.items():
+            for filename in files:
+                logging.info(f"Loading: {filename}")
+                run_dataset = get_natural_dataset(
+                    str(Path("data") / dataset_uuid / filename),
+                    config_path,
+                    cache_path,
+                    seed=SEED,
+                    num_workers=16,
+                    skip_init=True,
+                )
+                run_tab = runs_tables[dataset_uuid]
+                test_tab = test_tables[dataset_uuid]
+                test_instances = set(
+                    run_tab[
+                        run_tab["combination_id"].isin(
+                            test_tab["combination_id"]
+                        )
+                    ]["item_id"]
+                )
+                filter_fn = lambda k: k in test_instances
+                run_dataset.filter_items(fn=filter_fn)
+                test_run_datasets.append(run_dataset)
+
+        test_synth = get_synthetic_dataset(
+            Path(cache_path),
+            seed=SEED,
+            num_models=200,
+            num_traces=32,
+            min_depth=2,
+            max_depth=3,
         )
-        logging.info(f"  Test samples: {len(test_dataset)}")
+        run_tab = runs_tables["synthetic"]
+        test_tab = test_tables["synthetic"]
+        test_instances = set(
+            run_tab[
+                run_tab["combination_id"].isin(test_tab["combination_id"])
+            ]["item_id"]
+        )
+        filter_fn = lambda k: k in test_instances
+        test_synth.filter_items(fn=filter_fn)
+        test_run_datasets.append(test_synth)
+
+        test_dataset = LabelDataset(test_run_datasets)
+
     else:
-        logging.info(
-            "\nLoading OOD test RunDatasets (using cached alignment runs)..."
-        )
+        logging.info("Constructing o.o.d. test dataset")
         test_run_datasets = []
         for dataset_uuid, files in TEST_DATASETS.items():
             for filename in files:
@@ -258,23 +301,25 @@ if __name__ == "__main__":
     # Evaluate
     logging.info(f"\nEvaluating on test datasets [{len(test_dataset)}]")
     evaluator = RecommenderEvaluator(
-        classifier=classifier, dataset=test_dataset
+        classifier=classifier, dataset=test_dataset, mode_tag=eval_mode
     )
 
     metrics = evaluator.evaluate(batched=True)
 
     # Compare with baselines
     logging.info("\nComparing with baselines...")
-    comparison_df = evaluator.compare_with_baselines(
+    comparison_df, full_comparison = evaluator.compare_with_baselines(
         [single_best, random_clf]
-        + (
-            [transformer_model]
-            if has_transformer_model and not eval_mode == "iid"
-            else []
-        ),
+        + ([transformer_model] if has_transformer_model else []),
         main_result=metrics,
     )
     logging.info("\n" + comparison_df.to_string())
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    json.dump(
+        full_comparison,
+        open(OUTPUT_DIR / "full.json", mode="w"),
+        default=RecommenderEvaluator._convert_to_serializable,
+    )
 
     RecommenderEvaluator.save_results(
         metrics=metrics["overall"],

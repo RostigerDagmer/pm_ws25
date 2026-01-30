@@ -8,25 +8,32 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import random
+import pickle
+import pandas as pd
 from dataclasses import dataclass
 from tqdm import tqdm
 from dataloaders.labels import LabelDataset
 from dataloaders.util import (
     get_natural_dataset,
     get_synthetic_dataset,
+    find_existing_tables,
 )
-from models.spectral_model import (
-    SpectralModel,
+from models.gnn_transformer_model import (
+    GNNTransformer,
     traces_to_tensors,
     prepare_masked_batch,
 )
-from experiments.model.train_spectral_model_representations import is_cuda_oom
 from util.rng import RNG
 
 # Configuration
 LOGGING_LEVEL = logging.INFO
 SEED = 1
-EPOCHS = 150
+EPOCHS = 40
+
+
+def is_cuda_oom(e: BaseException) -> bool:
+    msg = str(e).lower()
+    return ("out of memory" in msg) or ("cuda error: out of memory" in msg)
 
 
 @torch.no_grad()
@@ -50,6 +57,10 @@ def evaluate(model, batches, criterion, device):
                 mask_prob=0.0,
             )
             trace_mask = tok_idx == -1
+            if tok_idx.shape[-1] <= 0:
+                logging.warning("empty trace in test batch. skipping.")
+                continue
+
             trace_mask[:, 0] = False
             # Expand model basis for batch
             model_basis = model_basis.repeat(trace_embedding.shape[0], 1, 1)
@@ -303,12 +314,17 @@ def rebalance_label_distribution(
 @torch.no_grad()
 def get_batches(
     label_dataset: LabelDataset,
-    model: SpectralModel,
+    train_tables: dict[str, pd.DataFrame],
+    test_tables: dict[str, pd.DataFrame],
+    val_tables: dict[str, pd.DataFrame],
+    model: GNNTransformer,
     device: str,
 ):
-    all_batches = []
+    train_batches, test_batches, val_batches = [], [], []
     for batch in label_dataset.iter_by_model():
+        dataset_id = batch[0][0]
         pmodel = batch[0][1].model.deserialize()
+
         if hasattr(pmodel, "net"):  # synthetic item type
             stnet = pmodel.net
         else:
@@ -317,26 +333,76 @@ def get_batches(
             )
         tensor_net = stnet.to_tensor(device)
         items = [e for ds_id, e in batch]
-        tok_idx, unk_idx = traces_to_tensors(
-            [item.trace for item in items],
-            tensor_net.labels,
-            model.device,
-            model.num_unk_buckets,
-        )
 
         labels = [item.algo for item in items]
+        train, test, val = [], [], []
 
-        batch_y = torch.tensor(
-            [model.inv_label_map[l] for l in labels],
-            dtype=torch.long,
-            device=model.device,
-        )
+        for i, (ds_id, e) in enumerate(batch):
+            if e.item_id in train_tables[ds_id]["item_id"].values:
+                train.append(i)
+            elif e.item_id in test_tables[ds_id]["item_id"].values:
+                test.append(i)
+            elif e.item_id in val_tables[ds_id]["item_id"].values:
+                val.append(i)
+            else:
+                logging.warn(
+                    f"item ds_id: {ds_id}; item_id: {e.item_id} not in any test, train, val table"
+                )
 
-        all_batches.append((tensor_net, tok_idx, unk_idx, batch_y))
+        if train:
+            train_batch_y = torch.tensor(
+                [model.inv_label_map[l] for l in [labels[i] for i in train]],
+                dtype=torch.long,
+                device=model.device,
+            )
+            tok_idx, unk_idx = traces_to_tensors(
+                [item.trace for item in [items[i] for i in train]],
+                tensor_net.labels,
+                model.device,
+                model.num_unk_buckets,
+            )
+            train_batches.append((tensor_net, tok_idx, unk_idx, train_batch_y))
+
+        if test:
+            test_batch_y = torch.tensor(
+                [model.inv_label_map[l] for l in [labels[i] for i in test]],
+                dtype=torch.long,
+                device=model.device,
+            )
+            tok_idx, unk_idx = traces_to_tensors(
+                [item.trace for item in [items[i] for i in test]],
+                tensor_net.labels,
+                model.device,
+                model.num_unk_buckets,
+            )
+            test_batches.append((tensor_net, tok_idx, unk_idx, test_batch_y))
+
+        if val:
+            val_batch_y = torch.tensor(
+                [model.inv_label_map[l] for l in [labels[i] for i in val]],
+                dtype=torch.long,
+                device=model.device,
+            )
+            tok_idx, unk_idx = traces_to_tensors(
+                [item.trace for item in [items[i] for i in val]],
+                tensor_net.labels,
+                model.device,
+                model.num_unk_buckets,
+            )
+            val_batches.append((tensor_net, tok_idx, unk_idx, val_batch_y))
 
     gc.collect()
 
-    return all_batches
+    return train_batches, test_batches, val_batches
+
+
+def get_tables(
+    cache_path: Path, uuid: str
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    train_tables, test_tables, val_tables = find_existing_tables(
+        cache_path, selection=[uuid]
+    )
+    return train_tables[uuid], test_tables[uuid], val_tables[uuid]
 
 
 def train():
@@ -346,9 +412,10 @@ def train():
     print(f"Using device: {device}")
 
     config_path = "./configs/default.yaml"
+    cache_path = "cache/.runs"
 
     DATASETS = {
-        # 'ed445cdd-27d5-4d77-a1f7-59fe7360cfbe': ['BPIC15_3.xes'],
+        'ed445cdd-27d5-4d77-a1f7-59fe7360cfbe': ['BPIC15_3.xes'],
         '679b11cf-47cd-459e-a6de-9ca614e25985': ['BPIC15_4.xes'],
         '3301445f-95e8-4ff0-98a4-901f1f204972': ['BPI%20Challenge%202018.xes'],
         '3926db30-f712-4394-aebc-75976070e91f': ['BPI_Challenge_2012.xes'],
@@ -368,75 +435,93 @@ def train():
             'InternationalDeclarations.xes'
         ],
         'fb84cf2d-166f-4de2-87be-62ee317077e5': ['PrepaidTravelCost.xes'],
-        # '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
+        '12683249': ['Road_Traffic_Fine_Management_Process.xes'],
         '33632f3c-5c48-40cf-8d8f-2db57f5a6ce7': [
             'Sepsis%20Cases%20-%20Event%20Log.xes'
         ],
         "synthetic": ["synthetic"],
     }
     # 3. Model Initialization
-    model = SpectralModel(
-        d_model=512,
-        d_trace=512,
-        hidden_dim=512,
-        mlp_hidden_dim=1536,
+    model = GNNTransformer(
+        d_model=768,
+        d_trace=768,
+        hidden_dim=768,
+        mlp_hidden_dim=768 * 2,
         n_classes=6,
-        num_heads=4,
-        n_layers=6,
+        num_heads=6,
+        n_layers=4,
+        n_gnn_layers=10,
         n_self_attn=2,
         dropout=0.1,
-        pretraining=False,  # Important!
+        pretraining=False,
     ).to(device)
 
+    # model.load_state_dict(torch.load(open("transformer_model.pth", 'rb')))
+
     run_datasets = []
-    for dataset_uuid, files in list(DATASETS.items()):
-        if dataset_uuid.endswith("synthetic"):
-            run_dataset = get_synthetic_dataset(
-                Path("cache/.runs"),
-                seed=SEED,
-                num_models=200,
-                num_traces=32,
-                min_depth=2,
-                max_depth=3,
-            )
-        else:
-            run_dataset = get_natural_dataset(
-                str(Path("data") / dataset_uuid / files[0]),
-                config_path,
-                "cache/.runs",
-                seed=SEED,
-                skip_init=True,
-            )
-        run_datasets.append(run_dataset)
+    if (
+        Path("cache/train_batches.pkl").exists()
+        and Path("cache/test_batches.pkl").exists()
+        and Path("cache/val_batches.pkl").exists()
+    ):
+        train_batches, test_batches, val_batches = (
+            pickle.load(open(Path("cache/train_batches.pkl"), 'rb')),
+            pickle.load(open(Path("cache/test_batches.pkl"), 'rb')),
+            pickle.load(open(Path("cache/val_batches.pkl"), 'rb')),
+        )
+    else:
+        train_tables, test_tables, val_tables = {}, {}, {}
+        for dataset_uuid, files in list(DATASETS.items()):
+            if dataset_uuid.endswith("synthetic"):
+                run_dataset = get_synthetic_dataset(
+                    Path(cache_path),
+                    seed=SEED,
+                    num_models=200,
+                    num_traces=32,
+                    min_depth=2,
+                    max_depth=3,
+                )
 
-    label_dataset = LabelDataset(run_datasets)
-    print(f"Label distribution: {label_dataset.df["algo"].value_counts()}")
-    batches = get_batches(label_dataset, model, device)
-    batches, stats = rebalance_label_distribution(
-        batches, mode="oversample", target="max", seed=SEED
-    )
+            else:
+                run_dataset = get_natural_dataset(
+                    str(Path("data") / dataset_uuid / files[0]),
+                    config_path,
+                    cache_path,
+                    seed=SEED,
+                    skip_init=True,
+                )
 
-    random.shuffle(batches)
-    split = [int(q * len(batches)) for q in [0.8, 0.1, 0.1]]
-    train_batches, test_batches, val_batches = (
-        batches[: split[0]],
-        batches[split[0] : split[0] + split[1]],
-        batches[split[0] + split[1] :],
-    )
+            train, test, val = get_tables(Path(cache_path), dataset_uuid)
+            train_tables[dataset_uuid] = train
+            test_tables[dataset_uuid] = test
+            val_tables[dataset_uuid] = val
 
-    aligners = label_dataset.labels
-    print(f"Aligner classes: {aligners}")
+            run_datasets.append(run_dataset)
+
+        label_dataset = LabelDataset(run_datasets)
+        print(f"Label distribution: {label_dataset.df["algo"].value_counts()}")
+
+        train_batches, test_batches, val_batches = get_batches(
+            label_dataset, train_tables, test_tables, val_tables, model, device
+        )
+        train_batches, stats = rebalance_label_distribution(
+            train_batches, mode="oversample", target="max", seed=SEED
+        )
+
+        pickle.dump(train_batches, open("cache/train_batches.pkl", "wb"))
+        print("wrote batches to: cache/train_batches.pkl")
+        pickle.dump(test_batches, open("cache/test_batches.pkl", "wb"))
+        print("wrote batches to: cache/test_batches.pkl")
+        pickle.dump(val_batches, open("cache/val_batches.pkl", "wb"))
+        print("wrote batches to: cache/val_batches.pkl")
+
     print(
         f"Num params: {sum([p.numel() for p in model.parameters() if p.requires_grad])}"
     )
 
-    # model.load_state_dict(
-    #     torch.load("outputs/runs/pretrain_20260117_144928/spectral_model_pretrained_epoch2.pth", map_location=device), strict=False
-    # )
-
     optimizer = optim.AdamW(model.parameters(), lr=2e-5)
     lr_schedule = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=len(train_batches) * EPOCHS
+        optimizer, T_max=len(train_batches) * EPOCHS, eta_min=3e-7
     )
 
     criterion = nn.CrossEntropyLoss(reduction="mean")
@@ -468,6 +553,17 @@ def train():
                     mask_prob=0.0,
                 )
                 trace_mask = tok_idx == -1
+                if tok_idx.shape[-1] <= 0:
+                    logging.warning("empty trace in train batch. skipping.")
+                    logging.warning(
+                        f"trace_embedding.shape: {trace_embedding.shape}"
+                    )
+                    logging.warning(f"model_basis: {model_basis}")
+                    logging.warning(f"tensornet: {tensor_net}")
+                    logging.warning(f"tok_idx: {tok_idx}")
+                    logging.warning(f"batch_y: {batch_y}")
+                    continue
+
                 trace_mask[:, 0] = False
                 # Expand model basis for batch
                 model_basis = model_basis.repeat(

@@ -88,11 +88,15 @@ class HeuristicSpecificMetrics:
     false_positives: int  # Predicted H AND H is NOT in near-optimal set
     false_negatives: int  # Predicted NOT H AND H is in near-optimal set
     true_negatives: int  # Predicted NOT H AND H is NOT in near-optimal set
-    precision: float  # TP / (TP + FP) - When we predict H, how often is it correct?
+    precision: (
+        float  # TP / (TP + FP) - When we predict H, how often is it correct?
+    )
     recall: float  # TP / (TP + FN) - When H is optimal, how often do we predict it?
     accuracy: float  # (TP + TN) / (TP + FP + FN + TN) - Overall correctness
     f1_score: float  # 2 * (precision * recall) / (precision + recall)
-    total_optimal_samples: int  # TP + FN - Samples where this heuristic is optimal
+    total_optimal_samples: (
+        int  # TP + FN - Samples where this heuristic is optimal
+    )
 
 
 @dataclass
@@ -111,7 +115,9 @@ class ToleranceLevelMetrics:
 
     threshold: float
     combination_metrics: Dict[Tuple[str, ...], CombinationMetrics]
-    per_heuristic_metrics: Dict[str, HeuristicSpecificMetrics]  # Binary metrics per heuristic
+    per_heuristic_metrics: Dict[
+        str, HeuristicSpecificMetrics
+    ]  # Binary metrics per heuristic
     overall_accuracy: float  # Prediction is in near-optimal set
     macro_accuracy: float  # Average accuracy across all combinations
     total_samples: int
@@ -187,7 +193,10 @@ class EvaluationMetrics:
 
             # Convert per-heuristic metrics to use aliases
             per_heuristic_dict = {}
-            for heuristic, metrics in level_metrics.per_heuristic_metrics.items():
+            for (
+                heuristic,
+                metrics,
+            ) in level_metrics.per_heuristic_metrics.items():
                 alias = get_heuristic_alias(heuristic)
                 per_heuristic_dict[alias] = {
                     'true_positives': metrics.true_positives,
@@ -370,12 +379,14 @@ class RecommenderEvaluator:
         classifier: ClassificationModel,
         dataset: Union[LabelDataset, TableLabelDataset],
         tolerance_thresholds: Optional[List[float]] = None,
+        mode_tag: Optional[str] = None,
     ):
         self.classifier = classifier
         self.tolerance_thresholds = (
             tolerance_thresholds or TOLERANCE_THRESHOLDS
         )
         self.dataset = dataset
+        self.mode = mode_tag
 
     def evaluate(
         self, batched: bool = True, print_summary: bool = True
@@ -392,7 +403,8 @@ class RecommenderEvaluator:
             Includes 'overall' key for combined metrics across all datasets.
         """
         is_table_dataset = isinstance(self.dataset, TableLabelDataset)
-        mode_str = "i.i.d." if is_table_dataset else "OOD"
+        inferred_mode = "iid" if is_table_dataset else "ood"
+        mode_str = self.mode if self.mode else inferred_mode
         logging.info(f"Starting {mode_str} evaluation...")
 
         dataset_data: Dict[str, DatasetEvaluationData] = defaultdict(
@@ -418,7 +430,9 @@ class RecommenderEvaluator:
                 traces = [item.trace for item in items]
 
                 if batched:
-                    predictions = self.classifier.predict_batched(model, traces)
+                    predictions = self.classifier.predict_batched(
+                        model, traces
+                    )
                 else:
                     predictions = [
                         self.classifier.predict_heuristic(
@@ -446,11 +460,16 @@ class RecommenderEvaluator:
                         )
                     }
                     durations = {
-                        algo: np.mean([
-                            p["duration"] if p["duration"] != float('inf')
-                            else 20.0
-                            for p in perf
-                        ])
+                        algo: np.mean(
+                            [
+                                (
+                                    p["duration"]
+                                    if p["duration"] != float('inf')
+                                    else 20.0
+                                )
+                                for p in perf
+                            ]
+                        )
                         for algo, perf in all_alignments.items()
                     }
 
@@ -506,8 +525,10 @@ class RecommenderEvaluator:
         # Calculate tolerance metrics
         tolerance_metrics = {}
         for threshold in self.tolerance_thresholds:
-            tolerance_metrics[threshold] = self._calculate_tolerance_level_metrics(
-                data.predictions, data.all_heuristic_times, threshold
+            tolerance_metrics[threshold] = (
+                self._calculate_tolerance_level_metrics(
+                    data.predictions, data.all_heuristic_times, threshold
+                )
             )
 
         # Time performance metrics
@@ -518,14 +539,19 @@ class RecommenderEvaluator:
         mean_worst = np.mean(data.worst_times)
 
         performance_ratio_alignment_only = (
-            mean_alignment_only / mean_optimal if mean_optimal > 0 else float('inf')
+            mean_alignment_only / mean_optimal
+            if mean_optimal > 0
+            else float('inf')
         )
         performance_ratio_with_pred = (
-            mean_alignment_with_pred / mean_optimal if mean_optimal > 0 else float('inf')
+            mean_alignment_with_pred / mean_optimal
+            if mean_optimal > 0
+            else float('inf')
         )
         time_savings = (
             (mean_worst - mean_alignment_only) / (mean_worst - mean_optimal)
-            if (mean_worst - mean_optimal) > 0 else 0.0
+            if (mean_worst - mean_optimal) > 0
+            else 0.0
         )
 
         # Per-heuristic timing statistics
@@ -554,7 +580,9 @@ class RecommenderEvaluator:
             heuristic_timings=heuristic_timings,
             feature_importance=feature_importance,
             mean_prediction_time=np.mean(data.prediction_times),
-            mean_feature_extraction_time=np.mean(data.feature_extraction_times),
+            mean_feature_extraction_time=np.mean(
+                data.feature_extraction_times
+            ),
             mean_classification_time=np.mean(data.classification_times),
         )
 
@@ -581,23 +609,26 @@ class RecommenderEvaluator:
         Returns:
             Dict mapping heuristic name to HeuristicSpecificMetrics
         """
-        heuristic_stats = defaultdict(lambda: {
-            'tp': 0,
-            'fp': 0,
-            'fn': 0,
-            'tn': 0
-        })
+        heuristic_stats = defaultdict(
+            lambda: {'tp': 0, 'fp': 0, 'fn': 0, 'tn': 0}
+        )
 
-        all_heuristics = set(all_heuristic_times[0].keys()) if all_heuristic_times else set()
+        all_heuristics = (
+            set(all_heuristic_times[0].keys())
+            if all_heuristic_times
+            else set()
+        )
 
         for pred, heuristic_times in zip(predictions, all_heuristic_times):
             # Get near-optimal set for this sample
-            near_optimal = get_near_optimal_heuristics(heuristic_times, threshold)
+            near_optimal = get_near_optimal_heuristics(
+                heuristic_times, threshold
+            )
 
             # For each heuristic, determine TP/FP/FN/TN
             for heuristic in all_heuristics:
-                predicted_h = (pred == heuristic)
-                optimal_h = (heuristic in near_optimal)
+                predicted_h = pred == heuristic
+                optimal_h = heuristic in near_optimal
 
                 if predicted_h and optimal_h:
                     heuristic_stats[heuristic]['tp'] += 1
@@ -623,10 +654,18 @@ class RecommenderEvaluator:
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
 
             # Accuracy: Overall correctness for this heuristic
-            accuracy = (tp + tn) / (tp + fp + fn + tn) if (tp + fp + fn + tn) > 0 else 0.0
+            accuracy = (
+                (tp + tn) / (tp + fp + fn + tn)
+                if (tp + fp + fn + tn) > 0
+                else 0.0
+            )
 
             # F1 Score
-            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+            f1 = (
+                2 * (precision * recall) / (precision + recall)
+                if (precision + recall) > 0
+                else 0.0
+            )
 
             per_heuristic_metrics[heuristic] = HeuristicSpecificMetrics(
                 heuristic_name=heuristic,
@@ -735,7 +774,8 @@ class RecommenderEvaluator:
         Returns:
             DataFrame with comparison metrics
         """
-        results = []
+        result_table = []
+        results = {self.classifier.__class__.__name__: main_result}
 
         # Extract 'overall' metrics
         main_metrics = main_result['overall']
@@ -758,7 +798,7 @@ class RecommenderEvaluator:
             result_row[f'macro_accuracy_{threshold:.0%}'] = (
                 level_metrics.macro_accuracy
             )
-        results.append(result_row)
+        result_table.append(result_row)
 
         # Evaluate baselines
         for baseline in baselines:
@@ -766,9 +806,10 @@ class RecommenderEvaluator:
                 f"\nEvaluating baseline: {baseline.__class__.__name__}"
             )
             evaluator = RecommenderEvaluator(
-                baseline, self.dataset, self.tolerance_thresholds
+                baseline, self.dataset, self.tolerance_thresholds, self.mode
             )
             baseline_result = evaluator.evaluate()
+            results[evaluator.classifier.__class__.__name__] = baseline_result
             # Extract 'overall' metrics
             baseline_metrics = baseline_result['overall']
 
@@ -793,11 +834,11 @@ class RecommenderEvaluator:
                 result_row[f'macro_accuracy_{threshold:.0%}'] = (
                     level_metrics.macro_accuracy
                 )
-            results.append(result_row)
+            result_table.append(result_row)
 
-        df = pd.DataFrame(results)
+        df = pd.DataFrame(result_table)
 
-        return df
+        return df, results
 
     @staticmethod
     def save_results(
@@ -851,4 +892,6 @@ class RecommenderEvaluator:
                 RecommenderEvaluator._convert_to_serializable(item)
                 for item in obj
             ]
+        elif isinstance(obj, EvaluationMetrics):
+            return RecommenderEvaluator._convert_to_serializable(obj.to_dict())
         return obj
