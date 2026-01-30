@@ -9,16 +9,11 @@ pm4py is a fork -> submodule so we can integrate right here if we want to.
 
 ### Setup
 
-Initialize submodules if you did not clone --recursive.
-```
-git submodule update --init --recursive
-```
-
 Run setup.sh.
 ```
 ./setup.sh
 ```
-This should set up a venv for you.
+This should set up a venv for you and correctly install pm4py as an editable module.
 
 If .venv is not already active:
 ```
@@ -27,10 +22,18 @@ source .venv/bin/activate.[shell] # (e.g. activate.fish) if your shell requires 
 source .venv/Scripts/activate # Windows
 ```
 
+### Event-log data
+
+There's a helper in `dataloaders` that allows bulk downloading of many real world event logs from `https://data.4tu.nl`.
+To download the datasets listed in `dataloaders/sources.yaml` execute `python -m dataloaders.pull`.
+For more information on data refer to `dataloaders/README.md`.
+
+
 #### Caches
 
 If you want to download prefilled dataset caches:
-Setup rclone on your machine
+
+It's recommended to setup rclone on your machine
 ```
 ./scripts/setup_rclone.sh
 ```
@@ -59,57 +62,37 @@ Then you can download the cache contents
 SYNCHS with the drive... it makes the remote look EXACTLY like your local folder.
 If you expanded runs or only added new files to the folder this is fine. Just be aware that remote will mirror your local EXACTLY.
 
----
 
-### Read problem description [here](documents/Background%20Info.md)
-### **Step-by-Step Plan to Solve the Problem**
+#### Running Experiments
 
-The goal of our project is to build an intelligent system that can automatically select the best heuristic for a given alignment problem from a set of picked heuristics to minimize the total computation time. We will frame this as a **supervised machine learning problem**: given a process model and a trace, our system will predict which available heuristic will be the fastest.
+The central script that runs the evaluation pipeline end-to-end is `scripts/evaluate_classifier_e2e.py`.
+**IMPORTANT**:
+If caches and tables are not populated, the script will begin running alignments on your machine to gather all data defined by the pipeline configuration in `configs/default.yaml`.
 
----
-To achieve this, we follow the structured plan:
+__Note__:
+Even with populated caches the pipeline will check for data completeness/integrity. This step can take several minutes (between 20 - 40min depending on the amount of evaluation data).
+It is highly recommended to use precomputed tables for training where applicable (XGBoost + Baselines) with `--train-tables`.
 
-**Step 1: Implement Heuristic Functions**
+**To run in-distribution testing:**
+```
+python -m scripts.evaluate_classifier_e2e --eval-mode iid --train-tables
+```
 
+**To run out-of-distribution testing:**
+```
+python -m scripts.evaluate_classifier_e2e --eval-mode ood --train-tables
+```
 
-Our first task is to implement the set of candidate heuristics that our recommender will choose from. This will be done within the **PM4Py** Python library, see links: [GitHub](https://github.com/process-intelligence-solutions/pm4py), [Webpage](https://processintelligence.solutions/pm4py), [Conformance Source Code](https://pm4py-source.readthedocs.io/en/latest/_modules/pm4py/conformance.html). 
-<br>We should implement multiple distinct approaches:
-*   **A Simple Baseline Heuristic:** A fast-to-compute but less accurate heuristic that can serve as a baseline.
-*   **An ILP-based Heuristic:** A highly accurate but computationally expensive heuristic.
-*  **More?**
+If you have a CUDA capable device and a trained Transformer Model, ensure determinism by setting the appropriate CUBLAS environment variable:
+```
+CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m scripts.evaluate_classifier_e2e <options>
+```
 
----
-
-**Step 2: Generate Training Data**
-
-To train a machine learning model, we need a large dataset of labeled examples. We will generate this dataset by running a series of experiments:
-1.  For a large number of different process models and event traces:
-2.  We will compute the optimal alignment for each model-trace pair **multiple times**, once with each of our implemented heuristics.
-3.  For each run, we will precisely measure the total execution time.
-4.  The heuristic that resulted in the shortest time will be designated as the "correct" golden label for that specific model-trace pair.
-5.  We will then extract descriptive features from the model and trace (this is part of Step 3).
-6.  Finally, we will store the feature vector and its corresponding label, creating one data point for our training set.
-
----
-
-**Step 3: Learn a Recommendation Model**
-
-
-With the labeled dataset from Step 2, we can train a machine learning classifier. This involves two key activities:
-*   **Feature Engineering:** We need to define a set of features that can describe the complexity of an alignment problem. These features will be the input for our model. Examples include:
-    *   *Model Features:* Number of places and transitions in the Petri net, measures of concurrency (parallel paths), measures of choice, etc.
-    *   *Trace Features:* Length of the trace, number of unique activities, etc.
-*   **Model Training:** We will use the engineered features and the "fastest heuristic" labels to train a classification model (e.g., a Decision Tree, Random Forest, or Gradient Boosting model). The model will learn the patterns that connect the features of a problem to the best-performing heuristic.
-
----
-
-**Step 4: Experiments and Evaluation**
-The final step is to  evaluate our solution to prove its effectiveness. We will split our generated data into a training set and a separate test set. On the test set, we will compare the performance of three scenarios:
-1.  **Baseline A:** The average time taken when *always* using the simple heuristic.
-2.  **Baseline B:** The average time taken when *always* using the ILP-based heuristic.
-3.  **Our Recommender:** The average time taken when using the heuristic predicted by our trained model for each instance.
-
----
-
-**Step 5: Documentation: Write a report**
-
+##### DL-Model training
+To train the GNN-Transformer model run:
+```
+CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m experiments.model.train_transformer_model
+````
+If you don't care about determinism you can theoretically turn it off IF you have precalculated training batches.
+We provide precalculated normalized batches of the exact training split produced for the other models in `/cache`, however these are not automatically updated if data pipeline configurations change. In that case: delete the batch cache -> run the script as
+above and the batches will be reinstantiated as cache for retraining/experimentation purposes.
