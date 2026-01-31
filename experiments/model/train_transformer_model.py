@@ -456,8 +456,6 @@ def train():
         pretraining=False,
     ).to(device)
 
-    # model.load_state_dict(torch.load(open("transformer_model.pth", 'rb')))
-
     run_datasets = []
     if (
         Path("cache/train_batches.pkl").exists()
@@ -620,7 +618,7 @@ def train():
             f"Epoch {epoch + 1}: Loss={avg_loss:.4f}, Acc={accuracy:.4f}, Val Loss={val_loss:.4f}, Val Acc={val_acc:.4f}"
         )
 
-    torch.save(model.state_dict(), "transformer_model.pth")
+    torch.save(model.state_dict(), "cache/models/transformer_model.pth")
     print("Training complete.")
 
 

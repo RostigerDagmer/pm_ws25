@@ -1,11 +1,4 @@
-# Project Repository for trace alignment research on Product Petrinets
-
-### Repo structure
-
-Experiments (scripts) go into /experiments.
-Notebooks go into /notebooks.
-Documents go into /documents. Like the report (/report) and management stuff (anything that goes into a markdown file but not into a notebook).
-pm4py is a fork -> submodule so we can integrate right here if we want to.
+# Project Repository "Recommender System For Heuristics in A*-based Alignment Computation"
 
 ### Setup
 
@@ -31,7 +24,7 @@ For more information on data refer to `dataloaders/README.md`.
 
 #### Caches
 
-If you want to download prefilled dataset caches:
+If you want to download prefilled alignment dataset caches:
 
 It's recommended to setup rclone on your machine
 ```
@@ -70,7 +63,7 @@ The central script that runs the evaluation pipeline end-to-end is `scripts/eval
 If caches and tables are not populated, the script will begin running alignments on your machine to gather all data defined by the pipeline configuration in `configs/default.yaml`.
 
 __Note__:
-Even with populated caches the pipeline will check for data completeness/integrity. This step can take several minutes (between 20 - 40min depending on the amount of evaluation data).
+Even with populated caches the pipeline will check for data completeness/integrity. This step can take several minutes (between 20 - 40min depending on the amount of evaluation data) and consume quite a bit of RAM.
 It is highly recommended to use precomputed tables for training where applicable (XGBoost + Baselines) with `--train-tables`.
 
 **To run in-distribution testing:**
@@ -94,5 +87,8 @@ To train the GNN-Transformer model run:
 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m experiments.model.train_transformer_model
 ````
 If you don't care about determinism you can theoretically turn it off IF you have precalculated training batches.
-We provide precalculated normalized batches of the exact training split produced for the other models in `/cache`, however these are not automatically updated if data pipeline configurations change. In that case: delete the batch cache -> run the script as
-above and the batches will be reinstantiated as cache for retraining/experimentation purposes.
+We provide precalculated class balanced batches of the exact training split produced for the other models in `/cache`, however these are not automatically updated if data pipeline configurations change. In that case: delete the batch cache -> run the script as above and the batches will be reinstantiated as cache files for retraining/experimentation purposes.
+
+__Note__:
+DL-Model training is protected against CUDA out-of-memory errors, of which a hand full can occur during training even on higher end hardware, note however that this makes training outcome (if only slightly) hardware dependent.
+A pretrained model 

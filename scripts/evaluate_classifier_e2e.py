@@ -180,7 +180,7 @@ if __name__ == "__main__":
         force_retrain=True,
     )
 
-    has_transformer_model = Path("transformer_model.pth").exists()
+    has_transformer_model = Path("cache/models/transformer_model.pth").exists()
 
     if has_transformer_model:
         device = torch.device(
@@ -202,7 +202,9 @@ if __name__ == "__main__":
             pretraining=False,
         ).to(device)
 
-        transformer_model.load_state_dict(torch.load("transformer_model.pth"))
+        transformer_model.load_state_dict(
+            torch.load("cache/models/transformer_model.pth")
+        )
         transformer_model.eval()
 
     # Train baselines
