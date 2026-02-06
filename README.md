@@ -15,6 +15,18 @@ source .venv/bin/activate.[shell] # (e.g. activate.fish) if your shell requires 
 source .venv/Scripts/activate # Windows
 ```
 
+For CUDA capable machines manual creation of the environment is currently required (if you don't care about CUDA you can use the above):
+
+```
+python -m venv .venv
+source .venv/bin/activate.sh
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+pip install -r requirements.txt
+pip install -e ./pm4py --config-settings editable_mode=strict
+pip install black flake8 pre-commit
+precommit install
+```
+
 ### Event-log data
 
 There's a helper in `dataloaders` that allows bulk downloading of many real world event logs from `https://data.4tu.nl`.
@@ -81,6 +93,18 @@ If you have a CUDA capable device and a trained Transformer Model, ensure determ
 CUBLAS_WORKSPACE_CONFIG=:4096:8 python -m scripts.evaluate_classifier_e2e <options>
 ```
 
+Evaluation creates an HTML report and artifacts in outputs/evaluate_classifier_{timestamp}
+
+**To generate plots and tables from evaluations:**
+```
+python -m scripts.create_plots --eval-dir ouputs/eval_classifier_{timestamp}
+```
+or
+```
+python -m scripts.create_tabels --eval-dir ouputs/eval_classifier_{timestamp}
+```
+resulting tables and plots are added to the specified --eval-dir path.
+
 ##### DL-Model training
 To train the GNN-Transformer model run:
 ```
@@ -91,4 +115,4 @@ We provide precalculated class balanced batches of the exact training split prod
 
 __Note__:
 DL-Model training is protected against CUDA out-of-memory errors, of which a hand full can occur during training even on higher end hardware, note however that this makes training outcome (if only slightly) hardware dependent.
-A pretrained model 
+A pretrained model is provided in cache/models.
